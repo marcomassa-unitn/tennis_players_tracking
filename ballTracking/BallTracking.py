@@ -1,151 +1,100 @@
 ﻿import cv2
 import numpy as np
+import pandas as pd
+from ultralytics import YOLO
 
 
 class BallTracker:
-    def __init__(self, video_path):
-        self.cap = cv2.VideoCapture(video_path)
-        self.lower_green = np.array([15, 15, 60])
-        self.upper_green = np.array([95, 255, 255])
+    def __init__(self, model_path):
+        self.model = YOLO(model_path)
 
-    def find_candidates(self, frame, gray, prev_gray):
-        frame_diff = cv2.absdiff(prev_gray, gray)
-        _, motion = cv2.threshold(frame_diff, 15, 255, cv2.THRESH_BINARY)
-        motion = cv2.morphologyEx(motion, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        motion = cv2.dilate(motion, np.ones((3, 3), np.uint8), iterations=1)
+    def _has_motion(self, prev_gray, curr_gray, x1, y1, x2, y2, threshold=0.05):
+        """Returns True if at least `threshold` fraction of pixels in the box moved."""
+        motion = cv2.absdiff(prev_gray[y1:y2, x1:x2], curr_gray[y1:y2, x1:x2])
+        _, binary = cv2.threshold(motion, 15, 255, cv2.THRESH_BINARY)
+        total = binary.size
+        if total == 0:
+            return False
+        return (binary.sum() / 255) / total >= threshold
 
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        green_mask = cv2.inRange(hsv, self.lower_green, self.upper_green)
-
-        combined = cv2.bitwise_and(motion, green_mask)
-
-        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        candidates = []
-        for c in contours:
-            area = cv2.contourArea(c)
-            if area < 5 or area > 150:
+    def detect_frame(self, frame, prev_gray=None):
+        """Returns {1: [x1,y1,x2,y2]} for the highest-confidence detection with motion, or {}."""
+        curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        results = self.model.predict(frame, conf=0.65, verbose=False)[0]
+        for idx in results.boxes.conf.argsort(descending=True):
+            x1, y1, x2, y2 = map(int, results.boxes.xyxy[idx])
+            if prev_gray is not None and not self._has_motion(prev_gray, curr_gray, x1, y1, x2, y2):
                 continue
-            x, y, w, h = cv2.boundingRect(c)
-            ratio = w / h if h > 0 else 0
-            if not (0.5 < ratio < 2.0):
-                continue
-            perimeter = cv2.arcLength(c, True)
-            if perimeter == 0:
-                continue
-            circularity = (4 * np.pi * area) / (perimeter ** 2)
-            if circularity < 0.6:
-                continue
-            cx, cy = x + w // 2, y + h // 2
-            candidates.append((area, cx, cy, x, y, w, h))
-        return candidates, motion, green_mask, combined
+            return {1: [x1, y1, x2, y2]}, curr_gray
+        return {}, curr_gray
 
-    def detect(self, frame, gray, prev_gray):
-        if prev_gray is None:
-            return None, None, None, None
+    def detect_frames(self, frames):
+        """Returns list of per-frame detection dicts."""
+        ball_positions = []
+        prev_gray = None
+        for frame in frames:
+            detection, prev_gray = self.detect_frame(frame, prev_gray)
+            ball_positions.append(detection)
+        return ball_positions
 
-        candidates, motion, green_mask, combined = self.find_candidates(frame, gray, prev_gray)
+    def interpolate_ball_positions(self, ball_positions):
+        """Fills gaps with linear interpolation + backward fill."""
+        positions_list = [p.get(1, []) for p in ball_positions]
+        df = pd.DataFrame(positions_list, columns=["x1", "y1", "x2", "y2"])
+        df = df.interpolate()
+        df = df.bfill()
+        return [{1: row} for row in df.to_numpy().tolist()]
 
-        if not candidates:
-            return None, motion, green_mask, combined
+    def draw_bboxes(self, frames, ball_positions):
+        """Draws ball bounding boxes on copies of the input frames."""
+        output = []
+        for frame, pos in zip(frames, ball_positions):
+            out = frame.copy()
+            bbox = pos.get(1)
+            if bbox and not np.any(np.isnan(bbox)):
+                x1, y1, x2, y2 = map(int, bbox)
+                cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(out, "Ball", (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            output.append(out)
+        return output
 
-        best = min(candidates, key=lambda c: c[0])
-        _, _, _, x, y, w, h = best
-        return (x, y, w, h), motion, green_mask, combined
-
-    def run(self):
-        if not self.cap.isOpened():
-            print("Cannot open video")
+    def run(self, video_path, output_path=None):
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print("Cannot open video:", video_path)
             return
 
-        frame_ms = 30
-        prev_gray = None
-        frame_num = 0
-
+        frames = []
         while True:
-            t0 = cv2.getTickCount()
-            ret, frame = self.cap.read()
+            ret, frame = cap.read()
             if not ret:
                 break
+            frames.append(frame)
+        cap.release()
 
-            frame_num += 1
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            bbox, motion, green_mask, combined = self.detect(frame, gray, prev_gray)
+        print(f"Detecting ball in {len(frames)} frames...")
+        ball_positions = self.detect_frames(frames)
+        ball_positions = self.interpolate_ball_positions(ball_positions)
+        annotated = self.draw_bboxes(frames, ball_positions)
 
-            debug_frame = frame.copy()
+        if output_path:
+            h, w = annotated[0].shape[:2]
+            writer = cv2.VideoWriter(
+                output_path, cv2.VideoWriter_fourcc(*"mp4v"), 30, (w, h)
+            )
+            for f in annotated:
+                writer.write(f)
+            writer.release()
+            print(f"Saved to {output_path}")
 
-            if bbox is not None:
-                x, y, w, h = bbox
-                cx, cy = x + w // 2, y + h // 2
-                half = max(w, h) // 2 + 4
-                cv2.rectangle(debug_frame, (cx - half, cy - half), (cx + half, cy + half), (0, 255, 0), 2)
-                status = f"DETECTED ({cx},{cy})"
-                status_color = (0, 255, 0)
-            else:
-                status = "NOT DETECTED"
-                status_color = (0, 0, 255)
-
-            # Disegna tutti i contorni in combined: giallo=passa i filtri, rosso=scartato
-            if combined is not None:
-                all_contours, _ = cv2.findContours(
-                    combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                for c in all_contours:
-                    area = cv2.contourArea(c)
-                    x2, y2, w2, h2 = cv2.boundingRect(c)
-                    ratio = w2 / h2 if h2 > 0 else 0
-                    perimeter = cv2.arcLength(c, True)
-                    circ = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
-                    passed = (5 <= area <= 150 and 0.5 < ratio < 2.0 and circ >= 0.6)
-                    box_color = (0, 255, 255) if passed else (0, 0, 255)
-                    cv2.rectangle(debug_frame, (x2, y2), (x2 + w2, y2 + h2), box_color, 1)
-                    cv2.putText(debug_frame, f"a={int(area)} c={circ:.2f}",
-                                (x2, max(y2 - 4, 10)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, box_color, 1)
-
-            cv2.putText(debug_frame, f"Frame {frame_num} | {status}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-
-            # Griglia 2x2: original+detection | motion | color | combined
-            # Tutte ridimensionate a 480x270 per formare una finestra 960x540
-            tile_w, tile_h = 960, 540
-
-            def to_bgr(img):
-                return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if len(img.shape) == 2 else img
-
-            def tile(img):
-                return cv2.resize(img, (tile_w // 2, tile_h // 2))
-
-            top = np.hstack([
-                tile(debug_frame),
-                tile(to_bgr(motion) if motion is not None else np.zeros_like(debug_frame)),
-            ])
-            bottom = np.hstack([
-                tile(to_bgr(green_mask) if green_mask is not None else np.zeros_like(debug_frame)),
-                tile(to_bgr(combined) if combined is not None else np.zeros_like(debug_frame)),
-            ])
-            grid = np.vstack([top, bottom])
-
-            # Etichette sui 4 quadranti
-            for label, pos in [
-                ("Original + detection", (10, 20)),
-                ("Motion mask",          (tile_w // 2 + 10, 20)),
-                ("Color mask",           (10, tile_h // 2 + 20)),
-                ("Combined (AND)",       (tile_w // 2 + 10, tile_h // 2 + 20)),
-            ]:
-                cv2.putText(grid, label, pos,
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-            cv2.imshow("Ball Tracker - Debug", grid)
-
-            prev_gray = gray
-            elapsed_ms = (cv2.getTickCount() - t0) / cv2.getTickFrequency() * 1000
-            delay = max(1, int(frame_ms - elapsed_ms))
-            if cv2.waitKey(delay) & 0xFF == ord("q"):
+        for frame in annotated:
+            cv2.imshow("Ball Tracker", frame)
+            if cv2.waitKey(30) & 0xFF == ord("q"):
                 break
-
-        self.cap.release()
         cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    tracker = BallTracker("data/input_video2.mp4")
-    tracker.run()
+    tracker = BallTracker("models/ball_tracker.pt")
+    tracker.run("data/input_video3.mp4", output_path="outputs/ball_tracking_output3.mp4")
