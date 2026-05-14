@@ -35,6 +35,9 @@ htmlcov/
 Thumbs.db
 
 # Output files
-output/
+outputs/
 results/
 *.log
+
+# Models
+models/
