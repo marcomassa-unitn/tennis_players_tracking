@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-VIDEO_PATH = "data/input_video.mp4"
+VIDEO_PATH = "data/input_video4.mp4"
 
 # ── White HSV bounds ──────────────────────────────────────────────────────────
 LOWER_WHITE = np.array([0,   0, 180], dtype=np.uint8)
@@ -20,6 +20,9 @@ CLUSTER_RADIUS  = 50       # merge intersection dots closer than this (pixels)
 DOT_RADIUS      = 10       # display radius of the red dot
 
 # ── Region-of-interest (ROI) ──────────────────────────────────────────────────
+# Broadcasts often have advertising banners at the top and scoreboards/overlays
+# in the corners. Masking these out before Hough prevents spurious white blobs
+# from generating false line segments that intersect outside the court.
 ROI_TOP_FRACTION    = 0.20  # ignore top 20 % of frame (banner strip)
 ROI_BOTTOM_FRACTION = 0.95  # ignore below 95 % of frame (score overlay)
 ROI_LEFT_FRACTION   = 0.02  # ignore leftmost 2 % (frame edge artifacts)
@@ -74,8 +77,8 @@ cap = cv2.VideoCapture(VIDEO_PATH)
 if not cap.isOpened():
     raise RuntimeError(f"Cannot open video: {VIDEO_PATH}")
 
-# Read just the first frame to process the dots
 ret, frame = cap.read()
+cap.release()
 if not ret:
     raise RuntimeError("Failed to read the first frame.")
 
@@ -85,22 +88,22 @@ h, w = frame.shape[:2]
 hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 mask = cv2.inRange(hsv, LOWER_WHITE, UPPER_WHITE)
 
-# 2. Apply ROI
+# 2. Apply ROI: zero out banner / overlay regions before any line detection
 roi_top    = int(h * ROI_TOP_FRACTION)
 roi_bottom = int(h * ROI_BOTTOM_FRACTION)
 roi_left   = int(w * ROI_LEFT_FRACTION)
 roi_right  = int(w * ROI_RIGHT_FRACTION)
-mask[:roi_top,    :]    = 0   
-mask[roi_bottom:, :]    = 0   
-mask[:, :roi_left]      = 0   
-mask[:, roi_right:]     = 0   
+mask[:roi_top,    :]    = 0   # top banner strip
+mask[roi_bottom:, :]    = 0   # bottom overlay strip
+mask[:, :roi_left]      = 0   # left edge
+mask[:, roi_right:]     = 0   # right edge
 
-# 3. Clean the mask
+# 3. Clean the mask: close small holes, then thin edges with Canny
 kernel       = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 mask_clean   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 edges        = cv2.Canny(mask_clean, 50, 150)
 
-# 4. Detect line segments
+# 4. Detect line segments via probabilistic Hough
 raw_lines = cv2.HoughLinesP(
     edges,
     rho       = HOUGH_RHO,
@@ -117,13 +120,14 @@ if raw_lines is None:
     cv2.destroyAllWindows()
     raise SystemExit
 
-segments = raw_lines[:, 0, :]   
+segments = raw_lines[:, 0, :]   # shape (N, 4)
 
-# 5. Pairwise intersections
+# 5. Pairwise intersections: keep only those inside the ROI and non-parallel
 raw_intersections = []
 for i in range(len(segments)):
     for j in range(i + 1, len(segments)):
         angle = angle_between(segments[i], segments[j])
+        # skip near-parallel (angle ≈ 0°) and near-antiparallel (angle ≈ 180°)
         if angle < MIN_ANGLE_DEG or angle > (180 - MIN_ANGLE_DEG):
             continue
         pt = line_intersection(segments[i], segments[j])
@@ -133,35 +137,16 @@ for i in range(len(segments)):
         if roi_left <= x < roi_right and roi_top <= y < roi_bottom:
             raw_intersections.append((x, y))
 
-# 6. Cluster nearby intersections
+# 6. Cluster nearby intersections to get one dot per court corner/edge point
 dots = cluster_points(raw_intersections, CLUSTER_RADIUS)
+
+# 7. Draw on original frame
+output = frame.copy()
+for (x, y) in dots:
+    cv2.circle(output, (x, y), DOT_RADIUS, (0, 0, 255), -1)   # filled red dot
+
 print(f"Detected {len(segments)} line segments → {len(dots)} intersection points.")
 
-# 7. Play the whole video drawing the static dots
-# Get the native FPS of the video and calculate the necessary delay
-fps = cap.get(cv2.CAP_PROP_FPS)
-if fps == 0 or np.isnan(fps):
-    fps = 30  # Fallback just in case the metadata is missing
-delay = int(500 / fps)
-
-# Rewind the video back to the first frame
-cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-while True:
-    ret, current_frame = cap.read()
-    if not ret:
-        break # End of video reached
-
-    # Draw the static dots calculated from the first frame
-    for (x, y) in dots:
-        cv2.circle(current_frame, (x, y), DOT_RADIUS, (0, 0, 255), -1)   
-
-    cv2.imshow("Tennis Court - Video Playback", current_frame)
-    
-    # Wait the exact amount of milliseconds required for this video's frame rate
-    if cv2.waitKey(delay) & 0xFF == ord('q'):
-        break
-
-# Clean up
-cap.release()
+cv2.imshow("White Mask — Step 1  |  intersection dots", output)
+cv2.waitKey(0)
 cv2.destroyAllWindows()
