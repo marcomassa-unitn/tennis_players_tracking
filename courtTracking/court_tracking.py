@@ -4,7 +4,9 @@ import os
 import cv2
 import numpy as np
 
-VIDEO_PATH = "data/input_video.mp4"
+# ── Input video ───────────────────────────────────────────────────────────────
+VIDEO_PATH  = "data/input_video.mp4"   # <-- change this to point to your video
+
 _video_stem = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
 CSV_PATH    = os.path.join("outputs", "court_coordinates", f"{_video_stem}_court.csv")
 
