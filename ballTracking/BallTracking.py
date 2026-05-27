@@ -1,4 +1,5 @@
-﻿import cv2
+﻿import csv
+import cv2
 import numpy as np
 import pandas as pd
 from ultralytics import YOLO
@@ -59,7 +60,22 @@ class BallTracker:
             output.append(out)
         return output
 
-    def run(self, video_path, output_path=None):
+    def _write_csv(self, csv_path, ball_positions):
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["frame", "x", "y", "w", "h", "cx", "cy", "area"])
+            for frame_idx, pos in enumerate(ball_positions):
+                bbox = pos.get(1)
+                if bbox is None or np.any(np.isnan(bbox)):
+                    continue
+                x1, y1, x2, y2 = bbox
+                x, y = int(x1), int(y1)
+                w, h = int(x2 - x1), int(y2 - y1)
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                area = w * h
+                writer.writerow([frame_idx, x, y, w, h, cx, cy, area])
+
+    def run(self, video_path, output_path=None, csv_path=None):
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print("Cannot open video:", video_path)
@@ -76,6 +92,11 @@ class BallTracker:
         print(f"Detecting ball in {len(frames)} frames...")
         ball_positions = self.detect_frames(frames)
         ball_positions = self.interpolate_ball_positions(ball_positions)
+
+        if csv_path:
+            self._write_csv(csv_path, ball_positions)
+            print(f"CSV saved to {csv_path}")
+
         annotated = self.draw_bboxes(frames, ball_positions)
 
         if output_path:
@@ -97,4 +118,4 @@ class BallTracker:
 
 if __name__ == "__main__":
     tracker = BallTracker("models/ball_tracker.pt")
-    tracker.run("data/input_video3.mp4", output_path="outputs/ball_tracking_output3.mp4")
+    tracker.run("data/input_video.mp4", output_path="outputs/ball_tracking_output1.mp4", csv_path="outputs/ball_clip1.csv")
