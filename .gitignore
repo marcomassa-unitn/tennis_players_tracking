@@ -41,3 +41,6 @@ results/
 
 # Models
 models/
+
+# Graphify
+graphify-out/
