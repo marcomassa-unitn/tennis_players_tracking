@@ -1,3 +1,4 @@
+import argparse
 import csv
 import os
 
@@ -5,7 +6,27 @@ import cv2
 import numpy as np
 
 # ── Input video ───────────────────────────────────────────────────────────────
-VIDEO_PATH  = "data/input_video.mp4"   # <-- change this to point to your video
+_parser = argparse.ArgumentParser(
+    description="Court keypoint detection: white mask + Hough lines + "
+                "intersection clustering + ITF-proportion filtering")
+_parser.add_argument("--video", default="data/input_video.mp4")
+_parser.add_argument("--no-display", action="store_true",
+                     help="skip the annotated video playback")
+_parser.add_argument("--roi-top", type=float, default=0.15, dest="roi_top",
+                     help="top ROI cut as fraction of frame height; raise it "
+                          "when white banner/fence lines above the court get "
+                          "mistaken for the far baseline (default: 0.15)")
+_parser.add_argument("--far-line", choices=["baseline", "service"],
+                     default="baseline", dest="far_line",
+                     help="which court line the TOPMOST detected corner row "
+                          "belongs to. Use 'service' when the far baseline is "
+                          "too thin/washed-out for the Hough transform and "
+                          "the top corners are on the far service line; the "
+                          "real baseline corners are then projected from ITF "
+                          "proportions (default: baseline)")
+_args = _parser.parse_args()
+
+VIDEO_PATH  = _args.video
 
 _video_stem = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
 CSV_PATH    = os.path.join("outputs", "court_coordinates", f"{_video_stem}_court.csv")
@@ -27,7 +48,7 @@ CLUSTER_RADIUS = 50
 DOT_RADIUS     = 10
 
 # ── Region-of-interest (ROI) ──────────────────────────────────────────────────
-ROI_TOP_FRACTION    = 0.15
+ROI_TOP_FRACTION    = _args.roi_top
 ROI_BOTTOM_FRACTION = 0.95
 ROI_LEFT_FRACTION   = 0.02
 ROI_RIGHT_FRACTION  = 0.98
@@ -154,41 +175,125 @@ def filter_singles_by_proportion(dots, y_tol, alley_ratio):
     return filtered
 
 
-def compute_service_corners(tl, tr, bl, br):
+# Real-world ITF positions of the 8 keypoints in feet, origin at BL:
+#   court length = 78 ft, singles width = 27 ft,
+#   service lines = 18 ft from each baseline (21 ft from the net).
+REAL_FT = {
+    "BL":  (0.0,  0.0),  "BR":  (27.0, 0.0),
+    "TL":  (0.0, 78.0),  "TR":  (27.0, 78.0),
+    "SBL": (0.0, 18.0),  "SBR": (27.0, 18.0),
+    "STL": (0.0, 60.0),  "STR": (27.0, 60.0),
+}
+
+
+def project_all_corners(known):
     """
-    Project service-line corners from real-world ITF proportions into image
-    space via a homography built from the 4 detected court corners.
-
-    ITF dimensions used:
-      court length = 78 ft,  singles width = 27 ft
-      service line = 21 ft from net = 18 ft from each baseline
+    Given >= 4 measured keypoints {label: (x, y) pixels}, build a homography
+    from their real-world ITF positions and project the remaining keypoints
+    into image space. Measured points are kept exactly as given.
+    Returns a dict with all 8 labels.
     """
-    COURT_LEN     = 78.0
-    COURT_WID     = 27.0
-    SVC_FROM_BASE = 18.0
-
-    src = np.array([               # real-world corners (ft, origin at BL)
-        [0,          0         ],  # BL
-        [COURT_WID,  0         ],  # BR
-        [COURT_WID,  COURT_LEN ],  # TR
-        [0,          COURT_LEN ],  # TL
-    ], dtype=np.float32)
-
-    dst = np.array([bl, br, tr, tl], dtype=np.float32)
+    labels = list(known)
+    src = np.array([REAL_FT[k] for k in labels], dtype=np.float32)
+    dst = np.array([known[k] for k in labels], dtype=np.float32)
     H, _ = cv2.findHomography(src, dst)
+    if H is None:
+        raise RuntimeError("Homography from detected corners failed.")
 
-    def project(rx, ry):
+    out = {}
+    for label, (rx, ry) in REAL_FT.items():
         p = H @ np.array([rx, ry, 1.0])
-        return (int(round(p[0] / p[2])), int(round(p[1] / p[2])))
+        out[label] = (int(round(p[0] / p[2])), int(round(p[1] / p[2])))
+    for label, (x, y) in known.items():
+        out[label] = (int(round(x)), int(round(y)))
+    return out
 
-    y_top = COURT_LEN - SVC_FROM_BASE   # 60 ft — top service line
-    y_bot = SVC_FROM_BASE               # 18 ft — bottom service line
-    return {
-        "STL": project(0,          y_top),
-        "STR": project(COURT_WID,  y_top),
-        "SBL": project(0,          y_bot),
-        "SBR": project(COURT_WID,  y_bot),
-    }
+
+def fit_sideline(segments, corner, max_dist=12.0, min_len=100.0):
+    """
+    Least-squares fit x = a*y + b of the sideline passing through `corner`,
+    using all steep Hough segments whose extended line passes within
+    `max_dist` px of the corner. Returns (a, b) or None.
+    """
+    cx, cy = corner
+    pts = []
+    for x1, y1, x2, y2 in segments:
+        dx, dy = x2 - x1, y2 - y1
+        length = np.hypot(dx, dy)
+        if length < min_len or abs(dy) <= abs(dx):
+            continue
+        dist = abs(dy * (cx - x1) - dx * (cy - y1)) / length
+        if dist <= max_dist:
+            pts += [(x1, y1), (x2, y2)]
+    if len(pts) < 2:
+        return None
+    pts = np.array(pts, dtype=np.float64)
+    a, b = np.polyfit(pts[:, 1], pts[:, 0], 1)
+    return float(a), float(b)
+
+
+def find_ground_line_bands(hsv_img, xl_fit, xr_fit, y_min, y_max,
+                           cov_thr=0.5, max_thickness=14):
+    """
+    1-D coverage profile: for every image row, the fraction of "white-ish"
+    pixels (relaxed mask, the far lines are dimmer than the near ones) along
+    the chord between the two fitted sidelines. Horizontal ground lines show
+    up as THIN runs of near-full coverage; the elevated net band is a thick
+    run and is discarded here. Returns the centre y of each thin band.
+    """
+    relaxed = cv2.inRange(hsv_img,
+                          np.array([0, 0, 195], dtype=np.uint8),
+                          np.array([180, 95, 255], dtype=np.uint8))
+    runs, run = [], None
+    for y in range(int(y_min), int(y_max)):
+        xl = int(xl_fit[0] * y + xl_fit[1]) + 6
+        xr = int(xr_fit[0] * y + xr_fit[1]) - 6
+        cov = relaxed[y, xl:xr].mean() / 255.0 if xr - xl >= 50 else 0.0
+        if cov >= cov_thr:
+            run = [y, y] if run is None else [run[0], y]
+        elif run is not None:
+            runs.append(run)
+            run = None
+    if run is not None:
+        runs.append(run)
+    return [(y0 + y1) / 2.0 for y0, y1 in runs
+            if (y1 - y0 + 1) <= max_thickness]
+
+
+def select_far_lines(bands, bl, br, xl_fit, xr_fit, tol=12.0):
+    """
+    Pick which detected horizontal bands are the far BASELINE and the far
+    SERVICE line by projective consistency: for every candidate pair, build
+    the homography from (TL, TR, BL, BR) and require that the projected far
+    and near service lines land on detected bands within `tol` px.
+    This automatically rejects banner/fence lines and the (elevated) net.
+    Returns (y_baseline, y_service, residuals) or None.
+    """
+    best = None
+    for yb in bands:
+        for ys in bands:
+            if ys <= yb:        # service line is below the baseline in image
+                continue
+            tl = (xl_fit[0] * yb + xl_fit[1], yb)
+            tr = (xr_fit[0] * yb + xr_fit[1], yb)
+            try:
+                pts = project_all_corners(
+                    {"TL": tl, "TR": tr, "BL": bl, "BR": br})
+            except RuntimeError:
+                continue
+            y_far = (pts["STL"][1] + pts["STR"][1]) / 2.0
+            y_near = (pts["SBL"][1] + pts["SBR"][1]) / 2.0
+            r_far = abs(y_far - ys)
+            r_near = min(abs(y_near - b) for b in bands)
+            if r_far > tol or r_near > tol:
+                continue
+            score = r_far + r_near
+            if best is None or score < best[0]:
+                best = (score, yb, ys, r_far, r_near)
+    if best is None:
+        return None
+    _, yb, ys, r_far, r_near = best
+    return yb, ys, (r_far, r_near)
 
 
 def find_court_corners(dots, frame_shape, rank=0):
@@ -290,7 +395,7 @@ for i in range(len(segments)):
 
 # 6. Cluster nearby intersections
 all_dots = cluster_points(raw_intersections, CLUSTER_RADIUS)
-print(f"Detected {len(segments)} line segments → {len(all_dots)} intersection points (pre-filter).")
+print(f"Detected {len(segments)} line segments -> {len(all_dots)} intersection points (pre-filter).")
 
 # 6b. Strip doubles-alley corners using ITF width proportions
 dots = filter_singles_by_proportion(all_dots, Y_GROUP_TOLERANCE, ALLEY_RATIO)
@@ -298,13 +403,47 @@ print(f"After singles-court proportion filter: {len(dots)} dots.")
 for i, d in enumerate(dots):
     print(f"  dot[{i:2d}] = {d}")
 
-# 7. Select the 4 court corners
+# 7. Select the 4 extreme corners of the detected dots
 tl, tr, bl, br = find_court_corners(dots, frame.shape, rank=SINGLES_CORNER_RANK)
-corners = {"TL": tl, "TR": tr, "BL": bl, "BR": br}
-print(f"\nCourt corners  TL:{tl}  TR:{tr}  BL:{bl}  BR:{br}")
 
-# 7b. Compute service-line corners from ITF proportions + homography
-service = compute_service_corners(tl, tr, bl, br)
+# 7b. Refine the far side. Hough intersections are unreliable up there (the
+# far ground lines are thin and dim, while banner edges and the ELEVATED net
+# band are bright); instead, scan a 1-D white-coverage profile between the
+# fitted sidelines and pick the (baseline, service-line) row pair that is
+# projectively consistent with the ITF court model.
+far_sel = None
+xl_fit = fit_sideline(segments, bl)
+xr_fit = fit_sideline(segments, br)
+if xl_fit is not None and xr_fit is not None:
+    bands = find_ground_line_bands(hsv, xl_fit, xr_fit,
+                                   y_min=roi_top,
+                                   y_max=min(bl[1], br[1]) - 30)
+    if bands:
+        far_sel = select_far_lines(bands, bl, br, xl_fit, xr_fit)
+
+if far_sel is not None:
+    yb, ys, (r_far, r_near) = far_sel
+    tl = (int(round(xl_fit[0] * yb + xl_fit[1])), int(round(yb)))
+    tr = (int(round(xr_fit[0] * yb + xr_fit[1])), int(round(yb)))
+    known = {"TL": tl, "TR": tr, "BL": bl, "BR": br}
+    print(f"Far lines via coverage profile: baseline y={yb:.0f}, "
+          f"service y={ys:.0f} (residuals: far {r_far:.1f}px, "
+          f"near {r_near:.1f}px)")
+else:
+    print("WARNING: coverage-profile far-line detection failed, falling "
+          "back to Hough corners" +
+          (" interpreted as the far service line (--far-line service)."
+           if _args.far_line == "service" else "."))
+    if _args.far_line == "service":
+        known = {"STL": tl, "STR": tr, "BL": bl, "BR": br}
+    else:
+        known = {"TL": tl, "TR": tr, "BL": bl, "BR": br}
+all_pts = project_all_corners(known)
+
+corners = {k: all_pts[k] for k in ("TL", "TR", "BL", "BR")}
+service = {k: all_pts[k] for k in ("STL", "STR", "SBL", "SBR")}
+tl, tr, bl, br = corners["TL"], corners["TR"], corners["BL"], corners["BR"]
+print(f"\nCourt corners  TL:{tl}  TR:{tr}  BL:{bl}  BR:{br}")
 print(f"Service corners  STL:{service['STL']}  STR:{service['STR']}  SBL:{service['SBL']}  SBR:{service['SBR']}")
 
 # 7c. Discard net-zone dots from display (corners are already saved above).
@@ -322,6 +461,10 @@ with open(CSV_PATH, "w", newline="") as f:
 print(f"Saved all corners to '{CSV_PATH}'.")
 
 # 9. Play video — all dots in red, 4 corners highlighted with magenta ring
+if _args.no_display:
+    cap.release()
+    raise SystemExit
+
 fps = cap.get(cv2.CAP_PROP_FPS)
 if fps == 0 or np.isnan(fps):
     fps = 30

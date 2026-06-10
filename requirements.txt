@@ -1,0 +1,9 @@
+numpy
+opencv-python
+pandas
+matplotlib
+scipy
+Pillow
+
+# Only needed for the optional ball-tracking extra (ballTracking/):
+# ultralytics

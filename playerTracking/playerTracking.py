@@ -1,11 +1,15 @@
+import argparse
+import csv
+import os
+
 import cv2
 import numpy as np
-import csv
 
 
 
 class PlayerTracker:
-    def __init__(self, video_path, csv_path):
+    def __init__(self, video_path, csv_path, display=True):
+        self.display = display
         self.cap = cv2.VideoCapture(video_path)
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
@@ -184,22 +188,36 @@ class PlayerTracker:
                 self._draw_players(frame, components)
                 self._write_csv_rows(frame_idx, components)
 
-            vis = cv2.resize(frame, (960, 540))
-            cv2.imshow("Player Tracker", vis)
-            if mask is not None:
-                cv2.imshow("FG mask", cv2.resize(mask, (480, 270)))
+            if self.display:
+                vis = cv2.resize(frame, (960, 540))
+                cv2.imshow("Player Tracker", vis)
+                if mask is not None:
+                    cv2.imshow("FG mask", cv2.resize(mask, (480, 270)))
 
-            key = cv2.waitKey(self.frame_ms) & 0xFF
-            if key == ord("q"):
-                break
+                key = cv2.waitKey(self.frame_ms) & 0xFF
+                if key == ord("q"):
+                    break
 
             frame_idx += 1
 
         self.cap.release()
         self._close_csv()
         cv2.destroyAllWindows()
+        print(f"Tracking saved to {self.csv_path}")
+
 
 if __name__ == "__main__":
-    tracker = PlayerTracker("data/input_video2.mp4", "outputs/players_clip2.csv")
+    parser = argparse.ArgumentParser(
+        description="Two-player tracking via running-average background "
+                    "subtraction + nearest-centroid association")
+    parser.add_argument("--video", default="data/Input_video2.mp4")
+    parser.add_argument("--csv",   default="outputs/players_clip2.csv",
+                        help="output CSV path")
+    parser.add_argument("--no-display", action="store_true",
+                        help="run headless (no OpenCV windows)")
+    args = parser.parse_args()
+
+    os.makedirs(os.path.dirname(args.csv) or ".", exist_ok=True)
+    tracker = PlayerTracker(args.video, args.csv, display=not args.no_display)
     tracker.run()
 
