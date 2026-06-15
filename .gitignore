@@ -41,6 +41,8 @@ results/
 
 # Models
 models/
+# model weights (e.g. ball_tracker.pt) are too large to push
+*.pt
 
 # Graphify
 graphify-out/

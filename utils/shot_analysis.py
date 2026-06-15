@@ -1,34 +1,34 @@
 """
 utils/shot_analysis.py
 
-Rileva il momento dei colpi e classifica dritto/rovescio a partire dal CSV
-della palla prodotto da ballTracking/BallTracking.py (frame,x,y,w,h,cx,cy,area)
-e dal CSV dei giocatori.
+Detects the moment of the shots and classifies forehand/backhand starting from
+the ball CSV produced by ballTracking/BallTracking.py (frame,x,y,w,h,cx,cy,area)
+and from the players CSV.
 
-Rilevazione del colpo (sul tracciato palla smussato con Savitzky-Golay):
-  1. candidati = inversione persistente del segno della velocità verticale vy
-     (in immagine: palla che viaggia verso il giocatore far ha vy<0, verso il
-     giocatore near vy>0; un colpo inverte la direzione) UNITI ai picchi del
-     modulo dell'accelerazione |dv| (cambio brusco di velocità);
-  2. un candidato è un COLPO solo se la palla è vicina al bounding box di un
-     giocatore (i rimbalzi invertono vy ma avvengono lontano dai giocatori);
-  3. gap minimo tra colpi consecutivi (default 0.5 s), si tiene il candidato
-     con accelerazione maggiore.
+Shot detection (on the ball track smoothed with Savitzky-Golay):
+  1. candidates = persistent sign reversal of the vertical velocity vy
+     (in image: a ball traveling toward the far player has vy<0, toward the
+     near player vy>0; a shot reverses the direction) COMBINED with peaks of
+     the acceleration magnitude |dv| (abrupt change of velocity);
+  2. a candidate is a SHOT only if the ball is close to a player's bounding
+     box (bounces also reverse vy but happen far from the players);
+  3. minimum gap between consecutive shots (default 0.5 s), keeping the
+     candidate with the larger acceleration.
 
-Dritto / rovescio al frame del colpo:
-  - lato campo del giocatore (near/far) dal suo punto-piedi proiettato in
-    metri: near = lo vediamo di spalle, la sua destra è la destra immagine;
-    far = lo vediamo frontale, la sua destra è la SINISTRA immagine;
-  - dritto se la palla è dal lato della mano dominante, rovescio altrimenti;
-    per i mancini (--p1-hand/--p2-hand left) il ragionamento si inverte;
-  - se la palla è quasi sull'asse del corpo il colpo è marcato "unknown".
+Forehand / backhand at the shot frame:
+  - the player's court side (near/far) from his feet point projected in
+    meters: near = we see him from behind, his right is the image right;
+    far = we see him from the front, his right is the image LEFT;
+  - forehand if the ball is on the dominant-hand side, backhand otherwise;
+    for left-handers (--p1-hand/--p2-hand left) the reasoning is inverted;
+  - if the ball is almost on the body axis the shot is marked "unknown".
 
-Uso (da radice progetto, dopo aver generato il ball CSV con BallTracking):
+Use (from project root, after generating the ball CSV with BallTracking):
     python utils/shot_analysis.py --ball outputs/ball_clip2.csv
     python utils/shot_analysis.py --ball outputs/ball_clip2.csv \\
         --p1-hand right --p2-hand left
 
-Validazione della logica senza modello YOLO (traiettoria sintetica):
+Validation of the logic without the YOLO model (synthetic trajectory):
     python utils/shot_analysis.py --self-test
 """
 
@@ -53,17 +53,17 @@ L_m = 78.0 * _FT
 NET = L_m / 2.0
 
 
-# ── caricamento ────────────────────────────────────────────────────────────────
+# ── loading ────────────────────────────────────────────────────────────────────
 
 def load_ball_track(ball_csv: str) -> pd.DataFrame:
     """
-    Carica il CSV palla, lo riallinea su tutti i frame e smussa cx/cy.
-    Ritorna un DataFrame indicizzato per frame con colonne cx, cy (smussate),
-    NaN dove la palla non è mai stata vista.
+    Load the ball CSV, realign it over all frames and smooth cx/cy.
+    Return a DataFrame indexed by frame with columns cx, cy (smoothed),
+    NaN where the ball was never seen.
     """
     df = pd.read_csv(ball_csv)
     if df.empty:
-        raise ValueError(f"Ball CSV vuoto: {ball_csv}")
+        raise ValueError(f"Empty ball CSV: {ball_csv}")
     full = df.set_index("frame")[["cx", "cy"]].reindex(
         range(int(df["frame"].min()), int(df["frame"].max()) + 1))
     full = full.interpolate(limit=8, limit_area="inside")
@@ -80,7 +80,7 @@ def load_ball_track(ball_csv: str) -> pd.DataFrame:
 
 
 def load_player_boxes(players_csv: str) -> dict:
-    """{frame: {pid: (x, y, w, h)}} dal CSV del tracker giocatori."""
+    """{frame: {pid: (x, y, w, h)}} from the player tracker CSV."""
     df = pd.read_csv(players_csv)
     boxes = defaultdict(dict)
     for r in df.itertuples():
@@ -89,10 +89,10 @@ def load_player_boxes(players_csv: str) -> dict:
     return boxes
 
 
-# ── rilevazione colpi ──────────────────────────────────────────────────────────
+# ── shot detection ─────────────────────────────────────────────────────────────
 
 def _nearest_box(boxes, frame, pid, radius=3):
-    """Box del giocatore pid nel frame più vicino entro ±radius, o None."""
+    """Box of player pid in the nearest frame within ±radius, or None."""
     for d in range(radius + 1):
         for f in (frame - d, frame + d):
             if f in boxes and pid in boxes[f]:
@@ -101,7 +101,7 @@ def _nearest_box(boxes, frame, pid, radius=3):
 
 
 def _ball_near_player(ball_xy, box, expand_w=0.9, expand_h=0.55):
-    """True se la palla è dentro il box espanso del giocatore."""
+    """True if the ball is inside the player's expanded box."""
     x, y, w, h = box
     bx, by = ball_xy
     return (x - expand_w * w <= bx <= x + w + expand_w * w
@@ -112,11 +112,11 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
                 min_gap_s: float = 0.5, vy_min: float = 0.5,
                 acc_thr: float = 1.5) -> list:
     """
-    Ritorna [(frame, player_id, acc_strength), ...] dei colpi rilevati.
+    Return [(frame, player_id, acc_strength), ...] of the detected shots.
 
-    vy_min  : modulo minimo (px/frame) della velocità media prima/dopo perché
-              un'inversione di segno conti come candidato
-    acc_thr : soglia (px/frame^2) sui picchi del modulo dell'accelerazione
+    vy_min  : minimum magnitude (px/frame) of the mean velocity before/after for
+              a sign reversal to count as a candidate
+    acc_thr : threshold (px/frame^2) on the peaks of the acceleration magnitude
     """
     frames = track.index.values
     cx = track["cx"].values
@@ -141,7 +141,7 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
         if flip or acc_peak:
             candidates[i] = max(candidates.get(i, 0.0), float(acc[i]))
 
-    # filtro prossimità giocatore
+    # player proximity filter
     near_player = {}
     for i, strength in candidates.items():
         f = int(frames[i])
@@ -158,7 +158,7 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
         if best is not None:
             near_player[i] = (best[0], strength)
 
-    # gap minimo: tieni il candidato più forte in ogni finestra
+    # minimum gap: keep the strongest candidate in each window
     min_gap = int(min_gap_s * fps)
     hits = []
     for i in sorted(near_player):
@@ -172,34 +172,34 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
     return hits
 
 
-# ── classificazione dritto / rovescio ──────────────────────────────────────────
+# ── forehand / backhand classification ─────────────────────────────────────────
 
 def classify_stroke(ball_cx, player_box, player_side, hand,
                     deadband_frac=0.12):
     """
-    player_side : "near" | "far" (rispetto alla camera)
+    player_side : "near" | "far" (relative to the camera)
     hand        : "right" | "left"
-    Ritorna "forehand", "backhand" o "unknown" (palla sull'asse del corpo).
+    Return "forehand", "backhand" or "unknown" (ball on the body axis).
     """
     x, y, w, h = player_box
     player_cx = x + w / 2.0
     db = ball_cx - player_cx
     if abs(db) < deadband_frac * w:
         return "unknown"
-    # la mano dominante è verso destra-immagine se (near e destro) o (far e mancino)
+    # the dominant hand is toward image-right if (near and right) or (far and left-handed)
     dominant_is_image_right = (player_side == "near") == (hand == "right")
     return "forehand" if (db > 0) == dominant_is_image_right else "backhand"
 
 
 def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5):
-    """Pipeline completa: rileva colpi e li classifica. Ritorna DataFrame."""
+    """Full pipeline: detect shots and classify them. Return a DataFrame."""
     hits = detect_hits(track, boxes, fps, min_gap_s=min_gap_s)
     rows = []
     for f, pid, strength in hits:
         box = _nearest_box(boxes, f, pid)
         if box is None:
             continue
-        # mediana della posizione palla su ±2 frame (riduce il rumore)
+        # median of the ball position over ±2 frames (reduces noise)
         sel = track.loc[max(track.index.min(), f - 2): f + 2]
         ball_cx = float(np.nanmedian(sel["cx"]))
         ball_cy = float(np.nanmedian(sel["cy"]))
@@ -224,10 +224,10 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5):
 
 def save_shot_frames(shots: pd.DataFrame, video_path: str, boxes: dict,
                      out_dir: Path) -> None:
-    """PNG di verifica: frame del colpo con box giocatore e palla evidenziati."""
+    """Verification PNGs: shot frame with player box and ball highlighted."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"  (video non disponibile, salto i PNG: {video_path})")
+        print(f"  (video not available, skipping PNGs: {video_path})")
         return
     for r in shots.itertuples():
         cap.set(cv2.CAP_PROP_POS_FRAMES, r.frame)
@@ -245,15 +245,15 @@ def save_shot_frames(shots: pd.DataFrame, video_path: str, boxes: dict,
         path = out_dir / f"shot_f{r.frame:05d}_P{r.player_id}_{r.stroke}.png"
         cv2.imwrite(str(path), fr)
     cap.release()
-    print(f"  PNG dei colpi salvati in {out_dir}")
+    print(f"  Shot PNGs saved in {out_dir}")
 
 
 def print_summary(shots: pd.DataFrame, hands: dict) -> None:
     print("\n" + "=" * 56)
-    print("  SHOT ANALYSIS  -  RIEPILOGO")
+    print("  SHOT ANALYSIS  -  SUMMARY")
     print("=" * 56)
     if shots.empty:
-        print("  Nessun colpo rilevato.")
+        print("  No shots detected.")
         return
     for r in shots.itertuples():
         print(f"  frame {r.frame:5d} ({r.time_s:6.2f}s)  "
@@ -263,15 +263,15 @@ def print_summary(shots: pd.DataFrame, hands: dict) -> None:
         n_fh = (sub["stroke"] == "forehand").sum()
         n_bh = (sub["stroke"] == "backhand").sum()
         n_uk = (sub["stroke"] == "unknown").sum()
-        print(f"  P{pid} ({hands[pid]:5s}): {len(sub)} colpi  "
-              f"-  dritti {n_fh}, rovesci {n_bh}, incerti {n_uk}")
+        print(f"  P{pid} ({hands[pid]:5s}): {len(sub)} shots  "
+              f"-  forehands {n_fh}, backhands {n_bh}, unknown {n_uk}")
     print()
 
 
-# ── self-test con traiettoria sintetica ────────────────────────────────────────
+# ── self-test with synthetic trajectory ────────────────────────────────────────
 
 def _synthetic_court_csv(path: str) -> None:
-    """Campo sintetico: omografia da 4 corner px arbitrari + proporzioni ITF."""
+    """Synthetic court: homography from 4 arbitrary px corners + ITF proportions."""
     corners_m = np.array([[0, 0], [W_m, 0], [0, L_m], [W_m, L_m]],
                          dtype=np.float32)                 # TL TR BL BR
     corners_px = np.array([[700, 300], [1200, 300], [400, 860], [1500, 860]],
@@ -295,15 +295,15 @@ def _synthetic_court_csv(path: str) -> None:
 
 def self_test() -> None:
     """
-    Rally sintetico: 4 colpi con lato palla noto + rimbalzi a metà campo che
-    NON devono essere rilevati come colpi. Verifica frame, giocatore e
-    classificazione, anche nel caso mancino.
+    Synthetic rally: 4 shots with known ball side + mid-court bounces that
+    must NOT be detected as shots. Checks frame, player and classification,
+    including the left-handed case.
     """
     rng = np.random.default_rng(3)
     p1 = (900, 700, 100, 190)     # near, feet y=890, cx=950
     p2 = (920, 200, 60, 120)      # far,  feet y=320, cx=950
 
-    # (frame_colpo, giocatore, offset palla rispetto al centro, atteso destro)
+    # (shot_frame, player, ball offset relative to center, expected for right-hander)
     plan = [(20, 1, +70, "forehand"),
             (60, 2, -45, "forehand"),
             (100, 1, -70, "backhand"),
@@ -316,7 +316,7 @@ def self_test() -> None:
         cy_c = box[1] + box[3] * (0.45 if pid == 1 else 0.5)
         contact[f] = (cx_c, cy_c)
 
-    # traiettoria: tratti lineari tra i contatti + rimbalzo (cuspide) a meta'
+    # trajectory: linear segments between contacts + bounce (cusp) at mid-court
     frames = np.arange(0, 171)
     cx = np.full(len(frames), np.nan)
     cy = np.full(len(frames), np.nan)
@@ -328,7 +328,7 @@ def self_test() -> None:
     for f0, (x0, y0), f1, (x1, y1) in segs:
         for f in range(f0, f1 + 1):
             s = (f - f0) / max(1, f1 - f0)
-            # cuspide di rimbalzo a s=0.65 (deviazione verso il basso immagine)
+            # bounce cusp at s=0.65 (deviation toward image bottom)
             bounce = 35.0 * max(0.0, 1.0 - abs(s - 0.65) / 0.18)
             cx[f] = x0 + s * (x1 - x0)
             cy[f] = y0 + s * (y1 - y0) + bounce
@@ -367,60 +367,60 @@ def self_test() -> None:
             shots = analyze_shots(track, boxes, conv, fps=30.0, hands=hands)
             tag = f"hands={hands}"
             if len(shots) != len(plan):
-                failures.append(f"{tag}: attesi {len(plan)} colpi, "
-                                f"rilevati {len(shots)}")
+                failures.append(f"{tag}: expected {len(plan)} shots, "
+                                f"detected {len(shots)}")
                 continue
             for (f_exp, pid_exp, _, stroke_exp), r in zip(
                     plan, shots.itertuples()):
                 stroke_exp = expect_fn(pid_exp, stroke_exp)
                 if abs(r.frame - f_exp) > 4:
-                    failures.append(f"{tag}: colpo a frame {r.frame}, "
-                                    f"atteso ~{f_exp}")
+                    failures.append(f"{tag}: shot at frame {r.frame}, "
+                                    f"expected ~{f_exp}")
                 if r.player_id != pid_exp:
-                    failures.append(f"{tag}: frame {r.frame} assegnato a "
-                                    f"P{r.player_id}, atteso P{pid_exp}")
+                    failures.append(f"{tag}: frame {r.frame} assigned to "
+                                    f"P{r.player_id}, expected P{pid_exp}")
                 if r.stroke != stroke_exp:
                     failures.append(f"{tag}: frame {r.frame} P{pid_exp} "
-                                    f"{r.stroke}, atteso {stroke_exp}")
+                                    f"{r.stroke}, expected {stroke_exp}")
 
     print("SELF-TEST shot_analysis")
-    print(f"  colpi pianificati : {[(f, p, s) for f, p, _, s in plan]}")
+    print(f"  planned shots : {[(f, p, s) for f, p, _, s in plan]}")
     if failures:
         print("  FAIL:")
         for msg in failures:
             print("   -", msg)
         raise SystemExit(1)
-    print("  PASS: 4/4 colpi rilevati e classificati correttamente "
-          "(anche nel caso mancino); rimbalzi a meta' campo ignorati.")
+    print("  PASS: 4/4 shots detected and classified correctly "
+          "(including the left-handed case); mid-court bounces ignored.")
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Rilevazione colpi e classificazione dritto/rovescio "
-                    "dal tracking della palla")
+        description="Shot detection and forehand/backhand classification "
+                    "from the ball tracking")
     parser.add_argument("--ball", default="outputs/ball_clip2.csv",
-                        help="CSV palla generato da BallTracking.py")
+                        help="ball CSV generated by BallTracking.py")
     parser.add_argument("--players", default="outputs/players_clip2.csv")
     parser.add_argument("--court",
                         default="outputs/court_coordinates/Input_video2_court.csv")
     parser.add_argument("--video", default="data/Input_video2.mp4",
-                        help="video sorgente per i PNG di verifica")
+                        help="source video for the verification PNGs")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--p1-hand", choices=["right", "left"],
                         default="right", dest="p1_hand",
-                        help="mano dominante del giocatore 1 (default right)")
+                        help="dominant hand of player 1 (default right)")
     parser.add_argument("--p2-hand", choices=["right", "left"],
                         default="right", dest="p2_hand",
-                        help="mano dominante del giocatore 2 (default right)")
+                        help="dominant hand of player 2 (default right)")
     parser.add_argument("--min-gap", type=float, default=0.5, dest="min_gap",
-                        help="distanza minima in secondi tra due colpi")
+                        help="minimum distance in seconds between two shots")
     parser.add_argument("--output", default="outputs/shot_analysis")
     parser.add_argument("--no-frames", action="store_true",
-                        help="non salvare i PNG dei colpi")
+                        help="do not save the shot PNGs")
     parser.add_argument("--self-test", action="store_true", dest="self_test",
-                        help="valida la logica su una traiettoria sintetica")
+                        help="validate the logic on a synthetic trajectory")
     args = parser.parse_args()
 
     if args.self_test:
@@ -429,8 +429,8 @@ def main() -> None:
 
     if not os.path.exists(args.ball):
         raise SystemExit(
-            f"Ball CSV non trovato: {args.ball}\n"
-            "Generalo prima con il ball tracker (serve il modello YOLO):\n"
+            f"Ball CSV not found: {args.ball}\n"
+            "Generate it first with the ball tracker (needs the YOLO model):\n"
             "    python ballTracking/BallTracking.py")
 
     hands = {1: args.p1_hand, 2: args.p2_hand}
@@ -445,7 +445,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "shots.csv"
     shots.to_csv(csv_path, index=False)
-    print(f"Salvato: {csv_path}  ({len(shots)} colpi)")
+    print(f"Saved: {csv_path}  ({len(shots)} shots)")
 
     if not args.no_frames and not shots.empty:
         save_shot_frames(shots, args.video, boxes, out_dir)

@@ -1,24 +1,24 @@
 """
 utils/player_analysis.py
 
-Converte le posizioni pixel dei giocatori in coordinate reali (metri) tramite
-CourtConverter e genera:
-  - minimap.gif           animazione top-down del campo
-  - heatmap_p1/p2.png     mappa di densità per giocatore
-  - heatmap_combined.png  entrambi sovrapposti
-  - speed_stats.csv       velocità per frame in km/h
-  - zone_stats.csv        tempo trascorso in ogni zona del campo
-  - zones.png             occupazione delle zone disegnata sul campo
-  + riepilogo statistiche a terminale
+Converts the players' pixel positions into real-world coordinates (meters)
+through CourtConverter and generates:
+  - minimap.gif           top-down animation of the court
+  - heatmap_p1/p2.png     density map per player
+  - heatmap_combined.png  both overlaid
+  - speed_stats.csv       per-frame speed in km/h
+  - zone_stats.csv        time spent in each zone of the court
+  - zones.png             zone occupancy drawn on the court
+  + statistics summary in the terminal
 
-Il punto proiettato a terra è per default il punto-piedi (centro-basso del
-bounding box): il centroide del corpo sta ~1 m sopra il suolo e l'omografia
-lo proietterebbe molto più lontano dalla rete di quanto sia davvero.
+The point projected to the ground is by default the feet point (bottom-center
+of the bounding box): the body centroid is ~1 m above the ground and the
+homography would project it much farther from the net than it really is.
 
-Uso rapido (da radice progetto):
+Quick use (from project root):
     python utils/player_analysis.py
 
-Uso completo:
+Full use:
     python utils/player_analysis.py \\
         --players outputs/players_clip2.csv \\
         --court   outputs/court_coordinates/input_video_court.csv \\
@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")  # backend headless, non apre finestre
+matplotlib.use("Agg")  # headless backend, does not open windows
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
@@ -43,76 +43,76 @@ from scipy.ndimage import gaussian_filter
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_converter import CourtConverter
 
-# ── dimensioni campo ITF singles ───────────────────────────────────────────────
+# ── ITF singles court dimensions ───────────────────────────────────────────────
 _FT   = 0.3048
-W_m   = 27.0 * _FT          # 8.2296 m  larghezza (singles)
-L_m   = 78.0 * _FT          # 23.7744 m lunghezza
-SVC_T = 18.0 * _FT          # 5.4864 m  linea servizio lato far
-SVC_B = L_m - SVC_T         # 18.288 m  linea servizio lato near
-NET   = L_m / 2.0            # 11.8872 m rete
-CL_X  = W_m / 2.0            # 4.1148 m  linea centrale servizio
+W_m   = 27.0 * _FT          # 8.2296 m  width (singles)
+L_m   = 78.0 * _FT          # 23.7744 m length
+SVC_T = 18.0 * _FT          # 5.4864 m  service line far side
+SVC_B = L_m - SVC_T         # 18.288 m  service line near side
+NET   = L_m / 2.0            # 11.8872 m net
+CL_X  = W_m / 2.0            # 4.1148 m  center service line
 
-# colori per i due giocatori
+# colors for the two players
 _COLORS = {1: "lime",   2: "tomato"}
-_LABELS = {1: "P1 (lime)", 2: "P2 (rosso)"}
+_LABELS = {1: "P1 (lime)", 2: "P2 (red)"}
 
-# ── zone del campo ─────────────────────────────────────────────────────────────
-# L'analisi copre tutta l'area calpestabile, non solo il rettangolo di gioco:
-# _BEHIND = run-off tipico dietro ciascuna baseline, _SIDE = run-off laterale
-# (raccomandazione ITF ~3.66 m) oltre ciascuna sideline.
+# ── court zones ────────────────────────────────────────────────────────────────
+# The analysis covers the whole walkable area, not just the playing rectangle:
+# _BEHIND = typical run-off behind each baseline, _SIDE = lateral run-off
+# (ITF recommendation ~3.66 m) beyond each sideline.
 _BEHIND = 6.5
 _SIDE   = 3.7
 _ZONE_BANDS = [
-    ("FB-out", "Dietro baseline (far)",   -_BEHIND, 0.0),
-    ("FB",     "Fondocampo (far)",         0.0,     SVC_T),
-    ("FF",     "Zona servizio (far)",      SVC_T,   NET),
-    ("NF",     "Zona servizio (near)",     NET,     SVC_B),
-    ("NB",     "Fondocampo (near)",        SVC_B,   L_m),
-    ("NB-out", "Dietro baseline (near)",   L_m,     L_m + _BEHIND),
+    ("FB-out", "Behind baseline (far)",    -_BEHIND, 0.0),
+    ("FB",     "Backcourt (far)",           0.0,     SVC_T),
+    ("FF",     "Service zone (far)",        SVC_T,   NET),
+    ("NF",     "Service zone (near)",       NET,     SVC_B),
+    ("NB",     "Backcourt (near)",          SVC_B,   L_m),
+    ("NB-out", "Behind baseline (near)",    L_m,     L_m + _BEHIND),
 ]
-_SIDES = [("OL", "esterno sx"), ("L", "sx"), ("R", "dx"), ("OR", "esterno dx")]
+_SIDES = [("OL", "outer left"), ("L", "left"), ("R", "right"), ("OR", "outer right")]
 _SIDE_X = {"OL": (-_SIDE, 0.0), "L": (0.0, CL_X),
            "R": (CL_X, W_m), "OR": (W_m, W_m + _SIDE)}
 
 
-# ── disegno campo ──────────────────────────────────────────────────────────────
+# ── court drawing ──────────────────────────────────────────────────────────────
 
 def _draw_court(ax: plt.Axes) -> None:
-    """Disegna campo ITF singles su ax (coordinate in metri)."""
+    """Draw the ITF singles court on ax (coordinates in meters)."""
     ax.set_facecolor("#2d6a4f")
     kw = dict(color="white", linewidth=1.4, solid_capstyle="round")
 
-    # perimetro
+    # perimeter
     ax.plot([0, W_m], [0,   0  ], **kw)
     ax.plot([0, W_m], [L_m, L_m], **kw)
     ax.plot([0, 0  ], [0,   L_m], **kw)
     ax.plot([W_m, W_m], [0, L_m], **kw)
-    # linee di servizio
+    # service lines
     ax.plot([0, W_m], [SVC_T, SVC_T], **kw)
     ax.plot([0, W_m], [SVC_B, SVC_B], **kw)
     ax.plot([CL_X, CL_X], [SVC_T, SVC_B], **kw)
-    # rete
+    # net
     ax.plot([0, W_m], [NET, NET], color="#f4d03f", linewidth=2.8)
 
-    # limiti estesi a tutta l'area calpestabile (run-off laterali e di fondo);
-    # y invertito: baseline lontana (y=0) in alto, come nella vista camera
+    # limits extended to the whole walkable area (lateral and baseline run-off);
+    # y inverted: far baseline (y=0) at top, as in the camera view
     ax.set_xlim(-_SIDE - 0.4, W_m + _SIDE + 0.4)
     ax.set_ylim(L_m + _BEHIND + 0.4, -_BEHIND - 0.4)
     ax.set_aspect("equal")
     ax.axis("off")
 
 
-# ── caricamento e conversione ──────────────────────────────────────────────────
+# ── loading and conversion ─────────────────────────────────────────────────────
 
 def _load_and_convert(players_csv: str, court_csv: str, min_area: int,
                       anchor: str = "feet") -> dict[int, pd.DataFrame]:
     """
-    Carica il CSV dei giocatori, filtra le detection con area < min_area e
-    aggiunge le colonne x_m, y_m con le coordinate reali in metri.
+    Load the players CSV, filter out detections with area < min_area and
+    add the columns x_m, y_m with the real-world coordinates in meters.
 
-    anchor = "feet"     → proietta il punto-piedi (cx, y + h)  [default]
-    anchor = "centroid" → proietta il centroide del blob (cx, cy)
-    Ritorna {player_id: DataFrame}.
+    anchor = "feet"     → projects the feet point (cx, y + h)  [default]
+    anchor = "centroid" → projects the blob centroid (cx, cy)
+    Returns {player_id: DataFrame}.
     """
     df = pd.read_csv(players_csv)
     df = df[df["area"] >= min_area].copy()
@@ -124,7 +124,7 @@ def _load_and_convert(players_csv: str, court_csv: str, min_area: int,
         df["ax"] = df["cx"]
         df["ay"] = df["cy"]
     else:
-        raise ValueError(f"anchor sconosciuto: {anchor!r}")
+        raise ValueError(f"unknown anchor: {anchor!r}")
 
     conv = CourtConverter(court_csv)
     player_data: dict[int, pd.DataFrame] = {}
@@ -137,15 +137,15 @@ def _load_and_convert(players_csv: str, court_csv: str, min_area: int,
     return player_data
 
 
-# ── statistiche velocità ───────────────────────────────────────────────────────
+# ── speed statistics ───────────────────────────────────────────────────────────
 
 def _compute_speeds(sub: pd.DataFrame, fps: float,
                     max_speed_kmh: float = 45.0) -> tuple[dict, np.ndarray]:
     """
-    Calcola velocità per frame (km/h) e statistiche aggregate.
-    Velocità = NaN per frame non consecutivi (giocatore non rilevato).
-    Spostamenti sopra max_speed_kmh sono glitch di tracking (salti di blob,
-    scambi di ID): vengono esclusi sia dalla velocità sia dalla distanza.
+    Compute per-frame speed (km/h) and aggregate statistics.
+    Speed = NaN for non-consecutive frames (player not detected).
+    Displacements above max_speed_kmh are tracking glitches (blob jumps,
+    ID swaps): they are excluded from both speed and distance.
     """
     frames = sub["frame"].values
     pos    = sub[["x_m", "y_m"]].values
@@ -159,7 +159,7 @@ def _compute_speeds(sub: pd.DataFrame, fps: float,
         speed_kmh = np.where(gaps == 1, dist / dt * 3.6, np.nan)
     speed_kmh = np.where(speed_kmh > max_speed_kmh, np.nan, speed_kmh)
 
-    # serie allineata con sub (primo valore sempre NaN)
+    # series aligned with sub (first value always NaN)
     speed_full = np.concatenate([[np.nan], speed_kmh])
 
     valid_dist = dist[~np.isnan(speed_kmh)]
@@ -177,10 +177,10 @@ def _compute_speeds(sub: pd.DataFrame, fps: float,
     return stats, speed_full
 
 
-# ── zone del campo ─────────────────────────────────────────────────────────────
+# ── court zones ────────────────────────────────────────────────────────────────
 
 def _zone_of(x_m: float, y_m: float) -> str | None:
-    """Ritorna l'id zona ("FB-L", "NB-out-OR", …) oppure None se fuori range."""
+    """Return the zone id ("FB-L", "NB-out-OR", …) or None if out of range."""
     if x_m < -_SIDE - 1.0 or x_m > W_m + _SIDE + 1.0:
         return None
     if x_m < 0:
@@ -199,8 +199,8 @@ def _zone_of(x_m: float, y_m: float) -> str | None:
 
 def _compute_zone_stats(player_data: dict, fps: float) -> pd.DataFrame:
     """
-    Tempo trascorso da ogni giocatore in ciascuna zona del campo.
-    Una riga per (player_id, zona): frame, secondi e percentuale.
+    Time spent by each player in each zone of the court.
+    One row per (player_id, zone): frames, seconds and percentage.
     """
     rows = []
     band_labels = {zid: label for zid, label, _, _ in _ZONE_BANDS}
@@ -227,10 +227,10 @@ def _compute_zone_stats(player_data: dict, fps: float) -> pd.DataFrame:
 
 def _save_zone_outputs(player_data: dict, zone_df: pd.DataFrame,
                        out_dir: Path) -> None:
-    """Salva zone_stats.csv e la figura zones.png (percentuali sul campo)."""
+    """Save zone_stats.csv and the figure zones.png (percentages on the court)."""
     csv_path = out_dir / "zone_stats.csv"
     zone_df.to_csv(csv_path, index=False)
-    print(f"  Salvato: {csv_path}")
+    print(f"  Saved: {csv_path}")
 
     pids = sorted(player_data.keys())
     fig, axes = plt.subplots(1, len(pids), figsize=(4.2 * len(pids), 9))
@@ -261,19 +261,19 @@ def _save_zone_outputs(player_data: dict, zone_df: pd.DataFrame,
                     ax.text((x0 + x1) / 2, (y0 + y1) / 2, f"{p:.1f}%",
                             ha="center", va="center", color="white",
                             fontsize=7, fontweight="bold")
-        ax.set_title(f"Zone – Giocatore {pid}", color="white",
+        ax.set_title(f"Zones – Player {pid}", color="white",
                      fontsize=11, pad=4)
 
     path = out_dir / "zones.png"
     fig.savefig(path, dpi=120, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
-    print(f"  Salvato: {path}")
+    print(f"  Saved: {path}")
 
 
 # ── heatmap ────────────────────────────────────────────────────────────────────
 
-# estensione della heatmap: tutta l'area calpestabile
+# heatmap extent: the whole walkable area
 _HEAT_X = (-_SIDE, W_m + _SIDE)
 _HEAT_Y = (-_BEHIND, L_m + _BEHIND)
 _HEAT_EXTENT = [*_HEAT_X, *_HEAT_Y]
@@ -300,15 +300,15 @@ def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
         H = _make_heat_array(sub["x_m"].values, sub["y_m"].values)
         ax.imshow(H, origin="lower", extent=_HEAT_EXTENT,
                   cmap=cmaps.get(pid, "hot"), alpha=0.70, aspect="auto")
-        ax.set_title(f"Heatmap – Giocatore {pid}", color="white",
+        ax.set_title(f"Heatmap – Player {pid}", color="white",
                      fontsize=11, pad=4)
         path = out_dir / f"heatmap_p{pid}.png"
         fig.savefig(path, dpi=120, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
         plt.close(fig)
-        print(f"  Salvato: {path}")
+        print(f"  Saved: {path}")
 
-    # heatmap combinata
+    # combined heatmap
     fig, ax = plt.subplots(figsize=(4, 9))
     fig.patch.set_facecolor("#1a1a2e")
     _draw_court(ax)
@@ -320,24 +320,24 @@ def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
                              player_data[pid]["y_m"].values)
         ax.imshow(H, origin="lower", extent=_HEAT_EXTENT,
                   cmap=cmap, alpha=alpha, aspect="auto")
-    patches = [mpatches.Patch(color="red",       label="Giocatore 1"),
-               mpatches.Patch(color="steelblue", label="Giocatore 2")]
+    patches = [mpatches.Patch(color="red",       label="Player 1"),
+               mpatches.Patch(color="steelblue", label="Player 2")]
     ax.legend(handles=patches, loc="upper right", fontsize=8,
               framealpha=0.5, facecolor="#333", edgecolor="none",
               labelcolor="white")
-    ax.set_title("Heatmap combinata", color="white", fontsize=11, pad=4)
+    ax.set_title("Combined heatmap", color="white", fontsize=11, pad=4)
     path = out_dir / "heatmap_combined.png"
     fig.savefig(path, dpi=120, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
-    print(f"  Salvato: {path}")
+    print(f"  Saved: {path}")
 
 
-# ── minimap animata ────────────────────────────────────────────────────────────
+# ── animated minimap ───────────────────────────────────────────────────────────
 
 def _save_minimap(player_data: dict, all_frames: np.ndarray,
                   fps: float, stride: int, out_dir: Path) -> None:
-    # indicizzazione rapida per frame
+    # fast per-frame indexing
     indexed = {pid: sub.set_index("frame") for pid, sub in player_data.items()}
 
     sampled  = all_frames[::stride]
@@ -365,7 +365,7 @@ def _save_minimap(player_data: dict, all_frames: np.ndarray,
             if fid in indexed[pid].index:
                 row = indexed[pid].loc[fid]
                 xm, ym = float(row["x_m"]), float(row["y_m"])
-                # mostra anche le posizioni fuori dal campo (area calpestabile)
+                # also show positions outside the court (walkable area)
                 if (-_SIDE - 1 <= xm <= W_m + _SIDE + 1
                         and -_BEHIND - 1 <= ym <= L_m + _BEHIND + 1):
                     dot.set_data([xm], [ym])
@@ -376,13 +376,13 @@ def _save_minimap(player_data: dict, all_frames: np.ndarray,
     ani = FuncAnimation(fig, _update, frames=sampled, blit=True,
                         interval=1000 // gif_fps)
     path = out_dir / "minimap.gif"
-    print(f"  Generazione GIF ({len(sampled)} frame, {gif_fps} fps) …")
+    print(f"  Generating GIF ({len(sampled)} frames, {gif_fps} fps) …")
     ani.save(str(path), writer=PillowWriter(fps=gif_fps), dpi=90)
     plt.close(fig)
-    print(f"  Salvato: {path}")
+    print(f"  Saved: {path}")
 
 
-# ── CSV velocità ───────────────────────────────────────────────────────────────
+# ── speed CSV ──────────────────────────────────────────────────────────────────
 
 def _save_speed_csv(player_data: dict, speed_map: dict, out_dir: Path) -> None:
     parts = []
@@ -394,28 +394,28 @@ def _save_speed_csv(player_data: dict, speed_map: dict, out_dir: Path) -> None:
     out = pd.concat(parts).sort_values(["frame", "player_id"])
     path = out_dir / "speed_stats.csv"
     out.to_csv(path, index=False, float_format="%.4f")
-    print(f"  Salvato: {path}")
+    print(f"  Saved: {path}")
 
 
-# ── riepilogo terminale ────────────────────────────────────────────────────────
+# ── terminal summary ───────────────────────────────────────────────────────────
 
 def _print_summary(stats_map: dict, zone_df: pd.DataFrame,
                    total_frames: int) -> None:
     print("\n" + "=" * 52)
-    print("  PLAYER ANALYSIS  –  RIEPILOGO")
+    print("  PLAYER ANALYSIS  –  SUMMARY")
     print("=" * 52)
     for pid, s in stats_map.items():
-        print(f"\nGiocatore {pid} ({_COLORS[pid]}):")
-        print(f"  Distanza totale  : {s['total_distance_m']:.1f} m")
-        print(f"  Velocità media   : {s['avg_speed_kmh']:.1f} km/h")
-        print(f"  Velocità mediana : {s['median_speed_kmh']:.1f} km/h")
-        print(f"  Velocità p95     : {s['p95_speed_kmh']:.1f} km/h")
-        print(f"  Velocità max     : {s['max_speed_kmh']:.1f} km/h")
-        print(f"  Frame rilevati   : {s['frames_detected']} / {total_frames}"
-              f"  (mancanti: {s['frames_missing']})")
+        print(f"\nPlayer {pid} ({_COLORS[pid]}):")
+        print(f"  Total distance   : {s['total_distance_m']:.1f} m")
+        print(f"  Average speed    : {s['avg_speed_kmh']:.1f} km/h")
+        print(f"  Median speed     : {s['median_speed_kmh']:.1f} km/h")
+        print(f"  p95 speed        : {s['p95_speed_kmh']:.1f} km/h")
+        print(f"  Max speed        : {s['max_speed_kmh']:.1f} km/h")
+        print(f"  Frames detected  : {s['frames_detected']} / {total_frames}"
+              f"  (missing: {s['frames_missing']})")
         top = zone_df[zone_df["player_id"] == pid].head(3)
         if not top.empty:
-            print("  Zone principali  :")
+            print("  Main zones       :")
             for _, r in top.iterrows():
                 print(f"    {r['description']:<28s} "
                       f"{r['seconds']:6.1f} s  ({r['percent']:.1f}%)")
@@ -426,40 +426,40 @@ def _print_summary(stats_map: dict, zone_df: pd.DataFrame,
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Analisi movimenti giocatori tennis: minimap, heatmap, velocità"
+        description="Tennis player movement analysis: minimap, heatmap, speed"
     )
     parser.add_argument(
         "--players", default="outputs/players_clip2.csv",
-        help="CSV con tracking giocatori (default: outputs/players_clip2.csv)",
+        help="CSV with player tracking (default: outputs/players_clip2.csv)",
     )
     parser.add_argument(
         "--court", default="outputs/court_coordinates/Input_video2_court.csv",
-        help="CSV con coordinate campo DELLO STESSO video dei giocatori "
+        help="CSV with court coordinates FROM THE SAME video as the players "
              "(default: outputs/court_coordinates/Input_video2_court.csv)",
     )
     parser.add_argument("--fps",      type=float, default=30.0,
-                        help="Frame per secondo del video sorgente (default: 30)")
+                        help="Frames per second of the source video (default: 30)")
     parser.add_argument("--output",   default="outputs/player_analysis",
-                        help="Directory di output (default: outputs/player_analysis)")
+                        help="Output directory (default: outputs/player_analysis)")
     parser.add_argument("--min-area", type=int, default=500, dest="min_area",
-                        help="Filtra detection con area < N pixel (default: 500)")
+                        help="Filter out detections with area < N pixels (default: 500)")
     parser.add_argument("--anchor", choices=["feet", "centroid"], default="feet",
-                        help="Punto proiettato a terra: piedi (centro-basso del "
-                             "bbox, default) o centroide del blob")
+                        help="Point projected to the ground: feet (bottom-center "
+                             "of the bbox, default) or blob centroid")
     parser.add_argument("--max-speed", type=float, default=45.0,
                         dest="max_speed",
-                        help="Velocità (km/h) oltre cui uno spostamento è "
-                             "considerato glitch di tracking (default: 45)")
+                        help="Speed (km/h) above which a displacement is "
+                             "considered a tracking glitch (default: 45)")
     parser.add_argument("--stride",   type=int, default=3,
-                        help="Campiona 1 frame ogni N per la GIF (default: 3 → ~10 fps)")
+                        help="Sample 1 frame every N for the GIF (default: 3 → ~10 fps)")
     parser.add_argument("--no-animation", action="store_true",
-                        help="Salta la generazione della GIF (più veloce)")
+                        help="Skip GIF generation (faster)")
     args = parser.parse_args()
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Caricamento: {args.players}  (anchor: {args.anchor})")
+    print(f"Loading: {args.players}  (anchor: {args.anchor})")
     player_data = _load_and_convert(args.players, args.court,
                                     args.min_area, args.anchor)
 
@@ -468,9 +468,9 @@ def main() -> None:
         all_frames_set.update(sub["frame"].tolist())
     all_frames  = np.array(sorted(all_frames_set))
     total_frames = len(all_frames)
-    print(f"  {total_frames} frame totali, {len(player_data)} giocatori")
+    print(f"  {total_frames} total frames, {len(player_data)} players")
 
-    # velocità
+    # speed
     stats_map: dict = {}
     speed_map: dict = {}
     for pid, sub in player_data.items():
@@ -480,7 +480,7 @@ def main() -> None:
 
     zone_df = _compute_zone_stats(player_data, args.fps)
 
-    print("\nGenerazione output …")
+    print("\nGenerating output …")
     _save_heatmaps(player_data, out_dir)
     _save_speed_csv(player_data, speed_map, out_dir)
     _save_zone_outputs(player_data, zone_df, out_dir)

@@ -143,7 +143,8 @@ arrow images, LK trails, block-matching vector fields).
 ### 5. Ball & shot analysis (hit detection, forehand/backhand)
 
 Requires the ball CSV produced by the existing YOLO ball tracker
-(`ballTracking/BallTracking.py`, needs `ultralytics` + `models/ball_tracker.pt`):
+(`ballTracking/BallTracking.py`, needs `ultralytics` + the `ball_tracker.pt`
+weights in the project root):
 
 ```bash
 python ballTracking/BallTracking.py          # -> outputs/ball_clip2.csv

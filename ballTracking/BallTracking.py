@@ -1,4 +1,7 @@
-﻿import csv
+﻿import argparse
+import csv
+import os
+
 import cv2
 import numpy as np
 import pandas as pd
@@ -75,47 +78,104 @@ class BallTracker:
                 area = w * h
                 writer.writerow([frame_idx, x, y, w, h, cx, cy, area])
 
-    def run(self, video_path, output_path=None, csv_path=None):
+    def run(self, video_path, output_path=None, csv_path=None, display=True):
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print("Cannot open video:", video_path)
             return
 
-        frames = []
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Pass 1: detect the ball frame by frame, keeping only the tiny
+        # per-frame positions. Frames are released immediately (never held
+        # all at once) so memory stays bounded even on long 1080p clips.
+        print(f"Detecting ball in {total or '?'} frames...")
+        ball_positions = []
+        prev_gray = None
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            frames.append(frame)
+            detection, prev_gray = self.detect_frame(frame, prev_gray)
+            ball_positions.append(detection)
         cap.release()
 
-        print(f"Detecting ball in {len(frames)} frames...")
-        ball_positions = self.detect_frames(frames)
         ball_positions = self.interpolate_ball_positions(ball_positions)
 
         if csv_path:
             self._write_csv(csv_path, ball_positions)
             print(f"CSV saved to {csv_path}")
 
-        annotated = self.draw_bboxes(frames, ball_positions)
+        if not output_path and not display:
+            return
 
-        if output_path:
-            h, w = annotated[0].shape[:2]
-            writer = cv2.VideoWriter(
-                output_path, cv2.VideoWriter_fourcc(*"mp4v"), 30, (w, h)
-            )
-            for f in annotated:
-                writer.write(f)
+        # Pass 2: re-read the video and draw the (interpolated) boxes one frame
+        # at a time, writing/showing on the fly instead of buffering all frames.
+        cap = cv2.VideoCapture(video_path)
+        writer = None
+        idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            pos = ball_positions[idx] if idx < len(ball_positions) else {}
+            out = self.draw_bboxes([frame], [pos])[0]
+
+            if output_path:
+                if writer is None:
+                    h, w = out.shape[:2]
+                    writer = cv2.VideoWriter(
+                        output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
+                    )
+                writer.write(out)
+
+            if display:
+                cv2.imshow("Ball Tracker", out)
+                if cv2.waitKey(30) & 0xFF == ord("q"):
+                    break
+
+            idx += 1
+
+        cap.release()
+        if writer is not None:
             writer.release()
             print(f"Saved to {output_path}")
-
-        for frame in annotated:
-            cv2.imshow("Ball Tracker", frame)
-            if cv2.waitKey(30) & 0xFF == ord("q"):
-                break
-        cv2.destroyAllWindows()
+        if display:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    tracker = BallTracker("models/ball_tracker.pt")
-    tracker.run("data/input_video.mp4", output_path="outputs/ball_tracking_output1.mp4", csv_path="outputs/ball_clip1.csv")
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "ball_tracker.pt")
+
+    parser = argparse.ArgumentParser(
+        description="YOLO ball tracking -> annotated video + ball CSV")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help="path to the YOLO ball-tracker weights (.pt)")
+    parser.add_argument("--video", default="data/Input_video2.mp4",
+                        help="input video")
+    parser.add_argument("--csv", default="outputs/ball_clip2.csv",
+                        help="output ball CSV path")
+    parser.add_argument("--output", default="outputs/ball_tracking_output2.mp4",
+                        help="annotated output video path")
+    parser.add_argument("--no-video", action="store_true", dest="no_video",
+                        help="skip writing the annotated output video (CSV only)")
+    parser.add_argument("--no-display", action="store_true",
+                        help="run headless (no OpenCV window)")
+    args = parser.parse_args()
+
+    output_path = None if args.no_video else args.output
+
+    if not os.path.exists(args.model):
+        raise SystemExit(
+            f"Model not found: {args.model}\n"
+            f"Place the YOLO ball-tracker weights there or pass --model <path>.")
+
+    for path in (args.csv, output_path):
+        if path:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    tracker = BallTracker(args.model)
+    tracker.run(args.video, output_path=output_path, csv_path=args.csv,
+                display=not args.no_display)

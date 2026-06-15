@@ -6,4 +6,4 @@ scipy
 Pillow
 
 # Only needed for the optional ball-tracking extra (ballTracking/):
-# ultralytics
+ultralytics
