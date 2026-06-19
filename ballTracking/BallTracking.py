@@ -8,14 +8,34 @@ import pandas as pd
 from ultralytics import YOLO
 
 
+# Minimum YOLO confidence for a ball detection to be accepted.
+BALL_CONF = 0.65
+# Per-pixel intensity-difference threshold (0-255) used to detect motion
+# inside a candidate box.
+MOTION_THRESH = 15
+
+
 class BallTracker:
     def __init__(self, model_path):
         self.model = YOLO(model_path)
 
     def _has_motion(self, prev_gray, curr_gray, x1, y1, x2, y2, threshold=0.05):
         """Returns True if at least `threshold` fraction of pixels in the box moved."""
-        motion = cv2.absdiff(prev_gray[y1:y2, x1:x2], curr_gray[y1:y2, x1:x2])
-        _, binary = cv2.threshold(motion, 15, 255, cv2.THRESH_BINARY)
+        H, W = curr_gray.shape[:2]
+        # Clamp coords to frame bounds and validate ordering before slicing,
+        # so a bad/empty/out-of-range box never reaches cv2.absdiff().
+        x1 = max(0, min(int(x1), W))
+        x2 = max(0, min(int(x2), W))
+        y1 = max(0, min(int(y1), H))
+        y2 = max(0, min(int(y2), H))
+        if x2 <= x1 or y2 <= y1:
+            return False
+        prev_slice = prev_gray[y1:y2, x1:x2]
+        curr_slice = curr_gray[y1:y2, x1:x2]
+        if prev_slice.size == 0 or curr_slice.size == 0:
+            return False
+        motion = cv2.absdiff(prev_slice, curr_slice)
+        _, binary = cv2.threshold(motion, MOTION_THRESH, 255, cv2.THRESH_BINARY)
         total = binary.size
         if total == 0:
             return False
@@ -24,7 +44,7 @@ class BallTracker:
     def detect_frame(self, frame, prev_gray=None):
         """Returns {1: [x1,y1,x2,y2]} for the highest-confidence detection with motion, or {}."""
         curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        results = self.model.predict(frame, conf=0.65, verbose=False)[0]
+        results = self.model.predict(frame, conf=BALL_CONF, verbose=False)[0]
         for idx in results.boxes.conf.argsort(descending=True):
             x1, y1, x2, y2 = map(int, results.boxes.xyxy[idx])
             if prev_gray is not None and not self._has_motion(prev_gray, curr_gray, x1, y1, x2, y2):
@@ -33,7 +53,11 @@ class BallTracker:
         return {}, curr_gray
 
     def detect_frames(self, frames):
-        """Returns list of per-frame detection dicts."""
+        """Returns list of per-frame detection dicts.
+
+        Standalone helper: not used by run()/__main__ (which stream frames one
+        at a time). Kept for callers that already hold all frames in memory.
+        """
         ball_positions = []
         prev_gray = None
         for frame in frames:
@@ -42,11 +66,17 @@ class BallTracker:
         return ball_positions
 
     def interpolate_ball_positions(self, ball_positions):
-        """Fills gaps with linear interpolation + backward fill."""
+        """Fills gaps with linear interpolation, extending to both ends.
+
+        limit_direction="both" interpolates interior gaps and also propagates
+        the nearest values outward, so trailing gaps after the last detection
+        (and leading gaps before the first) aren't left NaN and silently
+        dropped downstream. bfill/ffill cover any all-NaN edge rows.
+        """
         positions_list = [p.get(1, []) for p in ball_positions]
         df = pd.DataFrame(positions_list, columns=["x1", "y1", "x2", "y2"])
-        df = df.interpolate()
-        df = df.bfill()
+        df = df.interpolate(limit_direction="both")
+        df = df.bfill().ffill()
         return [{1: row} for row in df.to_numpy().tolist()]
 
     def draw_bboxes(self, frames, ball_positions):
@@ -84,7 +114,10 @@ class BallTracker:
             print("Cannot open video:", video_path)
             return
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        # Robust fps guard: reject missing / non-finite / non-positive values.
+        if not fps or not np.isfinite(fps) or fps <= 0:
+            fps = 30.0
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         # Pass 1: detect the ball frame by frame, keeping only the tiny
@@ -93,13 +126,16 @@ class BallTracker:
         print(f"Detecting ball in {total or '?'} frames...")
         ball_positions = []
         prev_gray = None
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            detection, prev_gray = self.detect_frame(frame, prev_gray)
-            ball_positions.append(detection)
-        cap.release()
+        # try/finally guarantees the Pass-1 capture is released even on error.
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                detection, prev_gray = self.detect_frame(frame, prev_gray)
+                ball_positions.append(detection)
+        finally:
+            cap.release()
 
         ball_positions = self.interpolate_ball_positions(ball_positions)
 
@@ -115,34 +151,41 @@ class BallTracker:
         cap = cv2.VideoCapture(video_path)
         writer = None
         idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            pos = ball_positions[idx] if idx < len(ball_positions) else {}
-            out = self.draw_bboxes([frame], [pos])[0]
-
-            if output_path:
-                if writer is None:
-                    h, w = out.shape[:2]
-                    writer = cv2.VideoWriter(
-                        output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
-                    )
-                writer.write(out)
-
-            if display:
-                cv2.imshow("Ball Tracker", out)
-                if cv2.waitKey(30) & 0xFF == ord("q"):
+        # try/finally guarantees the Pass-2 capture AND the VideoWriter are
+        # released even on error, so the output .mp4 is always finalized.
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
                     break
+                # Assumes Pass 1 and Pass 2 read the same number of frames in
+                # the same order (true for constant-frame-rate files). The
+                # idx < len(...) guard prevents IndexError, but variable-frame-
+                # rate (VFR) input could desync detections from frames here.
+                pos = ball_positions[idx] if idx < len(ball_positions) else {}
+                out = self.draw_bboxes([frame], [pos])[0]
 
-            idx += 1
+                if output_path:
+                    if writer is None:
+                        h, w = out.shape[:2]
+                        writer = cv2.VideoWriter(
+                            output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
+                        )
+                    writer.write(out)
 
-        cap.release()
-        if writer is not None:
-            writer.release()
-            print(f"Saved to {output_path}")
-        if display:
-            cv2.destroyAllWindows()
+                if display:
+                    cv2.imshow("Ball Tracker", out)
+                    if cv2.waitKey(30) & 0xFF == ord("q"):
+                        break
+
+                idx += 1
+        finally:
+            cap.release()
+            if writer is not None:
+                writer.release()
+                print(f"Saved to {output_path}")
+            if display:
+                cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

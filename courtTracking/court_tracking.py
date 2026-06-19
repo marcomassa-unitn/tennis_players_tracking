@@ -50,6 +50,10 @@ Y_GROUP_TOLERANCE = 50
 NET_Y_FRACTION = 0.40   # approximate net position as fraction of court height
 NET_Y_BAND     = 0.22   # half-width of the exclusion band (fraction of court height)
 
+# ── Playback ──────────────────────────────────────────────────────────────────
+# Base numerator for the per-frame playback delay (ms): delay = base / fps.
+PLAYBACK_DELAY_BASE_MS = 500
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -78,18 +82,30 @@ def angle_between(seg1, seg2):
 
 
 def cluster_points(points, radius):
-    """Merge points within `radius` of each other; return cluster centroids."""
-    clusters = []
-    for pt in points:
+    """Merge points within `radius` of each other; return cluster centroids.
+
+    Deterministic: the input is sorted by (y, x) first so the result does not
+    depend on input ordering. Each cluster tracks the running sum and count of
+    its members, and its center is the true mean (centroid) of ALL members.
+    """
+    # Sort by (y, x) so clustering is order-independent and reproducible.
+    sorted_points = sorted(points, key=lambda p: (p[1], p[0]))
+
+    clusters = []   # each entry: [center_x, center_y, sum_x, sum_y, count]
+    for pt in sorted_points:
         merged = False
         for c in clusters:
             if np.hypot(pt[0] - c[0], pt[1] - c[1]) < radius:
-                c[0] = (c[0] + pt[0]) / 2
-                c[1] = (c[1] + pt[1]) / 2
+                c[2] += pt[0]
+                c[3] += pt[1]
+                c[4] += 1
+                # Recompute center as the mean of all members in the cluster.
+                c[0] = c[2] / c[4]
+                c[1] = c[3] / c[4]
                 merged = True
                 break
         if not merged:
-            clusters.append(list(pt))
+            clusters.append([pt[0], pt[1], pt[0], pt[1], 1])
     return [(int(round(c[0])), int(round(c[1]))) for c in clusters]
 
 
@@ -169,13 +185,18 @@ def project_all_corners(known):
     labels = list(known)
     src = np.array([REAL_FT[k] for k in labels], dtype=np.float32)
     dst = np.array([known[k] for k in labels], dtype=np.float32)
-    H, _ = cv2.findHomography(src, dst)
+    H, _ = cv2.findHomography(src, dst, method=cv2.RANSAC,
+                              ransacReprojThreshold=3.0)
     if H is None:
         raise RuntimeError("Homography from detected corners failed.")
 
     out = {}
     for label, (rx, ry) in REAL_FT.items():
         p = H @ np.array([rx, ry, 1.0])
+        # Guard the homogeneous divisor; a near-zero w yields inf/NaN pixels.
+        if abs(p[2]) < 1e-9:
+            raise RuntimeError(
+                f"Degenerate homography: zero homogeneous divisor for {label}.")
         out[label] = (int(round(p[0] / p[2])), int(round(p[1] / p[2])))
     for label, (x, y) in known.items():
         out[label] = (int(round(x)), int(round(y)))
@@ -309,11 +330,12 @@ class CourtTracker:
     """
 
     def __init__(self, video_path, no_display=False, roi_top=0.15,
-                 far_line="baseline"):
+                 far_line="baseline", output_dir="outputs"):
         self.video_path = video_path
         self.no_display = no_display
         self.roi_top = roi_top
         self.far_line = far_line
+        self.output_dir = output_dir
 
     def run(self):
         """
@@ -321,196 +343,208 @@ class CourtTracker:
         play back the annotated video. Returns the dict of 8 keypoints.
         """
         video_stem = os.path.splitext(os.path.basename(self.video_path))[0]
-        csv_path = os.path.join("outputs", "court_coordinates",
+        csv_path = os.path.join(self.output_dir, "court_coordinates",
                                 f"{video_stem}_court.csv")
 
-        roi_top_fraction = self.roi_top
-
-        os.makedirs(os.path.join("outputs", "court_coordinates"),
+        os.makedirs(os.path.join(self.output_dir, "court_coordinates"),
                     exist_ok=True)
 
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {self.video_path}")
 
-        ret, frame = cap.read()
-        if not ret:
-            raise RuntimeError("Failed to read the first frame.")
-
-        h, w = frame.shape[:2]
-
-        # 1. White mask
-        hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, LOWER_WHITE, UPPER_WHITE)
-
-        # 2. Apply ROI
-        roi_top    = int(h * roi_top_fraction)
-        roi_bottom = int(h * ROI_BOTTOM_FRACTION)
-        roi_left   = int(w * ROI_LEFT_FRACTION)
-        roi_right  = int(w * ROI_RIGHT_FRACTION)
-        mask[:roi_top,    :] = 0
-        mask[roi_bottom:, :] = 0
-        mask[:, :roi_left]   = 0
-        mask[:, roi_right:]  = 0
-
-        # 3. Clean the mask
-        kernel     = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        mask_clean = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        edges      = cv2.Canny(mask_clean, 50, 150)
-
-        # 4. Detect line segments
-        raw_lines = cv2.HoughLinesP(
-            edges,
-            rho=HOUGH_RHO,
-            theta=HOUGH_THETA,
-            threshold=HOUGH_THRESHOLD,
-            minLineLength=HOUGH_MIN_LENGTH,
-            maxLineGap=HOUGH_MAX_GAP,
-        )
-
-        if raw_lines is None:
-            print("No lines detected — try loosening HOUGH_THRESHOLD or HOUGH_MIN_LENGTH.")
-            cv2.imshow("White Mask", cv2.bitwise_and(frame, frame, mask=mask))
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
-            raise SystemExit
-
-        segments = raw_lines[:, 0, :]
-
-        # 5. Pairwise intersections
-        raw_intersections = []
-        for i in range(len(segments)):
-            for j in range(i + 1, len(segments)):
-                angle = angle_between(segments[i], segments[j])
-                if angle < MIN_ANGLE_DEG or angle > (180 - MIN_ANGLE_DEG):
-                    continue
-                pt = line_intersection(segments[i], segments[j])
-                if pt is None:
-                    continue
-                x, y = pt
-                if roi_left <= x < roi_right and roi_top <= y < roi_bottom:
-                    raw_intersections.append((x, y))
-
-        # 6. Cluster nearby intersections
-        all_dots = cluster_points(raw_intersections, CLUSTER_RADIUS)
-        print(f"Detected {len(segments)} line segments -> {len(all_dots)} intersection points (pre-filter).")
-
-        # 6b. Strip doubles-alley corners using ITF width proportions
-        dots = filter_singles_by_proportion(all_dots, Y_GROUP_TOLERANCE, ALLEY_RATIO)
-        print(f"After singles-court proportion filter: {len(dots)} dots.")
-        for i, d in enumerate(dots):
-            print(f"  dot[{i:2d}] = {d}")
-
-        # 7. Select the 4 extreme corners of the detected dots
-        tl, tr, bl, br = find_court_corners(dots, frame.shape, rank=SINGLES_CORNER_RANK)
-
-        # 7b. Refine the far side. Hough intersections are unreliable up there (the
-        # far ground lines are thin and dim, while banner edges and the ELEVATED net
-        # band are bright); instead, scan a 1-D white-coverage profile between the
-        # fitted sidelines and pick the (baseline, service-line) row pair that is
-        # projectively consistent with the ITF court model.
-        far_sel = None
-        xl_fit = fit_sideline(segments, bl)
-        xr_fit = fit_sideline(segments, br)
-        if xl_fit is not None and xr_fit is not None:
-            bands = find_ground_line_bands(hsv, xl_fit, xr_fit,
-                                           y_min=roi_top,
-                                           y_max=min(bl[1], br[1]) - 30)
-            if bands:
-                far_sel = select_far_lines(bands, bl, br, xl_fit, xr_fit)
-
-        if far_sel is not None:
-            yb, ys, (r_far, r_near) = far_sel
-            tl = (int(round(xl_fit[0] * yb + xl_fit[1])), int(round(yb)))
-            tr = (int(round(xr_fit[0] * yb + xr_fit[1])), int(round(yb)))
-            known = {"TL": tl, "TR": tr, "BL": bl, "BR": br}
-            print(f"Far lines via coverage profile: baseline y={yb:.0f}, "
-                  f"service y={ys:.0f} (residuals: far {r_far:.1f}px, "
-                  f"near {r_near:.1f}px)")
-        else:
-            print("WARNING: coverage-profile far-line detection failed, falling "
-                  "back to Hough corners" +
-                  (" interpreted as the far service line (--far-line service)."
-                   if self.far_line == "service" else "."))
-            if self.far_line == "service":
-                known = {"STL": tl, "STR": tr, "BL": bl, "BR": br}
-            else:
-                known = {"TL": tl, "TR": tr, "BL": bl, "BR": br}
-        all_pts = project_all_corners(known)
-
-        corners = {k: all_pts[k] for k in ("TL", "TR", "BL", "BR")}
-        service = {k: all_pts[k] for k in ("STL", "STR", "SBL", "SBR")}
-        tl, tr, bl, br = corners["TL"], corners["TR"], corners["BL"], corners["BR"]
-        print(f"\nCourt corners  TL:{tl}  TR:{tr}  BL:{bl}  BR:{br}")
-        print(f"Service corners  STL:{service['STL']}  STR:{service['STR']}  SBL:{service['SBL']}  SBR:{service['SBR']}")
-
-        # 7c. Discard net-zone dots from display (corners are already saved above).
-        court_span = bl[1] - tl[1]
-        net_y      = tl[1] + court_span * NET_Y_FRACTION
-        dots = [d for d in dots if abs(d[1] - net_y) > court_span * NET_Y_BAND]
-
-        # 8. Save all 8 named corners to CSV
-        keypoints = {**corners, **service}
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["label", "x", "y"])
-            for label in ("TL", "TR", "BL", "BR", "STL", "STR", "SBL", "SBR"):
-                pt = keypoints[label]
-                writer.writerow([label, pt[0], pt[1]])
-        print(f"Saved all corners to '{csv_path}'.")
-
-        # 9. Play video — all dots in red, 4 corners highlighted with magenta ring
-        if self.no_display:
-            cap.release()
-            return keypoints
-
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps == 0 or np.isnan(fps):
-            fps = 30
-        delay = int(500 / fps)
-
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        quad_pts = np.array([tl, tr, br, bl], dtype=np.int32)
-
-        while True:
-            ret, current_frame = cap.read()
+        # Ensure the capture (and any window) is released on every exit path,
+        # including early returns and raised exceptions.
+        try:
+            ret, frame = cap.read()
             if not ret:
-                break
+                raise RuntimeError("Failed to read the first frame.")
 
-            # Semi-transparent green fill over the court area
-            overlay = current_frame.copy()
-            cv2.fillPoly(overlay, [quad_pts], (0, 180, 0))
-            cv2.addWeighted(overlay, 0.20, current_frame, 0.80, 0, current_frame)
+            h, w = frame.shape[:2]
 
-            # Court boundary outline
-            cv2.polylines(current_frame, [quad_pts], isClosed=True, color=(0, 255, 0), thickness=2)
+            # 1. White mask
+            hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, LOWER_WHITE, UPPER_WHITE)
 
-            # All detected dots — red filled circles
-            for (x, y) in dots:
-                cv2.circle(current_frame, (x, y), DOT_RADIUS, (0, 0, 255), -1)
+            # 2. Apply ROI
+            roi_top    = int(h * self.roi_top)
+            roi_bottom = int(h * ROI_BOTTOM_FRACTION)
+            roi_left   = int(w * ROI_LEFT_FRACTION)
+            roi_right  = int(w * ROI_RIGHT_FRACTION)
+            mask[:roi_top,    :] = 0
+            mask[roi_bottom:, :] = 0
+            mask[:, :roi_left]   = 0
+            mask[:, roi_right:]  = 0
 
-            # Court corners — magenta ring + label
-            for label, corner in corners.items():
-                cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 0, 255), 2)
-                cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 0, 255), 2)
+            # 3. Clean the mask
+            kernel     = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            mask_clean = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            edges      = cv2.Canny(mask_clean, 50, 150)
 
-            # Service-line corners — cyan ring + label; STL gets a red fill too because
-            # it is computed geometrically (not from Hough), so it has no red dot yet.
-            for label, corner in service.items():
-                if label == "STL":
-                    cv2.circle(current_frame, corner, DOT_RADIUS, (0, 0, 255), -1)
-                cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 255, 0), 2)
-                cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
+            # 4. Detect line segments
+            raw_lines = cv2.HoughLinesP(
+                edges,
+                rho=HOUGH_RHO,
+                theta=HOUGH_THETA,
+                threshold=HOUGH_THRESHOLD,
+                minLineLength=HOUGH_MIN_LENGTH,
+                maxLineGap=HOUGH_MAX_GAP,
+            )
 
-            cv2.imshow("Tennis Court - Video Playback", current_frame)
-            if cv2.waitKey(delay) & 0xFF == ord("q"):
-                break
+            if raw_lines is None:
+                print("No lines detected — try loosening HOUGH_THRESHOLD or HOUGH_MIN_LENGTH.")
+                if not self.no_display:
+                    cv2.imshow("White Mask",
+                               cv2.bitwise_and(frame, frame, mask=mask))
+                    cv2.waitKey(0)
+                    cv2.destroyAllWindows()
+                raise RuntimeError(
+                    "No court lines detected (try loosening HOUGH_THRESHOLD / "
+                    "HOUGH_MIN_LENGTH).")
 
-        cap.release()
-        cv2.destroyAllWindows()
-        return keypoints
+            segments = raw_lines[:, 0, :]
+
+            # 5. Pairwise intersections
+            raw_intersections = []
+            for i in range(len(segments)):
+                for j in range(i + 1, len(segments)):
+                    angle = angle_between(segments[i], segments[j])
+                    if angle < MIN_ANGLE_DEG or angle > (180 - MIN_ANGLE_DEG):
+                        continue
+                    pt = line_intersection(segments[i], segments[j])
+                    if pt is None:
+                        continue
+                    x, y = pt
+                    if roi_left <= x < roi_right and roi_top <= y < roi_bottom:
+                        raw_intersections.append((x, y))
+
+            # 6. Cluster nearby intersections
+            all_dots = cluster_points(raw_intersections, CLUSTER_RADIUS)
+            print(f"Detected {len(segments)} line segments -> {len(all_dots)} intersection points (pre-filter).")
+
+            # 6b. Strip doubles-alley corners using ITF width proportions
+            dots = filter_singles_by_proportion(all_dots, Y_GROUP_TOLERANCE, ALLEY_RATIO)
+            print(f"After singles-court proportion filter: {len(dots)} dots.")
+            for i, d in enumerate(dots):
+                print(f"  dot[{i:2d}] = {d}")
+
+            # 7. Select the 4 extreme corners of the detected dots
+            tl, tr, bl, br = find_court_corners(dots, frame.shape, rank=SINGLES_CORNER_RANK)
+
+            # 7b. Refine the far side. Hough intersections are unreliable up there (the
+            # far ground lines are thin and dim, while banner edges and the ELEVATED net
+            # band are bright); instead, scan a 1-D white-coverage profile between the
+            # fitted sidelines and pick the (baseline, service-line) row pair that is
+            # projectively consistent with the ITF court model.
+            far_sel = None
+            xl_fit = fit_sideline(segments, bl)
+            xr_fit = fit_sideline(segments, br)
+            if xl_fit is not None and xr_fit is not None:
+                bands = find_ground_line_bands(hsv, xl_fit, xr_fit,
+                                               y_min=roi_top,
+                                               y_max=min(bl[1], br[1]) - 30)
+                if bands:
+                    far_sel = select_far_lines(bands, bl, br, xl_fit, xr_fit)
+
+            if far_sel is not None:
+                yb, ys, (r_far, r_near) = far_sel
+                tl = (int(round(xl_fit[0] * yb + xl_fit[1])), int(round(yb)))
+                tr = (int(round(xr_fit[0] * yb + xr_fit[1])), int(round(yb)))
+                known = {"TL": tl, "TR": tr, "BL": bl, "BR": br}
+                print(f"Far lines via coverage profile: baseline y={yb:.0f}, "
+                      f"service y={ys:.0f} (residuals: far {r_far:.1f}px, "
+                      f"near {r_near:.1f}px)")
+            else:
+                print("WARNING: coverage-profile far-line detection failed, falling "
+                      "back to Hough corners" +
+                      (" interpreted as the far service line (--far-line service)."
+                       if self.far_line == "service" else "."))
+                if self.far_line == "service":
+                    known = {"STL": tl, "STR": tr, "BL": bl, "BR": br}
+                else:
+                    known = {"TL": tl, "TR": tr, "BL": bl, "BR": br}
+            all_pts = project_all_corners(known)
+
+            corners = {k: all_pts[k] for k in ("TL", "TR", "BL", "BR")}
+            service = {k: all_pts[k] for k in ("STL", "STR", "SBL", "SBR")}
+            tl, tr, bl, br = corners["TL"], corners["TR"], corners["BL"], corners["BR"]
+            print(f"\nCourt corners  TL:{tl}  TR:{tr}  BL:{bl}  BR:{br}")
+            print(f"Service corners  STL:{service['STL']}  STR:{service['STR']}  SBL:{service['SBL']}  SBR:{service['SBR']}")
+
+            # 7c. Discard net-zone dots from display (corners are already saved above).
+            court_span = bl[1] - tl[1]
+            # Guard degenerate geometry: a non-positive span (corners collapsed or
+            # inverted) would make the net band meaningless, so skip net filtering.
+            if court_span > 0:
+                net_y = tl[1] + court_span * NET_Y_FRACTION
+                dots = [d for d in dots
+                        if abs(d[1] - net_y) > court_span * NET_Y_BAND]
+
+            # 8. Save all 8 named corners to CSV
+            keypoints = {**corners, **service}
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["label", "x", "y"])
+                for label in ("TL", "TR", "BL", "BR", "STL", "STR", "SBL", "SBR"):
+                    pt = keypoints[label]
+                    writer.writerow([label, pt[0], pt[1]])
+            print(f"Saved all corners to '{csv_path}'.")
+
+            # 9. Play video — all dots in red, 4 corners highlighted with magenta ring
+            if self.no_display:
+                return keypoints
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if not fps or not np.isfinite(fps) or fps <= 0:
+                fps = 30
+            delay = max(1, int(PLAYBACK_DELAY_BASE_MS / fps))
+
+            # Rewind to the first frame. Note: seeking by frame index can be
+            # unreliable on some codecs/containers (it may land on a nearby
+            # keyframe rather than frame 0).
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            quad_pts = np.array([tl, tr, br, bl], dtype=np.int32)
+
+            while True:
+                ret, current_frame = cap.read()
+                if not ret:
+                    break
+
+                # Semi-transparent green fill over the court area
+                overlay = current_frame.copy()
+                cv2.fillPoly(overlay, [quad_pts], (0, 180, 0))
+                cv2.addWeighted(overlay, 0.20, current_frame, 0.80, 0, current_frame)
+
+                # Court boundary outline
+                cv2.polylines(current_frame, [quad_pts], isClosed=True, color=(0, 255, 0), thickness=2)
+
+                # All detected dots — red filled circles
+                for (x, y) in dots:
+                    cv2.circle(current_frame, (x, y), DOT_RADIUS, (0, 0, 255), -1)
+
+                # Court corners — magenta ring + label
+                for label, corner in corners.items():
+                    cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 0, 255), 2)
+                    cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 0, 255), 2)
+
+                # Service-line corners — cyan ring + label; STL gets a red fill too because
+                # it is computed geometrically (not from Hough), so it has no red dot yet.
+                for label, corner in service.items():
+                    if label == "STL":
+                        cv2.circle(current_frame, corner, DOT_RADIUS, (0, 0, 255), -1)
+                    cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 255, 0), 2)
+                    cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
+
+                cv2.imshow("Tennis Court - Video Playback", current_frame)
+                if cv2.waitKey(delay) & 0xFF == ord("q"):
+                    break
+
+            return keypoints
+        finally:
+            cap.release()
+            cv2.destroyAllWindows()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -534,6 +568,9 @@ if __name__ == "__main__":
                              "the top corners are on the far service line; the "
                              "real baseline corners are then projected from ITF "
                              "proportions (default: baseline)")
+    parser.add_argument("--output", default="outputs", dest="output_dir",
+                        help="output directory for generated files such as the "
+                             "court-coordinates CSV (default: outputs)")
     args = parser.parse_args()
 
     CourtTracker(
@@ -541,4 +578,5 @@ if __name__ == "__main__":
         no_display=args.no_display,
         roi_top=args.roi_top,
         far_line=args.far_line,
+        output_dir=args.output_dir,
     ).run()

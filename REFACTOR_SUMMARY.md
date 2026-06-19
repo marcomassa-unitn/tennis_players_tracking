@@ -119,8 +119,30 @@ Every original per-module command still works exactly as before.
 - `CourtTracker` and `PlayerTracker` import successfully and their constructor
   signatures match the pipeline's calls.
 
+## Hardening pass (2026-06-19)
+
+After the initial integration, a multi-agent critical audit (`PROJECT_AUDIT.md`)
+drove a project-wide hardening pass. Highlights:
+
+- **Resource safety**: every `run()` (court / player / ball) now releases its
+  `VideoCapture`/`VideoWriter` and closes CSVs via `try/finally`.
+- **Pipeline robustness**: each step is isolated in `try/except (Exception,
+  SystemExit)` (one failing step no longer aborts the run); `step_shots` skips
+  gracefully when the ball CSV is absent; a final summary lists
+  succeeded / skipped / failed steps.
+- **Path consistency**: `CourtTracker` now takes `output_dir` (and a `--output`
+  CLI arg), so the court CSV honors the pipeline `--output` — the previous
+  hardcoded-`outputs/` caveat is **resolved**.
+- **Headless by default**: `python pipeline.py` runs headless; `--display` opts
+  into OpenCV windows (`--no-display` still accepted).
+- **Correctness/robustness**: unified `isfinite` FPS guard across trackers,
+  RANSAC homography, deterministic court clustering, contiguous-run gradients and
+  fixed min-gap dedup in shot detection, IoU-gated evaluation metrics, real FPS
+  read from the video, bounded optical flow (`--flow-frames`), and a new
+  **player ID-swap correction** in `playerTracking.py`.
+
+See `PROJECT_AUDIT.md` (status banner at top) for the full per-item list.
+
 ## Known caveat
-- `CourtTracker.run()` writes its CSV under a hardcoded `outputs/court_coordinates/`
-  base rather than honoring `--output`. With the default `--output outputs/` this
-  matches what the pipeline expects; a non-default `--output` would place the court
-  CSV under `outputs/` while other artifacts go elsewhere.
+- None outstanding from the original audit. The previously-noted
+  `CourtTracker` hardcoded-output-path issue is resolved (see above).

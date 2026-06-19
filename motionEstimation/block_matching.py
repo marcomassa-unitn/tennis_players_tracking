@@ -222,47 +222,77 @@ def main():
     print(header)
     print("-" * len(header))
 
-    for k in range(args.frames):
-        i = args.start + k * args.step
-        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-        ok1, f1 = cap.read()
-        ok2, f2 = cap.read()
-        if not (ok1 and ok2):
-            print(f"  frame {i}: out of video, stopping.")
-            break
+    # Sequential reading: seek ONCE to --start, then decode frames in order
+    # keeping the previous frame so each consecutive (prev, curr) pair is
+    # exact. Seeking per-pair with CAP_PROP_POS_FRAMES lands on the nearest
+    # keyframe for non-keyframe targets, which can yield the wrong frame pair
+    # and corrupt PSNR. The --start/--frames/--step semantics are preserved:
+    # pair k starts at frame (start + k*step) and is the pair (i, i+1), for
+    # k = 0 .. frames-1.
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, args.start)
+        # frame indices we want a pair to START at (each pair is i, i+1)
+        wanted = {args.start + k * args.step for k in range(args.frames)}
+        last_wanted = args.start + (args.frames - 1) * args.step
 
-        if args.scale != 1.0:
-            f1 = cv2.resize(f1, None, fx=args.scale, fy=args.scale)
-            f2 = cv2.resize(f2, None, fx=args.scale, fy=args.scale)
-        g1 = cv2.cvtColor(f1, cv2.COLOR_BGR2GRAY)
-        g2 = cv2.cvtColor(f2, cv2.COLOR_BGR2GRAY)
+        prev_frame = None
+        prev_idx = -1
+        idx = args.start            # index of the frame returned by the next read
+        processed = 0
 
-        for method in methods:
-            t0 = time.perf_counter()
-            u, v = runner[method](g1, g2, args.block, args.search)
-            dt = time.perf_counter() - t0
+        while processed < args.frames:
+            ok, frame = cap.read()
+            if not ok:
+                print(f"  frame {idx}: out of video, stopping.")
+                break
 
-            pred = motion_compensate(g1, u, v, args.block)
-            h_crop = (g2.shape[0] // args.block) * args.block
-            w_crop = (g2.shape[1] // args.block) * args.block
-            p_mc = psnr(g2[:h_crop, :w_crop], pred[:h_crop, :w_crop])
-            p_no = psnr(g2[:h_crop, :w_crop], g1[:h_crop, :w_crop])
-            moving = int(np.sum(np.hypot(u, v) >= 1.0))
+            # A pair (i, i+1) is ready when the current frame is i+1 and its
+            # predecessor i (consecutively decoded) is a wanted pair start.
+            if prev_frame is not None and prev_idx in wanted \
+                    and idx == prev_idx + 1:
+                i = prev_idx
+                f1, f2 = prev_frame, frame
+                if args.scale != 1.0:
+                    f1 = cv2.resize(f1, None, fx=args.scale, fy=args.scale)
+                    f2 = cv2.resize(f2, None, fx=args.scale, fy=args.scale)
+                g1 = cv2.cvtColor(f1, cv2.COLOR_BGR2GRAY)
+                g2 = cv2.cvtColor(f2, cv2.COLOR_BGR2GRAY)
 
-            print(f"{i:>5d}-{i + 1:<5d} | {method:>6s} | {dt:6.2f}s | "
-                  f"{p_mc:9.2f}dB | {p_no:9.2f}dB | {moving:>13d}")
+                for method in methods:
+                    t0 = time.perf_counter()
+                    u, v = runner[method](g1, g2, args.block, args.search)
+                    dt = time.perf_counter() - t0
 
-            vis = draw_motion_field(f2, u, v, args.block)
-            out_png = os.path.join(
-                args.output, f"bm_{method}_frame{i:05d}.png")
-            cv2.imwrite(out_png, vis)
-            if args.display:
-                cv2.imshow("Block matching", vis)
-                cv2.waitKey(300)
+                    pred = motion_compensate(g1, u, v, args.block)
+                    h_crop = (g2.shape[0] // args.block) * args.block
+                    w_crop = (g2.shape[1] // args.block) * args.block
+                    p_mc = psnr(g2[:h_crop, :w_crop], pred[:h_crop, :w_crop])
+                    p_no = psnr(g2[:h_crop, :w_crop], g1[:h_crop, :w_crop])
+                    moving = int(np.sum(np.hypot(u, v) >= 1.0))
 
-    cap.release()
-    if args.display:
-        cv2.destroyAllWindows()
+                    print(f"{i:>5d}-{i + 1:<5d} | {method:>6s} | {dt:6.2f}s | "
+                          f"{p_mc:9.2f}dB | {p_no:9.2f}dB | {moving:>13d}")
+
+                    vis = draw_motion_field(f2, u, v, args.block)
+                    out_png = os.path.join(
+                        args.output, f"bm_{method}_frame{i:05d}.png")
+                    cv2.imwrite(out_png, vis)
+                    if args.display:
+                        cv2.imshow("Block matching", vis)
+                        cv2.waitKey(300)
+
+                processed += 1
+
+            prev_frame = frame
+            prev_idx = idx
+            idx += 1
+            # nothing left to match once we are past the last wanted pair
+            if prev_idx > last_wanted:
+                break
+    finally:
+        cap.release()
+        if args.display:
+            cv2.destroyAllWindows()
     print(f"\nVisualizations saved in: {args.output}")
 
 

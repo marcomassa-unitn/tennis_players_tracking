@@ -44,15 +44,33 @@ from utils.court_converter import CourtConverter, _REAL_WORLD
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def load_boxes(path):
-    """CSV with frame,player_id,x,y,w,h[,...] → {frame: {pid: (x,y,w,h)}}."""
+def load_boxes(path, valid_ids=None):
+    """
+    CSV with frame,player_id,x,y,w,h[,...] → {frame: {pid: (x,y,w,h)}}.
+
+    If `valid_ids` is given (e.g. {1, 2} for GT), rows whose player_id is not
+    in that set are warned about and skipped, so a typo cannot silently create
+    a spurious third identity.
+    """
     boxes = defaultdict(dict)
+    skipped = 0
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
-            boxes[int(row["frame"])][int(row["player_id"])] = (
+            pid = int(row["player_id"])
+            if valid_ids is not None and pid not in valid_ids:
+                if skipped < 10:
+                    print(f"  [warn] {path}: skipping row with player_id="
+                          f"{pid} (expected one of {sorted(valid_ids)}), "
+                          f"frame {row['frame']}")
+                skipped += 1
+                continue
+            boxes[int(row["frame"])][pid] = (
                 float(row["x"]), float(row["y"]),
                 float(row["w"]), float(row["h"]),
             )
+    if skipped:
+        print(f"  [warn] {path}: skipped {skipped} row(s) with "
+              f"unexpected player_id")
     return boxes
 
 
@@ -98,7 +116,18 @@ def match_boxes(gt, pred):
 # ── player evaluation ──────────────────────────────────────────────────────────
 
 def evaluate_players(gt_path, pred_path, court_path, iou_thr, out_dir):
-    gt_all = load_boxes(gt_path)
+    """
+    Evaluate predicted player boxes against GT boxes per annotated frame.
+
+    Note on the "ID switch" metric: predicted ids come from area-ordered
+    connected components, not from a re-identification ground truth. This
+    metric therefore measures match-ASSIGNMENT instability -- how often the
+    predicted id matched to a given GT player flips between consecutive
+    annotated frames -- rather than true identity-preservation errors.
+    """
+    # GT is authored by annotate.py with P1=NEAR, P2=FAR, so only ids {1,2}
+    # are valid; reject anything else rather than inventing a third identity.
+    gt_all = load_boxes(gt_path, valid_ids={1, 2})
     pred_all = load_boxes(pred_path)
     conv = CourtConverter(court_path) if court_path else None
 
@@ -106,6 +135,8 @@ def evaluate_players(gt_path, pred_path, court_path, iou_thr, out_dir):
     n_gt = n_pred = n_tp = 0
     ious, errs_px, errs_m = [], [], []
     last_assign = {}          # gt_id -> pred_id on the previous annotated frame
+    # counts how often the pred id assigned to the same GT player changes
+    # between consecutive annotated frames (assignment instability, not re-id)
     id_switches = 0
 
     for frame in sorted(gt_all):
@@ -116,17 +147,24 @@ def evaluate_players(gt_path, pred_path, court_path, iou_thr, out_dir):
 
         for g, p, ov in match_boxes(gt, pred):
             err_px = float(np.linalg.norm(center(gt[g]) - center(pred[p])))
+            err_m_val = None
             err_m = ""
             if conv is not None:
                 fm_gt = np.array(conv.to_meters(*feet(gt[g])))
                 fm_pr = np.array(conv.to_meters(*feet(pred[p])))
-                err_m = float(np.linalg.norm(fm_gt - fm_pr))
-                errs_m.append(err_m)
-                err_m = round(err_m, 3)
+                err_m_val = float(np.linalg.norm(fm_gt - fm_pr))
+                err_m = round(err_m_val, 3)
             ious.append(ov)
-            errs_px.append(err_px)
+            # Only aggregate the position-error metrics for valid matches
+            # (IoU >= thr). match_boxes returns the best assignment even when
+            # the best is a poor overlap (or IoU 0); including those "best of
+            # bad" pairs would pollute the center/feet error means. TP/FP/FN
+            # (precision/recall) still use the same iou_thr gate below.
             if ov >= iou_thr:
                 n_tp += 1
+                errs_px.append(err_px)
+                if err_m_val is not None:
+                    errs_m.append(err_m_val)
             if g in last_assign and last_assign[g] != p:
                 id_switches += 1
             last_assign[g] = p
@@ -150,11 +188,15 @@ def evaluate_players(gt_path, pred_path, court_path, iou_thr, out_dir):
         print(f"  median IoU            : {np.median(ious):.3f}")
         print(f"  recall  @IoU>={iou_thr}   : {n_tp / n_gt:.3f}")
         print(f"  precision @IoU>={iou_thr} : {n_tp / max(1, n_pred):.3f}")
-        print(f"  centre error (px)     : mean {np.mean(errs_px):.1f}, "
-              f"median {np.median(errs_px):.1f}")
+        # error means reflect only valid (IoU>=thr) matches
+        if errs_px:
+            print(f"  centre error (px)     : mean {np.mean(errs_px):.1f}, "
+                  f"median {np.median(errs_px):.1f}  (IoU>={iou_thr} only)")
+        else:
+            print(f"  centre error (px)     : n/a (no matches at IoU>={iou_thr})")
         if errs_m:
             print(f"  feet error (m)        : mean {np.mean(errs_m):.2f}, "
-                  f"median {np.median(errs_m):.2f}")
+                  f"median {np.median(errs_m):.2f}  (IoU>={iou_thr} only)")
         print(f"  ID switches           : {id_switches}")
     else:
         print("  no overlapping frames between GT and predictions!")

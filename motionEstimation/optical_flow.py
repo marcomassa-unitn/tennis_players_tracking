@@ -66,9 +66,14 @@ def mean_box_flow(flow, box, scale, noise_thr=0.3):
     player's motion. Returns None if the box is empty.
     """
     x, y, w, h = box
+    fh, fw = flow.shape[:2]
     xs, ys = int(x * scale), int(y * scale)
     ws, hs = max(1, int(w * scale)), max(1, int(h * scale))
-    region = flow[ys: ys + hs, xs: xs + ws]
+    # Clip the box to the scaled-frame bounds so an out-of-frame box samples
+    # the valid overlap only (instead of silently indexing wrong/empty rows).
+    x0, y0 = max(0, xs), max(0, ys)
+    x1, y1 = min(fw, xs + ws), min(fh, ys + hs)
+    region = flow[y0: y1, x0: x1]
     if region.size == 0:
         return None
     mag = np.linalg.norm(region, axis=2)
@@ -109,44 +114,55 @@ def draw_flow_arrows(frame, flow, scale, grid=24, min_mag=0.6):
 def lucas_kanade_demo(video, start, n_frames, out_path, display=False):
     """Track Shi-Tomasi corners with pyramidal LK and save the trails."""
     cap = cv2.VideoCapture(video)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-    ok, frame = cap.read()
-    if not ok:
-        raise RuntimeError("Cannot read LK start frame")
-    prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=300,
-                                  qualityLevel=0.01, minDistance=12,
-                                  blockSize=7)
-    canvas = np.zeros_like(frame)
-    colors = np.random.default_rng(7).integers(80, 255, (len(pts), 3))
-
-    lk = dict(winSize=(21, 21), maxLevel=3,
-              criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-                        30, 0.01))
-    for _ in range(n_frames):
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
         ok, frame = cap.read()
-        if not ok or pts is None or len(pts) == 0:
-            break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        nxt, st, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, pts, None, **lk)
-        good_new = nxt[st.flatten() == 1]
-        good_old = pts[st.flatten() == 1]
-        colors = colors[st.flatten() == 1]
-        for (n, o, c) in zip(good_new, good_old, colors):
-            cv2.line(canvas, tuple(o.ravel().astype(int)),
-                     tuple(n.ravel().astype(int)),
-                     tuple(int(v) for v in c), 1)
-        prev_gray = gray
-        pts = good_new.reshape(-1, 1, 2)
-        if display:
-            cv2.imshow("LK trails", cv2.add(frame, canvas))
-            cv2.waitKey(15)
+        if not ok:
+            raise RuntimeError("Cannot read LK start frame")
+        prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    cap.release()
-    cv2.imwrite(out_path, cv2.add(frame, canvas))
-    print(f"  Saved: {out_path}  ({len(pts) if pts is not None else 0} "
-          f"points still tracked)")
+        pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=300,
+                                      qualityLevel=0.01, minDistance=12,
+                                      blockSize=7)
+        # goodFeaturesToTrack returns None on a textureless start frame; in
+        # that case there is nothing to track, so skip the demo gracefully
+        # instead of crashing at len(pts).
+        if pts is None or len(pts) == 0:
+            print("  LK demo skipped: no corners found on the start frame.")
+            return
+        canvas = np.zeros_like(frame)
+        colors = np.random.default_rng(7).integers(80, 255, (len(pts), 3))
+
+        lk = dict(winSize=(21, 21), maxLevel=3,
+                  criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                            30, 0.01))
+        for _ in range(n_frames):
+            ok, frame = cap.read()
+            if not ok or pts is None or len(pts) == 0:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            nxt, st, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, pts,
+                                                  None, **lk)
+            good_new = nxt[st.flatten() == 1]
+            good_old = pts[st.flatten() == 1]
+            colors = colors[st.flatten() == 1]
+            for (n, o, c) in zip(good_new, good_old, colors):
+                cv2.line(canvas, tuple(o.ravel().astype(int)),
+                         tuple(n.ravel().astype(int)),
+                         tuple(int(v) for v in c), 1)
+            prev_gray = gray
+            pts = good_new.reshape(-1, 1, 2)
+            if display:
+                cv2.imshow("LK trails", cv2.add(frame, canvas))
+                cv2.waitKey(15)
+
+        cv2.imwrite(out_path, cv2.add(frame, canvas))
+        print(f"  Saved: {out_path}  ({len(pts) if pts is not None else 0} "
+              f"points still tracked)")
+    finally:
+        cap.release()
+        if display:
+            cv2.destroyAllWindows()
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -188,54 +204,59 @@ def main():
     prev_frame_idx = {}       # player_id -> frame of that point
     frame_idx = 0
 
-    while True:
-        ok, frame = cap.read()
-        if not ok or (args.frames and frame_idx >= args.frames):
-            break
-        small = cv2.resize(frame, None, fx=args.scale, fy=args.scale)
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok or (args.frames and frame_idx >= args.frames):
+                break
+            small = cv2.resize(frame, None, fx=args.scale, fy=args.scale)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
-        if prev_gray is not None and frame_idx in boxes:
-            flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None,
-                                                **FB_PARAMS)
-            for pid, box in sorted(boxes[frame_idx].items()):
-                d = mean_box_flow(flow, box, args.scale)
-                if d is None:
-                    continue
-                x, y, w, h = box
-                feet = np.array([x + w / 2.0, y + h], dtype=np.float64)
-                p1 = np.array(conv.to_meters(*(feet - d)))
-                p2 = np.array(conv.to_meters(*feet))
-                speed_flow = np.linalg.norm(p2 - p1) * args.fps * 3.6
+            if prev_gray is not None and frame_idx in boxes:
+                flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None,
+                                                    **FB_PARAMS)
+                for pid, box in sorted(boxes[frame_idx].items()):
+                    d = mean_box_flow(flow, box, args.scale)
+                    if d is None:
+                        continue
+                    x, y, w, h = box
+                    feet = np.array([x + w / 2.0, y + h], dtype=np.float64)
+                    p1 = np.array(conv.to_meters(*(feet - d)))
+                    p2 = np.array(conv.to_meters(*feet))
+                    speed_flow = np.linalg.norm(p2 - p1) * args.fps * 3.6
 
-                speed_pos = np.nan
-                if (pid in prev_feet_m
-                        and frame_idx - prev_frame_idx[pid] == 1):
-                    speed_pos = (np.linalg.norm(p2 - prev_feet_m[pid])
-                                 * args.fps * 3.6)
-                prev_feet_m[pid] = p2
-                prev_frame_idx[pid] = frame_idx
+                    speed_pos = np.nan
+                    if (pid in prev_feet_m
+                            and frame_idx - prev_frame_idx[pid] == 1):
+                        speed_pos = (np.linalg.norm(p2 - prev_feet_m[pid])
+                                     * args.fps * 3.6)
+                    prev_feet_m[pid] = p2
+                    prev_frame_idx[pid] = frame_idx
 
-                rows.append([frame_idx, pid,
-                             round(float(d[0]), 3), round(float(d[1]), 3),
-                             round(float(speed_flow), 3),
-                             round(float(speed_pos), 3)
-                             if not np.isnan(speed_pos) else ""])
+                    rows.append([frame_idx, pid,
+                                 round(float(d[0]), 3), round(float(d[1]), 3),
+                                 round(float(speed_flow), 3),
+                                 round(float(speed_pos), 3)
+                                 if not np.isnan(speed_pos) else ""])
 
-            if args.vis_every and frame_idx % args.vis_every == 0:
-                hsv = flow_to_hsv(flow)
-                cv2.imwrite(os.path.join(
-                    args.output, f"flow_hsv_{frame_idx:05d}.png"), hsv)
-                arrows = draw_flow_arrows(frame, flow, args.scale)
-                cv2.imwrite(os.path.join(
-                    args.output, f"flow_arrows_{frame_idx:05d}.png"), arrows)
-                if args.display:
-                    cv2.imshow("Farneback flow", arrows)
-                    cv2.waitKey(1)
+                if args.vis_every and frame_idx % args.vis_every == 0:
+                    hsv = flow_to_hsv(flow)
+                    cv2.imwrite(os.path.join(
+                        args.output, f"flow_hsv_{frame_idx:05d}.png"), hsv)
+                    arrows = draw_flow_arrows(frame, flow, args.scale)
+                    cv2.imwrite(os.path.join(
+                        args.output, f"flow_arrows_{frame_idx:05d}.png"),
+                        arrows)
+                    if args.display:
+                        cv2.imshow("Farneback flow", arrows)
+                        cv2.waitKey(1)
 
-        prev_gray = gray
-        frame_idx += 1
-    cap.release()
+            prev_gray = gray
+            frame_idx += 1
+    finally:
+        cap.release()
+        if args.display:
+            cv2.destroyAllWindows()
 
     csv_path = os.path.join(args.output, "flow_speeds.csv")
     with open(csv_path, "w", newline="") as f:
@@ -246,7 +267,10 @@ def main():
     print(f"  Saved: {csv_path}  ({len(rows)} rows)")
 
     # summary: flow speed vs positional speed (tracking glitches above a
-    # physiological 45 km/h are excluded from both, as in player_analysis)
+    # physiological 45 km/h are excluded from both, as in player_analysis).
+    # Methodological note: this 45 km/h cap is a blunt outlier filter -- it
+    # discards tracking glitches but will also clip any legitimately-noisy but
+    # high flow-speed sample, so the reported means are slightly conservative.
     data = np.array([[r[1], r[4], r[5] if r[5] != "" else np.nan]
                      for r in rows], dtype=np.float64)
     data[:, 1][data[:, 1] > 45.0] = np.nan

@@ -42,20 +42,41 @@ class CourtConverter:
 
     # ── public ────────────────────────────────────────────────────────────────
 
+    # Smallest homogeneous divisor magnitude we trust. Points whose projective
+    # w-coordinate is ~0 lie on (or beyond) the horizon line of the court plane:
+    # the perspective division would explode to ±inf there, so we clip the
+    # divisor magnitude to this epsilon to keep the result finite/bounded.
+    _W_EPS = 1e-9
+
     def to_meters(self, x_px: float, y_px: float) -> tuple[float, float]:
         """Convert a single pixel position to court metres."""
         p = self._H @ np.array([x_px, y_px, 1.0], dtype=np.float64)
-        return float(p[0] / p[2]), float(p[1] / p[2])
+        # Guard the homogeneous divisor against ~0 (point near the horizon line)
+        # to avoid ±inf; preserve the original sign so the projection direction
+        # is kept.
+        w = p[2]
+        if abs(w) < self._W_EPS:
+            w = self._W_EPS if w >= 0 else -self._W_EPS
+        return float(p[0] / w), float(p[1] / w)
 
     def to_meters_batch(self, points: np.ndarray) -> np.ndarray:
         """
         Convert an (N, 2) array of pixel positions to court metres.
-        Returns an (N, 2) float64 array.
+        Returns an (N, 2) float64 array. Rows whose homogeneous divisor is ~0
+        (points on/near the horizon line of the court plane) are returned as
+        NaN instead of ±inf.
         """
         pts = np.asarray(points, dtype=np.float64)
         hom = np.column_stack([pts, np.ones(len(pts))])  # (N, 3)
         res = (self._H @ hom.T).T                         # (N, 3)
-        return res[:, :2] / res[:, 2:3]
+        w = res[:, 2:3]
+        # Mark near-horizon rows (|w| ~ 0) and divide safely; those rows become
+        # NaN rather than ±inf.
+        bad = np.abs(w[:, 0]) < self._W_EPS
+        safe_w = np.where(np.abs(w) < self._W_EPS, np.nan, w)
+        out = res[:, :2] / safe_w
+        out[bad] = np.nan
+        return out
 
     # ── private ───────────────────────────────────────────────────────────────
 
@@ -73,12 +94,19 @@ class CourtConverter:
             raise ValueError(
                 f"Need at least 4 known labels in {path}; found {len(pixel_pts)}."
             )
-        return np.array(pixel_pts, dtype=np.float32), \
-               np.array(real_pts,  dtype=np.float32)
+        return np.array(pixel_pts, dtype=np.float64), \
+               np.array(real_pts,  dtype=np.float64)
 
     @staticmethod
     def _compute_homography(pixel_pts, real_pts) -> np.ndarray:
-        H, _ = cv2.findHomography(pixel_pts, real_pts, method=0)
+        # RANSAC (instead of a plain least-squares fit, method=0) makes the
+        # solve robust to a single mislabelled / noisy keypoint: with the 8
+        # court corners available, an outlier corner is rejected rather than
+        # biasing the whole homography.
+        H, _ = cv2.findHomography(
+            pixel_pts, real_pts,
+            method=cv2.RANSAC, ransacReprojThreshold=3.0,
+        )
         if H is None:
             raise RuntimeError("Homography computation failed — check the court CSV.")
         return H.astype(np.float64)

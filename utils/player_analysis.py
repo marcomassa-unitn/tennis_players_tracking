@@ -52,9 +52,16 @@ SVC_B = L_m - SVC_T         # 18.288 m  service line near side
 NET   = L_m / 2.0            # 11.8872 m net
 CL_X  = W_m / 2.0            # 4.1148 m  center service line
 
-# colors for the two players
-_COLORS = {1: "lime",   2: "tomato"}
-_LABELS = {1: "P1 (lime)", 2: "P2 (red)"}
+# Player color convention — kept CONSISTENT across every figure (minimap,
+# zones, single heatmaps, combined heatmap legend) so a reader can always map
+# colour -> player reliably:  P1 = warm (red),  P2 = cool (blue).
+# The solid colours below are paired with the warm/cool colormaps used for the
+# heatmaps (_HEAT_CMAPS) and the matching legend patches (_HEAT_LEGEND).
+_COLORS = {1: "red",       2: "steelblue"}
+_LABELS = {1: "P1 (red)",  2: "P2 (blue)"}
+# heatmap colormaps + legend patch colours, same warm/cool mapping as _COLORS
+_HEAT_CMAPS  = {1: "hot",        2: "Blues_r"}
+_HEAT_LEGEND = {1: "red",        2: "steelblue"}
 
 # ── court zones ────────────────────────────────────────────────────────────────
 # The analysis covers the whole walkable area, not just the playing rectangle:
@@ -118,6 +125,17 @@ def _load_and_convert(players_csv: str, court_csv: str, min_area: int,
     df = df[df["area"] >= min_area].copy()
 
     if anchor == "feet":
+        # Sanity check (non-fatal): the feet anchor assumes "y" is the bbox TOP,
+        # so the bbox vertical centre cy should sit ~ y + h/2. If a large share
+        # of rows violate that, "y" is probably not the top edge and the feet
+        # projection (y + h) would be wrong — warn but keep running.
+        if len(df) and {"y", "h", "cy"}.issubset(df.columns):
+            mismatch = np.abs((df["y"] + df["h"] / 2.0) - df["cy"]) > df["h"] * 0.25
+            frac_bad = float(mismatch.mean())
+            if frac_bad > 0.5:
+                print(f"  Warning: cy != y + h/2 for {frac_bad:.0%} of rows; "
+                      f"'y' may not be the bbox top — feet anchor (y + h) "
+                      f"could be misplaced.")
         df["ax"] = df["cx"]
         df["ay"] = df["y"] + df["h"]
     elif anchor == "centroid":
@@ -163,16 +181,24 @@ def _compute_speeds(sub: pd.DataFrame, fps: float,
     speed_full = np.concatenate([[np.nan], speed_kmh])
 
     valid_dist = dist[~np.isnan(speed_kmh)]
+    # If there is no valid speed sample at all, every aggregate (avg/median as
+    # well as max/p95) must fall back to 0.0 instead of letting the np.nan*
+    # reductions emit a RuntimeWarning and return NaN.
+    has_speed = not np.all(np.isnan(speed_kmh))
     stats = {
         "total_distance_m": round(float(valid_dist.sum()), 2),
-        "avg_speed_kmh":    round(float(np.nanmean(speed_kmh)), 2),
-        "median_speed_kmh": round(float(np.nanmedian(speed_kmh)), 2),
+        "avg_speed_kmh":    round(float(np.nanmean(speed_kmh)), 2)
+                            if has_speed else 0.0,
+        "median_speed_kmh": round(float(np.nanmedian(speed_kmh)), 2)
+                            if has_speed else 0.0,
         "max_speed_kmh":    round(float(np.nanmax(speed_kmh)), 2)
-                            if not np.all(np.isnan(speed_kmh)) else 0.0,
+                            if has_speed else 0.0,
         "p95_speed_kmh":    round(float(np.nanpercentile(speed_kmh, 95)), 2)
-                            if not np.all(np.isnan(speed_kmh)) else 0.0,
+                            if has_speed else 0.0,
         "frames_detected":  len(sub),
-        "frames_missing":   int(np.sum(gaps > 1)),
+        # Count the actual number of dropped frames, not the number of gap
+        # events: a gap of g consecutive missing frames contributes (g - 1).
+        "frames_missing":   int(np.sum(gaps[gaps > 1] - 1)),
     }
     return stats, speed_full
 
@@ -183,11 +209,17 @@ def _zone_of(x_m: float, y_m: float) -> str | None:
     """Return the zone id ("FB-L", "NB-out-OR", …) or None if out of range."""
     if x_m < -_SIDE - 1.0 or x_m > W_m + _SIDE + 1.0:
         return None
+    # Boundary convention: every band is half-open [low, high) on BOTH axes, so
+    # a point exactly on a dividing line always falls to the band on its higher
+    # side (e.g. x == CL_X -> "R", x == W_m -> "OR"). This matches the y-band
+    # test below (y0 <= y_m < y1) and removes the previous L/R vs R/OR
+    # asymmetry where the centre line was exclusive but the right sideline
+    # inclusive.
     if x_m < 0:
         side = "OL"
     elif x_m < CL_X:
         side = "L"
-    elif x_m <= W_m:
+    elif x_m < W_m:
         side = "R"
     else:
         side = "OR"
@@ -202,12 +234,15 @@ def _compute_zone_stats(player_data: dict, fps: float) -> pd.DataFrame:
     Time spent by each player in each zone of the court.
     One row per (player_id, zone): frames, seconds and percentage.
     """
+    cols = ["player_id", "zone", "description", "frames", "seconds", "percent"]
     rows = []
     band_labels = {zid: label for zid, label, _, _ in _ZONE_BANDS}
     for pid, sub in player_data.items():
         zones = [_zone_of(x, y) for x, y in sub[["x_m", "y_m"]].values]
         zones = pd.Series([z for z in zones if z is not None])
         n_tot = len(zones)
+        if n_tot == 0:
+            continue
         counts = zones.value_counts()
         for zone_id, n in counts.items():
             band, side = zone_id.rsplit("-", 1)
@@ -218,8 +253,15 @@ def _compute_zone_stats(player_data: dict, fps: float) -> pd.DataFrame:
                 "description": f"{band_labels[band]} {side_label}",
                 "frames":     int(n),
                 "seconds":    round(n / fps, 2),
+                # n_tot is guaranteed > 0 here (the continue above skips
+                # players with no in-range samples), so this division is safe.
                 "percent":    round(100.0 * n / n_tot, 2),
             })
+    if not rows:
+        # No in-range samples for any player: return an empty frame that still
+        # carries the expected columns so downstream .sort_values / filtering /
+        # to_csv keep working instead of raising on a column-less frame.
+        return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows).sort_values(
         ["player_id", "percent"], ascending=[True, False]
     ).reset_index(drop=True)
@@ -291,7 +333,8 @@ def _make_heat_array(x_m: np.ndarray, y_m: np.ndarray,
 
 
 def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
-    cmaps = {1: "hot", 2: "Blues_r"}
+    # same warm/cool convention as _COLORS (P1 warm, P2 cool)
+    cmaps = _HEAT_CMAPS
 
     for pid, sub in player_data.items():
         fig, ax = plt.subplots(figsize=(4, 9))
@@ -312,7 +355,7 @@ def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(4, 9))
     fig.patch.set_facecolor("#1a1a2e")
     _draw_court(ax)
-    cmap_alpha = {1: ("hot", 0.55), 2: ("Blues_r", 0.55)}
+    cmap_alpha = {1: (_HEAT_CMAPS[1], 0.55), 2: (_HEAT_CMAPS[2], 0.55)}
     for pid, (cmap, alpha) in cmap_alpha.items():
         if pid not in player_data:
             continue
@@ -320,8 +363,9 @@ def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
                              player_data[pid]["y_m"].values)
         ax.imshow(H, origin="lower", extent=_HEAT_EXTENT,
                   cmap=cmap, alpha=alpha, aspect="auto")
-    patches = [mpatches.Patch(color="red",       label="Player 1"),
-               mpatches.Patch(color="steelblue", label="Player 2")]
+    # legend colours match the warm/cool player convention (_HEAT_LEGEND)
+    patches = [mpatches.Patch(color=_HEAT_LEGEND[1], label="Player 1"),
+               mpatches.Patch(color=_HEAT_LEGEND[2], label="Player 2")]
     ax.legend(handles=patches, loc="upper right", fontsize=8,
               framealpha=0.5, facecolor="#333", edgecolor="none",
               labelcolor="white")

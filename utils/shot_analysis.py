@@ -76,6 +76,9 @@ def load_ball_track(ball_csv: str) -> pd.DataFrame:
             sm = vals.copy()
             sm[ok] = savgol_filter(vals[ok], win, 2)
             full[col] = sm
+        else:
+            print(f"  Warning: skipping Savitzky-Golay smoothing of '{col}' "
+                  f"(only {int(ok.sum())} valid points, need > {win}).")
     return full
 
 
@@ -92,9 +95,15 @@ def load_player_boxes(players_csv: str) -> dict:
 # ── shot detection ─────────────────────────────────────────────────────────────
 
 def _nearest_box(boxes, frame, pid, radius=3):
-    """Box of player pid in the nearest frame within ±radius, or None."""
+    """
+    Box of player ``pid`` in the temporally nearest frame within ±radius, or
+    None. Distance grows outward from ``frame`` (d = 0, 1, 2, …). Tie-break at
+    equal distance |d|: prefer the LATER frame (frame + d) over the earlier one
+    (frame - d) — a small, documented, deterministic rule so the result no
+    longer silently depends on the probe order.
+    """
     for d in range(radius + 1):
-        for f in (frame - d, frame + d):
+        for f in (frame + d, frame - d):   # later frame first on ties
             if f in boxes and pid in boxes[f]:
                 return boxes[f][pid]
     return None
@@ -108,26 +117,62 @@ def _ball_near_player(ball_xy, box, expand_w=0.9, expand_h=0.55):
             and y - expand_h * h <= by <= y + h + expand_h * h)
 
 
+def _gradient_runs(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """
+    np.gradient applied independently over each contiguous run where ``valid``
+    is True, leaving every invalid (NaN) sample as NaN.
+
+    Running np.gradient over a NaN-holed array contaminates the two neighbours
+    of every gap (a single 1-frame ball dropout would poison the velocity on
+    both sides and can hide a real shot next to it). By splitting the track
+    into maximal valid runs and differentiating each run on its own, gaps stay
+    isolated and the samples around them keep clean derivatives.
+    """
+    out = np.full(len(values), np.nan, dtype=float)
+    i = 0
+    n = len(valid)
+    while i < n:
+        if not valid[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and valid[j]:
+            j += 1
+        # contiguous valid run [i, j)
+        if j - i >= 2:
+            out[i:j] = np.gradient(values[i:j].astype(float))
+        else:
+            # a lone valid sample has no defined gradient -> leave NaN
+            out[i:j] = np.nan
+        i = j
+    return out
+
+
 def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
                 min_gap_s: float = 0.5, vy_min: float = 0.5,
-                acc_thr: float = 1.5) -> list:
+                acc_thr: float = 1.5, win: int = 4) -> list:
     """
     Return [(frame, player_id, acc_strength), ...] of the detected shots.
 
     vy_min  : minimum magnitude (px/frame) of the mean velocity before/after for
               a sign reversal to count as a candidate
     acc_thr : threshold (px/frame^2) on the peaks of the acceleration magnitude
+    win     : half-window (frames) used for the before/after velocity means and
+              the local acceleration-peak test
     """
     frames = track.index.values
     cx = track["cx"].values
     cy = track["cy"].values
     valid = ~(np.isnan(cx) | np.isnan(cy))
 
-    vx = np.gradient(np.where(valid, cx, np.nan))
-    vy = np.gradient(np.where(valid, cy, np.nan))
-    acc = np.hypot(np.gradient(vx), np.gradient(vy))
+    # Differentiate over contiguous valid runs only, so a 1-frame ball dropout
+    # does not contaminate the velocity/acceleration of its neighbours and hide
+    # a shot next to the gap (see _gradient_runs).
+    vx = _gradient_runs(cx, valid)
+    vy = _gradient_runs(cy, valid)
+    valid_v = ~(np.isnan(vx) | np.isnan(vy))
+    acc = np.hypot(_gradient_runs(vx, valid_v), _gradient_runs(vy, valid_v))
 
-    win = 4
     candidates = {}   # idx -> strength
     for i in range(win, len(frames) - win):
         if not valid[i - win:i + win + 1].all():
@@ -158,17 +203,43 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
         if best is not None:
             near_player[i] = (best[0], strength)
 
-    # minimum gap: keep the strongest candidate in each window
+    # Minimum gap: keep the strongest candidate in each cluster.
+    #
+    # The suppression window is measured against the FIRST accepted hit's frame
+    # in the current cluster (cluster_anchor), NOT against the representative.
+    # The previous code re-anchored the window to whichever stronger/later
+    # candidate replaced the representative, so the window slid forward on every
+    # replacement and a long rally of closely-spaced candidates collapsed into a
+    # single shot. With a fixed anchor, only candidates within ONE min_gap
+    # window of the cluster start (plus a contiguous tail, see below) are merged.
+    #
+    # A single physical shot produces a *contiguous* spray of candidate frames
+    # that can be slightly wider than min_gap; to avoid splitting it we also
+    # absorb a candidate that directly continues the spray (within chain_gap of
+    # the last absorbed candidate). Distinct rally shots are separated by
+    # non-candidate frames, so they do NOT chain and stay separate.
     min_gap = int(min_gap_s * fps)
+    chain_gap = 1   # frames: contiguous-spray tolerance for the cluster tail
     hits = []
+    cluster_anchor = None   # frame of the first accepted hit in the current cluster
+    last_absorbed = None    # frame of the most recent candidate folded into it
     for i in sorted(near_player):
         pid, strength = near_player[i]
         f = int(frames[i])
-        if hits and f - hits[-1][0] < min_gap:
+        same_cluster = (
+            hits and cluster_anchor is not None
+            and (f - cluster_anchor < min_gap            # inside the anchored window
+                 or f - last_absorbed <= chain_gap)      # contiguous tail of the spray
+        )
+        if same_cluster:
+            # Keep the strongest representative but do NOT advance the anchor.
             if strength > hits[-1][2]:
                 hits[-1] = (f, pid, strength)
+            last_absorbed = f
             continue
         hits.append((f, pid, strength))
+        cluster_anchor = f
+        last_absorbed = f
     return hits
 
 
@@ -191,9 +262,24 @@ def classify_stroke(ball_cx, player_box, player_side, hand,
     return "forehand" if (db > 0) == dominant_is_image_right else "backhand"
 
 
-def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5):
+def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
+                  vy_min=0.5, acc_thr=1.5, win=4):
     """Full pipeline: detect shots and classify them. Return a DataFrame."""
-    hits = detect_hits(track, boxes, fps, min_gap_s=min_gap_s)
+    # Diagnose a frame-numbering mismatch between the ball CSV and the players
+    # CSV: if the two frame ranges don't overlap, _nearest_box can never match,
+    # detect_hits yields nothing and the user only sees "No shots detected"
+    # with no explanation. Warn explicitly instead.
+    if len(track.index) and boxes:
+        b0, b1 = int(track.index.min()), int(track.index.max())
+        p0, p1 = min(boxes), max(boxes)
+        if b1 < p0 or p1 < b0:
+            print(f"  Warning: ball frames [{b0},{b1}] don't overlap player "
+                  f"frames [{p0},{p1}] — frame numbering mismatch between the "
+                  f"ball CSV and the players CSV; no shots can be detected.")
+
+    hits = detect_hits(track, boxes, fps, min_gap_s=min_gap_s,
+                       vy_min=vy_min, acc_thr=acc_thr, win=win)
+    n_dropped = 0
     rows = []
     for f, pid, strength in hits:
         box = _nearest_box(boxes, f, pid)
@@ -201,14 +287,26 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5):
             continue
         # median of the ball position over ±2 frames (reduces noise)
         sel = track.loc[max(track.index.min(), f - 2): f + 2]
-        ball_cx = float(np.nanmedian(sel["cx"]))
-        ball_cy = float(np.nanmedian(sel["cy"]))
+        # Guard against an all-NaN window (the ball was never seen around this
+        # frame): np.nanmedian would return NaN and contaminate
+        # classify_stroke / to_meters. Skip (and count) such shots instead.
+        cx_win = sel["cx"].values
+        cy_win = sel["cy"].values
+        if np.all(np.isnan(cx_win)) or np.all(np.isnan(cy_win)):
+            n_dropped += 1
+            continue
+        ball_cx = float(np.nanmedian(cx_win))
+        ball_cy = float(np.nanmedian(cy_win))
 
         feet = (box[0] + box[2] / 2.0, box[1] + box[3])
         y_m = conv.to_meters(*feet)[1]
         side = "near" if y_m > NET else "far"
         stroke = classify_stroke(ball_cx, box, side, hands[pid])
 
+        # NOTE: to_meters uses the ground-plane (court) homography, but at the
+        # moment of contact the ball is airborne (~ racket height). Projecting
+        # an above-ground point through a ground homography is only approximate
+        # — treat ball_x_m / ball_y_m as indicative, not exact, court coords.
         bx_m, by_m = conv.to_meters(ball_cx, ball_cy)
         rows.append({
             "frame": f, "time_s": round(f / fps, 2), "player_id": pid,
@@ -217,6 +315,9 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5):
             "player_cx": round(box[0] + box[2] / 2.0, 1),
             "ball_x_m": round(bx_m, 2), "ball_y_m": round(by_m, 2),
         })
+    if n_dropped:
+        print(f"  Note: skipped {n_dropped} candidate shot(s) with an all-NaN "
+              f"ball window (ball not seen around the contact frame).")
     return pd.DataFrame(rows)
 
 
@@ -416,6 +517,20 @@ def main() -> None:
                         help="dominant hand of player 2 (default right)")
     parser.add_argument("--min-gap", type=float, default=0.5, dest="min_gap",
                         help="minimum distance in seconds between two shots")
+    # Detection thresholds (previously hardcoded in detect_hits). Defaults are
+    # identical to the old hardcoded values, so behaviour is unchanged unless
+    # the user overrides them.
+    parser.add_argument("--vy-min", type=float, default=0.5, dest="vy_min",
+                        help="min |mean vy| (px/frame) before/after for a "
+                             "vy sign reversal to count as a candidate "
+                             "(default 0.5)")
+    parser.add_argument("--acc-thr", type=float, default=1.5, dest="acc_thr",
+                        help="threshold (px/frame^2) on acceleration-magnitude "
+                             "peaks (default 1.5)")
+    parser.add_argument("--win", type=int, default=4, dest="win",
+                        help="half-window (frames) for the before/after vy "
+                             "means and the local acceleration-peak test "
+                             "(default 4)")
     parser.add_argument("--output", default="outputs/shot_analysis")
     parser.add_argument("--no-frames", action="store_true",
                         help="do not save the shot PNGs")
@@ -439,7 +554,8 @@ def main() -> None:
     conv = CourtConverter(args.court)
 
     shots = analyze_shots(track, boxes, conv, args.fps, hands,
-                          min_gap_s=args.min_gap)
+                          min_gap_s=args.min_gap, vy_min=args.vy_min,
+                          acc_thr=args.acc_thr, win=args.win)
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)

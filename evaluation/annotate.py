@@ -50,8 +50,11 @@ COURT_HINTS = {
 
 def _scaled(frame):
     h, w = frame.shape[:2]
-    s = DISPLAY_W / w
-    return cv2.resize(frame, (DISPLAY_W, int(h * s))), s
+    # Cap the display scale at 1.0: never enlarge a frame narrower than
+    # DISPLAY_W, otherwise we upscale past the source resolution and waste
+    # precision (annotated coords are divided back by `s` anyway).
+    s = min(1.0, DISPLAY_W / w)
+    return cv2.resize(frame, (int(w * s), int(h * s))), s
 
 
 # ── boxes mode ─────────────────────────────────────────────────────────────────
@@ -83,11 +86,17 @@ def annotate_boxes(video, step, start, output):
                         (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                         (0, 255, 255), 2)
             roi = cv2.selectROI("annotate", view, showCrosshair=True)
-            if roi == (0, 0, 0, 0):
-                # empty selection: ESC inside selectROI also returns this,
-                # ask whether to quit or just skip the player
+            # A zero-AREA roi (w==0 or h==0) is treated as "no box for this
+            # player". selectROI returns the fully-empty (0,0,0,0) both for a
+            # plain ENTER and for ESC, and a one-axis drag yields e.g.
+            # (x,y,w,0); none of these is a usable box, so we route them all
+            # through the skip/quit prompt rather than appending a degenerate
+            # zero-area box. (selectROI gives no way to tell ESC from an empty
+            # confirm apart, hence the explicit prompt below.)
+            rx, ry, rw, rh = roi
+            if rw == 0 or rh == 0:
                 view2 = view.copy()
-                cv2.putText(view2, "skipped - q = save & quit, "
+                cv2.putText(view2, "no box - q = save & quit, "
                                    "any other key = continue",
                             (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                             (0, 200, 255), 2)
