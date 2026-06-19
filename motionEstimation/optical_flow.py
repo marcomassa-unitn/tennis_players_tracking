@@ -171,7 +171,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Optical-flow motion estimation on tracked players")
     parser.add_argument("--video",   default="data/Input_video2.mp4")
-    parser.add_argument("--players", default="outputs/players_clip2.csv")
+    parser.add_argument("--players", default="outputs/players_Input_video2.csv")
     parser.add_argument("--court",
                         default="outputs/court_coordinates/Input_video2_court.csv")
     parser.add_argument("--fps",     type=float, default=30.0)

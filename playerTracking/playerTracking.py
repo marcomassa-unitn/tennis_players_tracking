@@ -129,6 +129,7 @@ class PlayerTracker:
         if not candidates:
             return []
 
+        merge_allowed = True
         if self.prev_centroids is None:
             comps = candidates[:2]
         elif len(self.prev_centroids) == 2:
@@ -136,6 +137,11 @@ class PlayerTracker:
             # minimum total displacement so identities don't swap when the
             # players cross (greedy-nearest would otherwise flip them).
             comps = self._associate_two(candidates)
+            # Each comp is already bound to a distinct tracked identity, so the
+            # "too close -> merge" rule must NOT fire here: it would delete the
+            # smaller (far) player whenever the two centroids are within
+            # MIN_DIST, which is exactly how P2 was being lost.
+            merge_allowed = False
         else:
             comps = []
             used = set()
@@ -178,7 +184,7 @@ class PlayerTracker:
         # "Two players too close -> merge": collapse to one box when two
         # detections are nearer than MIN_DIST. Handle the >2 case defensively
         # too (keep the first, drop any others that crowd it).
-        if len(comps) >= 2:
+        if merge_allowed and len(comps) >= 2:
             _, _, _, _, _, cx1, cy1 = comps[0]
             merged = [comps[0]]
             for cand in comps[1:]:
@@ -203,28 +209,34 @@ class PlayerTracker:
             _, _, _, _, _, cx, cy = cand
             return np.hypot(cx - px, cy - py)
 
-        # Need two distinct candidates to compare both pairings; if fewer, fall
-        # back to a per-identity nearest-within-MAX_MOVE assignment below.
+        # Each identity may match ANY candidate, not just the two largest by
+        # area: the far player is small and would otherwise be excluded whenever
+        # the near player's foreground fragments into the two biggest blobs.
+        # Pick the global minimum-total-displacement assignment of the two
+        # previous identities to two distinct candidates so identities don't
+        # swap when the players cross.
+        comps = [None, None]
         if len(candidates) >= 2:
-            # Consider only the strongest candidates (sorted by area already)
-            # to keep this O(1): the two largest blobs are the player bodies.
-            c0, c1 = candidates[0], candidates[1]
-            # cost(A): prev0->cur0, prev1->cur1   vs   cost(B): prev0->cur1, prev1->cur0
-            cost_a = d(p0x, p0y, c0) + d(p1x, p1y, c1)
-            cost_b = d(p0x, p0y, c1) + d(p1x, p1y, c0)
-            if cost_a <= cost_b:
-                pairing = [(c0, d(p0x, p0y, c0)), (c1, d(p1x, p1y, c1))]
-            else:
-                pairing = [(c1, d(p0x, p0y, c1)), (c0, d(p1x, p1y, c0))]
-
-            comps = [None, None]
-            for slot, (cand, dist) in enumerate(pairing):
-                if dist <= self.MAX_MOVE:
-                    comps[slot] = cand
+            best_cost = None
+            best_pair = None
+            # Search all ordered pairs (i != j): i -> identity 0, j -> identity 1.
+            for i, ci in enumerate(candidates):
+                di0 = d(p0x, p0y, ci)
+                for j, cj in enumerate(candidates):
+                    if i == j:
+                        continue
+                    cost = di0 + d(p1x, p1y, cj)
+                    if best_cost is None or cost < best_cost:
+                        best_cost = cost
+                        best_pair = (ci, cj)
+            ci, cj = best_pair
+            if d(p0x, p0y, ci) <= self.MAX_MOVE:
+                comps[0] = ci
+            if d(p1x, p1y, cj) <= self.MAX_MOVE:
+                comps[1] = cj
         else:
             # Single candidate: assign it to whichever identity it is closest to
             # (within MAX_MOVE); the other identity is left unmatched.
-            comps = [None, None]
             only = candidates[0]
             d0, d1 = d(p0x, p0y, only), d(p1x, p1y, only)
             slot = 0 if d0 <= d1 else 1
@@ -306,11 +318,19 @@ if __name__ == "__main__":
         description="Two-player tracking via running-average background "
                     "subtraction + nearest-centroid association")
     parser.add_argument("--video", default="data/Input_video2.mp4")
-    parser.add_argument("--csv",   default="outputs/players_clip2.csv",
-                        help="output CSV path")
+    parser.add_argument("--csv",   default=None,
+                        help="output CSV path (defaults to "
+                             "outputs/players_<video name>.csv)")
     parser.add_argument("--no-display", action="store_true",
                         help="run headless (no OpenCV windows)")
     args = parser.parse_args()
+
+    # Derive the CSV name from the input video when not given explicitly, so a
+    # different --video produces a distinct output instead of overwriting the
+    # previous run's file.
+    if args.csv is None:
+        video_stem = os.path.splitext(os.path.basename(args.video))[0]
+        args.csv = os.path.join("outputs", f"players_{video_stem}.csv")
 
     os.makedirs(os.path.dirname(args.csv) or ".", exist_ok=True)
     tracker = PlayerTracker(args.video, args.csv, display=not args.no_display)

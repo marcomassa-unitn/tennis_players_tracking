@@ -17,7 +17,7 @@ video ─┬─> courtTracking/court_tracking.py ──> outputs/court_coordinat
        │       white mask + Hough lines + intersection clustering
        │       + ITF-proportion filtering -> 8 court keypoints
        │
-       └─> playerTracking/playerTracking.py ──> outputs/players_clip2.csv
+       └─> playerTracking/playerTracking.py ──> outputs/players_<video>.csv
                running-average background subtraction + connected
                components + nearest-centroid association -> 2 boxes/frame
                        │
@@ -87,9 +87,13 @@ available as manual fallbacks.
 ### 2. Player tracking
 
 ```bash
-python playerTracking/playerTracking.py --video data/Input_video2.mp4 \
-    --csv outputs/players_clip2.csv [--no-display]
+python playerTracking/playerTracking.py --video data/Input_video2.mp4 [--no-display]
 ```
+
+The output CSV defaults to `outputs/players_<video name>.csv` (e.g.
+`outputs/players_Input_video2.csv`), so different inputs no longer overwrite
+each other; override the path explicitly with `--csv outputs/players_clip2.csv`
+if needed.
 
 Foreground extraction with a running-average background model
 (`cv2.accumulateWeighted`), thresholded frame difference, morphological
@@ -101,8 +105,14 @@ player per frame.
 ### 3. Kinematic / positional statistics
 
 ```bash
-python utils/player_analysis.py [--no-animation] [--anchor feet|centroid]
+python utils/player_analysis.py --video data/Input_video2.mp4 \
+    [--no-animation] [--anchor feet|centroid]
 ```
+
+`--players` and `--court` default to the CSVs derived from `--video`
+(`outputs/players_<video name>.csv` and
+`outputs/court_coordinates/<video name>_court.csv`), matching the player- and
+court-tracking outputs; pass them explicitly to override.
 
 The **feet point** (bottom-centre of each box) is projected to court metres
 through the homography built from the detected keypoints (`CourtConverter`).
@@ -209,8 +219,9 @@ pixels and metres. Per-frame details are saved in `outputs/evaluation/`.
 ## Design notes & limitations
 
 - The court CSV used by the analysis **must come from the same video** as the
-  player CSV (same camera framing), e.g. `Input_video2_court.csv` for
-  `players_clip2.csv`.
+  player CSV (same camera framing). Since all three stages name their outputs
+  after the video stem (`players_<video>.csv`, `<video>_court.csv`), passing the
+  same `--video` to `player_analysis.py` pairs them automatically.
 - Player positions are projected at the **feet**: projecting the body
   centroid through a ground-plane homography overestimates the distance from
   the camera (the centroid sits ~1 m above the ground).

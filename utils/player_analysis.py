@@ -28,6 +28,7 @@ Full use:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -473,13 +474,19 @@ def main() -> None:
         description="Tennis player movement analysis: minimap, heatmap, speed"
     )
     parser.add_argument(
-        "--players", default="outputs/players_clip2.csv",
-        help="CSV with player tracking (default: outputs/players_clip2.csv)",
+        "--video", default="data/Input_video2.mp4",
+        help="Source video; used to derive --players and --court defaults "
+             "when those are not given explicitly",
     )
     parser.add_argument(
-        "--court", default="outputs/court_coordinates/Input_video2_court.csv",
+        "--players", default=None,
+        help="CSV with player tracking (defaults to "
+             "outputs/players_<video name>.csv)",
+    )
+    parser.add_argument(
+        "--court", default=None,
         help="CSV with court coordinates FROM THE SAME video as the players "
-             "(default: outputs/court_coordinates/Input_video2_court.csv)",
+             "(defaults to outputs/court_coordinates/<video name>_court.csv)",
     )
     parser.add_argument("--fps",      type=float, default=30.0,
                         help="Frames per second of the source video (default: 30)")
@@ -499,6 +506,18 @@ def main() -> None:
     parser.add_argument("--no-animation", action="store_true",
                         help="Skip GIF generation (faster)")
     args = parser.parse_args()
+
+    # Derive the input CSV paths from the video name when not given explicitly,
+    # so analysing a different --video reads that video's tracking output
+    # instead of always loading the clip2 / Input_video2 files. Matches the
+    # naming used by playerTracking.py (players_<stem>.csv) and
+    # court_tracking.py (<stem>_court.csv).
+    video_stem = os.path.splitext(os.path.basename(args.video))[0]
+    if args.players is None:
+        args.players = os.path.join("outputs", f"players_{video_stem}.csv")
+    if args.court is None:
+        args.court = os.path.join("outputs", "court_coordinates",
+                                  f"{video_stem}_court.csv")
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
