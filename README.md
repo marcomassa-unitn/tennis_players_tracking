@@ -40,8 +40,8 @@ ballTracking/BallTracking.py (YOLO) ──> outputs/ball_clip2.csv
                        │
                        v
            utils/shot_analysis.py              (hit detection)
-               vy reversals + acceleration peaks + player proximity
-               -> hit frames -> forehand/backhand per player
+               despike ball track + vy reversals + acceleration peaks + proximity
+               -> hit frames -> forehand/backhand + drive/slice/dropshot per player
 ```
 
 ## Setup
@@ -150,7 +150,7 @@ python motionEstimation/block_matching.py --method both [--display]
 Outputs go to `outputs/motion_estimation/` (`flow_speeds.csv`, flow HSV /
 arrow images, LK trails, block-matching vector fields).
 
-### 5. Ball & shot analysis (hit detection, forehand/backhand)
+### 5. Ball & shot analysis (hit detection, forehand/backhand, shot type)
 
 Requires the ball CSV produced by the existing YOLO ball tracker
 (`ballTracking/BallTracking.py`, needs `ultralytics` + the `ball_tracker.pt`
@@ -165,6 +165,15 @@ python utils/shot_analysis.py --ball outputs/ball_clip2.csv \
 python utils/shot_analysis.py --self-test
 ```
 
+The raw ball track is first **despiked**: a position that jumps far from its
+local neighbours for a single frame and then returns is a tracking outlier (a
+confident YOLO mis-detection — net cord, line, shoe) and is removed before any
+velocity is computed, so it cannot create a huge spurious speed. The gate keys
+on the distance from a local rolling median and fires only when a point exceeds
+*both* an absolute pixel floor (`--despike-px`, default 40) and an adaptive
+multiple of the local MAD (`--despike-mad`, default 4), so a genuinely fast ball
+is never clipped.
+
 Hit detection on the Savitzky-Golay-smoothed ball track: candidates are
 persistent sign reversals of the vertical velocity `vy` **or** peaks of the
 acceleration magnitude (sharp speed change); a candidate counts as a hit only
@@ -177,8 +186,25 @@ player's body axis. The near player is seen from behind (his right = image
 right), the far player faces the camera (his right = image left); for a
 right-hander the shot is a *forehand* when the ball is on the dominant-hand
 side, a *backhand* otherwise, and the reasoning is inverted for left-handers
-(`--p1-hand/--p2-hand left`). Output: `outputs/shot_analysis/shots.csv`,
-annotated PNG per shot and a terminal summary.
+(`--p1-hand/--p2-hand left`).
+
+Shot type from the **outgoing ball pace** measured just after contact:
+`drive` (≥ `--drive-thr`, default 15), `slice` (between the two thresholds) or
+`dropshot` (< `--dropshot-thr`, default 4). Pace is a **scale-free** index —
+`100 × (ball pixels/frame just after contact) ÷ (striker's on-screen box
+height)`. We deliberately do **not** use a court-metre km/h: the ball is
+airborne at contact and the ground-plane homography turns its arc into large
+fake distances (worst at the far baseline, where the court spans only a few
+pixels), so homography km/h scatters by which end of the court a player stands
+on rather than by how hard the ball was hit. Dividing the pixel speed by the
+striker's box height cancels perspective, making the near and far players
+directly comparable. Pace alone cannot detect backspin, so `slice` means a
+medium-pace control shot inferred from speed; the numeric `ball_pace` is always
+written too. Defaults fit ~1080p/30fps footage — **calibrate `--drive-thr` /
+`--dropshot-thr` against the saved PNGs**.
+
+Output: `outputs/shot_analysis/shots.csv` (with `stroke`, `shot_type` and
+`ball_pace` columns), an annotated PNG per shot and a terminal summary.
 
 ### 6. Ground truth & evaluation
 
@@ -213,7 +239,7 @@ pixels and metres. Per-frame details are saved in `outputs/evaluation/`.
 | `motionEstimation/block_matching.py` | full-search / three-step block matching |
 | `evaluation/annotate.py` | manual ground-truth annotation tool |
 | `evaluation/evaluate_tracking.py` | quantitative evaluation vs ground truth |
-| `utils/shot_analysis.py` | hit detection + forehand/backhand classification |
+| `utils/shot_analysis.py` | ball despike + hit detection + forehand/backhand + drive/slice/dropshot |
 | `ballTracking/BallTracking.py` | YOLO ball tracking → ball CSV for shot analysis |
 
 ## Design notes & limitations
