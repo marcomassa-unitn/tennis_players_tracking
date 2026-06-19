@@ -5,5 +5,5 @@ matplotlib
 scipy
 Pillow
 
-# Only needed for the optional ball-tracking extra (ballTracking/):
+# Only needed for the optional ball-tracking extra (tracking/BallTracking.py):
 ultralytics

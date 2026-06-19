@@ -320,7 +320,7 @@ if __name__ == "__main__":
     parser.add_argument("--video", default="data/Input_video2.mp4")
     parser.add_argument("--csv",   default=None,
                         help="output CSV path (defaults to "
-                             "outputs/players_<video name>.csv)")
+                             "outputs/player_coordinates/players_<video name>.csv)")
     parser.add_argument("--no-display", action="store_true",
                         help="run headless (no OpenCV windows)")
     args = parser.parse_args()
@@ -330,7 +330,8 @@ if __name__ == "__main__":
     # previous run's file.
     if args.csv is None:
         video_stem = os.path.splitext(os.path.basename(args.video))[0]
-        args.csv = os.path.join("outputs", f"players_{video_stem}.csv")
+        args.csv = os.path.join("outputs", "player_coordinates",
+                                f"players_{video_stem}.csv")
 
     os.makedirs(os.path.dirname(args.csv) or ".", exist_ok=True)
     tracker = PlayerTracker(args.video, args.csv, display=not args.no_display)

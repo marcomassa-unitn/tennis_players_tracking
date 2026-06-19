@@ -198,8 +198,9 @@ if __name__ == "__main__":
                         help="path to the YOLO ball-tracker weights (.pt)")
     parser.add_argument("--video", default="data/Input_video2.mp4",
                         help="input video")
-    parser.add_argument("--csv", default="outputs/ball_clip2.csv",
-                        help="output ball CSV path")
+    parser.add_argument("--csv", default=None,
+                        help="output ball CSV path (defaults to "
+                             "outputs/ball_coordinates/ball_<video name>.csv)")
     parser.add_argument("--output", default="outputs/ball_tracking_output2.mp4",
                         help="annotated output video path")
     parser.add_argument("--no-video", action="store_true", dest="no_video",
@@ -207,6 +208,14 @@ if __name__ == "__main__":
     parser.add_argument("--no-display", action="store_true",
                         help="run headless (no OpenCV window)")
     args = parser.parse_args()
+
+    # Derive the CSV name from the input video when not given explicitly, so a
+    # different --video produces a distinct output instead of overwriting the
+    # previous run's file (mirrors playerTracking.py).
+    if args.csv is None:
+        video_stem = os.path.splitext(os.path.basename(args.video))[0]
+        args.csv = os.path.join("outputs", "ball_coordinates",
+                                f"ball_{video_stem}.csv")
 
     output_path = None if args.no_video else args.output
 

@@ -20,8 +20,8 @@ Quick use (from project root):
 
 Full use:
     python utils/player_analysis.py \\
-        --players outputs/players_clip2.csv \\
-        --court   outputs/court_coordinates/input_video_court.csv \\
+        --players outputs/player_coordinates/players_Input_video2.csv \\
+        --court   outputs/court_coordinates/Input_video2_court.csv \\
         --fps     30 \\
         --output  outputs/player_analysis \\
         --stride  3
@@ -481,7 +481,7 @@ def main() -> None:
     parser.add_argument(
         "--players", default=None,
         help="CSV with player tracking (defaults to "
-             "outputs/players_<video name>.csv)",
+             "outputs/player_coordinates/players_<video name>.csv)",
     )
     parser.add_argument(
         "--court", default=None,
@@ -514,7 +514,8 @@ def main() -> None:
     # court_tracking.py (<stem>_court.csv).
     video_stem = os.path.splitext(os.path.basename(args.video))[0]
     if args.players is None:
-        args.players = os.path.join("outputs", f"players_{video_stem}.csv")
+        args.players = os.path.join("outputs", "player_coordinates",
+                                    f"players_{video_stem}.csv")
     if args.court is None:
         args.court = os.path.join("outputs", "court_coordinates",
                                   f"{video_stem}_court.csv")

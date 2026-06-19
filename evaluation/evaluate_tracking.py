@@ -22,10 +22,10 @@ Court keypoints (when --court-gt is given):
 Usage (from project root):
     python evaluation/evaluate_tracking.py \\
         --gt   outputs/ground_truth/players_clip2_gt.csv \\
-        --pred outputs/players_clip2.csv \\
-        --court outputs/court_coordinates/input_video_court.csv \\
+        --pred outputs/player_coordinates/players_Input_video2.csv \\
+        --court outputs/court_coordinates/Input_video2_court.csv \\
         --court-gt   outputs/ground_truth/input_video2_court_gt.csv \\
-        --court-pred outputs/court_coordinates/input_video_court.csv
+        --court-pred outputs/court_coordinates/Input_video2_court.csv
 """
 
 import argparse
@@ -258,7 +258,8 @@ def main():
         description="Evaluate player tracking and court detection vs GT")
     parser.add_argument("--gt",
                         help="GT player boxes CSV (evaluation/annotate.py boxes)")
-    parser.add_argument("--pred", default="outputs/players_clip2.csv",
+    parser.add_argument("--pred",
+                        default="outputs/player_coordinates/players_Input_video2.csv",
                         help="tracker output CSV")
     parser.add_argument("--court", default=None,
                         help="court CSV used to convert errors to metres")

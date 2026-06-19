@@ -22,8 +22,8 @@ Outputs (default outputs/motion_estimation/):
 Usage (from project root):
     python motionEstimation/optical_flow.py
     python motionEstimation/optical_flow.py --video data/Input_video2.mp4 \\
-        --players outputs/players_clip2.csv \\
-        --court outputs/court_coordinates/input_video_court.csv \\
+        --players outputs/player_coordinates/players_Input_video2.csv \\
+        --court outputs/court_coordinates/Input_video2_court.csv \\
         --frames 200 --output outputs/motion_estimation
 """
 
@@ -171,7 +171,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Optical-flow motion estimation on tracked players")
     parser.add_argument("--video",   default="data/Input_video2.mp4")
-    parser.add_argument("--players", default="outputs/players_Input_video2.csv")
+    parser.add_argument("--players",
+                        default="outputs/player_coordinates/players_Input_video2.csv")
     parser.add_argument("--court",
                         default="outputs/court_coordinates/Input_video2_court.csv")
     parser.add_argument("--fps",     type=float, default=30.0)
