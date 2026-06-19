@@ -33,7 +33,7 @@ import os
 import sys
 
 # Project root = directory of this file. Ensure it is importable so that the
-# package directories (courtTracking/, playerTracking/, utils/, ...) resolve as
+# package directories (tracking/, utils/, ...) resolve as
 # namespace packages regardless of the current working directory.
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
@@ -89,21 +89,19 @@ def derive_paths(video, output):
     """Derive every intermediate artifact path from the video and output dir."""
     output = output.rstrip("/\\") or "outputs"
     stem = os.path.splitext(os.path.basename(video))[0]          # e.g. Input_video2
-    # The historical naming uses "clip2" for the Input_video2 sample; keep that
-    # so the produced CSVs line up with each module's documented defaults.
-    # Compare case-insensitively (and trimmed) so Input_video2 / input_video2 /
-    # INPUT_VIDEO2 all map to the documented "clip2" key.
-    norm = stem.strip()
-    key = "clip2" if norm.lower() == "input_video2" else norm.lower()
 
+    # Every artifact is named after the video stem and lives in its own
+    # per-modality subfolder, matching each module's standalone default:
+    #   playerTracking -> outputs/player_coordinates/players_<stem>.csv
+    #   BallTracking   -> outputs/ball_coordinates/ball_<stem>.csv
+    #   court_tracking -> outputs/court_coordinates/<stem>_court.csv
     return {
         "video": video,
         "output": output,
         "stem": stem,
-        "key": key,
         "court_csv": os.path.join(output, "court_coordinates", f"{stem}_court.csv"),
-        "players_csv": os.path.join(output, f"players_{key}.csv"),
-        "ball_csv": os.path.join(output, f"ball_{key}.csv"),
+        "players_csv": os.path.join(output, "player_coordinates", f"players_{stem}.csv"),
+        "ball_csv": os.path.join(output, "ball_coordinates", f"ball_{stem}.csv"),
         "analysis_dir": os.path.join(output, "player_analysis"),
         "motion_dir": os.path.join(output, "motion_estimation"),
         "shots_dir": os.path.join(output, "shot_analysis"),
@@ -125,7 +123,7 @@ def step_court(p, args, produced):
                   "Downstream steps that need it may fail.")
         return
 
-    from courtTracking.court_tracking import CourtTracker
+    from tracking.court_tracking import CourtTracker
     # Court detection finishes (and writes the CSV) before the interactive
     # playback loop in run(); that loop is a standalone-CLI visualization only,
     # so we always run it headless here -- it would otherwise block the pipeline
@@ -152,7 +150,7 @@ def step_tracking(p, args, produced):
               "Downstream steps that need it may fail.")
         return
 
-    from playerTracking.playerTracking import PlayerTracker
+    from tracking.playerTracking import PlayerTracker
     _ensure_parent(p["players_csv"])
     PlayerTracker(p["video"], p["players_csv"], display=not args.no_display).run()
     print(f"Player tracks -> {p['players_csv']}")
@@ -241,7 +239,7 @@ def step_ball(p, args, produced):
         return
 
     try:
-        from ballTracking.BallTracking import BallTracker
+        from tracking.BallTracking import BallTracker
     except ImportError as exc:
         print(f"Skipped: ball tracking dependencies unavailable ({exc}). "
               "Install ultralytics to enable this step.")

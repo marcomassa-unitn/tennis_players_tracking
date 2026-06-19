@@ -12,7 +12,7 @@ Two modes:
 
   court  — click the 8 court keypoints (TL, TR, BL, BR, STL, STR, SBL, SBR)
            on one frame. Output CSV: label,x,y  (same format produced by
-           courtTracking/court_tracking.py, so the two are comparable).
+           tracking/court_tracking.py, so the two are comparable).
 
 Usage (from project root):
     python evaluation/annotate.py boxes --video data/Input_video2.mp4 \\

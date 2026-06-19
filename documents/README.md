@@ -13,11 +13,11 @@ manual annotations.
 ## Pipeline overview
 
 ```
-video ─┬─> courtTracking/court_tracking.py ──> outputs/court_coordinates/<video>_court.csv
+video ─┬─> tracking/court_tracking.py ──> outputs/court_coordinates/<video>_court.csv
        │       white mask + Hough lines + intersection clustering
        │       + ITF-proportion filtering -> 8 court keypoints
        │
-       └─> playerTracking/playerTracking.py ──> outputs/players_<video>.csv
+       └─> tracking/playerTracking.py ──> outputs/player_coordinates/players_<video>.csv
                running-average background subtraction + connected
                components + nearest-centroid association -> 2 boxes/frame
                        │
@@ -36,7 +36,7 @@ video ─┬─> courtTracking/court_tracking.py ──> outputs/court_coordinat
                evaluate_tracking.py   IoU, precision/recall, centre error,
                                       ID switches, keypoint error (px and m)
 
-ballTracking/BallTracking.py (YOLO) ──> outputs/ball_clip2.csv
+tracking/BallTracking.py (YOLO) ──> outputs/ball_coordinates/ball_<video>.csv
                        │
                        v
            utils/shot_analysis.py              (hit detection)
@@ -58,7 +58,7 @@ fixed camera; the rally clip used in the examples is `data/Input_video2.mp4`).
 ### 1. Court keypoint detection
 
 ```bash
-python courtTracking/court_tracking.py --video data/Input_video2.mp4 [--no-display]
+python tracking/court_tracking.py --video data/Input_video2.mp4 [--no-display]
 ```
 
 Detects the white court lines on the first frame (HSV white mask, morphology,
@@ -87,12 +87,12 @@ available as manual fallbacks.
 ### 2. Player tracking
 
 ```bash
-python playerTracking/playerTracking.py --video data/Input_video2.mp4 [--no-display]
+python tracking/playerTracking.py --video data/Input_video2.mp4 [--no-display]
 ```
 
-The output CSV defaults to `outputs/players_<video name>.csv` (e.g.
-`outputs/players_Input_video2.csv`), so different inputs no longer overwrite
-each other; override the path explicitly with `--csv outputs/players_clip2.csv`
+The output CSV defaults to `outputs/player_coordinates/players_<video name>.csv`
+(e.g. `outputs/player_coordinates/players_Input_video2.csv`), so different inputs
+no longer overwrite each other; override the path explicitly with `--csv <path>`
 if needed.
 
 Foreground extraction with a running-average background model
@@ -110,7 +110,7 @@ python utils/player_analysis.py --video data/Input_video2.mp4 \
 ```
 
 `--players` and `--court` default to the CSVs derived from `--video`
-(`outputs/players_<video name>.csv` and
+(`outputs/player_coordinates/players_<video name>.csv` and
 `outputs/court_coordinates/<video name>_court.csv`), matching the player- and
 court-tracking outputs; pass them explicitly to override.
 
@@ -153,12 +153,12 @@ arrow images, LK trails, block-matching vector fields).
 ### 5. Ball & shot analysis (hit detection, forehand/backhand, shot type)
 
 Requires the ball CSV produced by the existing YOLO ball tracker
-(`ballTracking/BallTracking.py`, needs `ultralytics` + the `ball_tracker.pt`
+(`tracking/BallTracking.py`, needs `ultralytics` + the `ball_tracker.pt`
 weights in the project root):
 
 ```bash
-python ballTracking/BallTracking.py          # -> outputs/ball_clip2.csv
-python utils/shot_analysis.py --ball outputs/ball_clip2.csv \
+python tracking/BallTracking.py          # -> outputs/ball_coordinates/ball_Input_video2.csv
+python utils/shot_analysis.py --video data/Input_video2.mp4 \
     --p1-hand right --p2-hand right          # handedness of each player
 
 # validate the detection/classification logic without the YOLO model:
@@ -218,7 +218,7 @@ python evaluation/annotate.py court --video data/Input_video2.mp4
 # compare tracker + court detection against the annotations:
 python evaluation/evaluate_tracking.py \
     --gt outputs/ground_truth/players_clip2_gt.csv \
-    --pred outputs/players_clip2.csv \
+    --pred outputs/player_coordinates/players_Input_video2.csv \
     --court outputs/court_coordinates/Input_video2_court.csv \
     --court-gt outputs/ground_truth/input_video2_court_gt.csv
 ```
@@ -231,16 +231,21 @@ pixels and metres. Per-frame details are saved in `outputs/evaluation/`.
 
 | Path | Purpose |
 |---|---|
-| `courtTracking/court_tracking.py` | court keypoint detection (Hough + ITF proportions) |
-| `playerTracking/playerTracking.py` | two-player tracking (background subtraction) |
+| `tracking/court_tracking.py` | court keypoint detection (Hough + ITF proportions) |
+| `tracking/playerTracking.py` | two-player tracking (background subtraction) |
 | `utils/court_converter.py` | pixel → metre homography from the court CSV |
 | `utils/player_analysis.py` | statistics, zones, heatmaps, minimap |
 | `motionEstimation/optical_flow.py` | Farneback + Lucas-Kanade optical flow |
 | `motionEstimation/block_matching.py` | full-search / three-step block matching |
 | `evaluation/annotate.py` | manual ground-truth annotation tool |
 | `evaluation/evaluate_tracking.py` | quantitative evaluation vs ground truth |
+<<<<<<< HEAD:README.md
 | `utils/shot_analysis.py` | ball despike + hit detection + forehand/backhand + drive/slice/dropshot |
 | `ballTracking/BallTracking.py` | YOLO ball tracking → ball CSV for shot analysis |
+=======
+| `utils/shot_analysis.py` | hit detection + forehand/backhand classification |
+| `tracking/BallTracking.py` | YOLO ball tracking → ball CSV for shot analysis |
+>>>>>>> f82e3117622e28f121a97efe79f29314e64bc9fa:documents/README.md
 
 ## Design notes & limitations
 

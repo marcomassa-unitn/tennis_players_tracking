@@ -553,7 +553,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Court keypoint detection: white mask + Hough lines + "
                     "intersection clustering + ITF-proportion filtering")
-    parser.add_argument("--video", default="data/input_video.mp4")
+    parser.add_argument("--video", default="data/input_video2.mp4")
     parser.add_argument("--no-display", action="store_true",
                         help="skip the annotated video playback")
     parser.add_argument("--roi-top", type=float, default=0.15, dest="roi_top",
