@@ -190,7 +190,7 @@ class BallTracker:
 
 if __name__ == "__main__":
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "ball_tracker.pt")
+    DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "models/ball_tracker.pt")
 
     parser = argparse.ArgumentParser(
         description="YOLO ball tracking -> annotated video + ball CSV")

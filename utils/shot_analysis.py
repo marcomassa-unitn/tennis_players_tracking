@@ -150,7 +150,9 @@ def _gradient_runs(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
 
 def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
                 min_gap_s: float = 0.5, vy_min: float = 0.5,
-                acc_thr: float = 1.5, win: int = 4) -> list:
+                acc_thr: float = 1.5, win: int = 4,
+                reversal_look: int = 6,
+                reversal_vy_frac: float = 0.5) -> list:
     """
     Return [(frame, player_id, acc_strength), ...] of the detected shots.
 
@@ -159,6 +161,18 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
     acc_thr : threshold (px/frame^2) on the peaks of the acceleration magnitude
     win     : half-window (frames) used for the before/after velocity means and
               the local acceleration-peak test
+    reversal_look    : forward/backward half-window (frames) used ONLY to confirm
+              an acceleration-only candidate (acc_peak True, flip False): the
+              outgoing vy must keep the opposite sign to the incoming vy over this
+              window. Tolerates a short ball dropout right after contact via
+              nanmean + a minimum valid-sample count. NOT applied to candidates
+              that already pass `flip`. Longer than `win` so it checks the
+              sustained outgoing direction.
+    reversal_vy_frac : relaxed magnitude floor for that confirmation, as a
+              fraction of vy_min (effective floor = reversal_vy_frac * vy_min),
+              applied to the OUTGOING (forward) mean only. Kept below vy_min so
+              the confirmation is genuinely looser than `flip` and does not
+              collapse the acceptance rule back to `flip`.
     """
     frames = track.index.values
     cx = track["cx"].values
@@ -173,6 +187,31 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
     valid_v = ~(np.isnan(vx) | np.isnan(vy))
     acc = np.hypot(_gradient_runs(vx, valid_v), _gradient_runs(vy, valid_v))
 
+    # Independent post-contact reversal confirmation, used ONLY to gate
+    # acceleration-only candidates (acc_peak True, flip False). Deliberately
+    # LOOSER than `flip`: a relaxed magnitude floor (reversal_vy_frac * vy_min)
+    # applied to the outgoing mean only, over a longer look-ahead than `win`,
+    # and tolerant of a short ball dropout right after contact (nanmean over the
+    # window, requiring at least `min_valid` real samples on each side). If this
+    # were identical to `flip`, `flip or (acc_peak and reversal)` would collapse
+    # to `flip` and silently drop every acc-only candidate.
+    rev_floor = reversal_vy_frac * vy_min
+    min_valid = 2   # minimum real vy samples required in each window
+
+    def _persistent_reversal(i):
+        lo = max(0, i - reversal_look)
+        hi = min(len(vy), i + 1 + reversal_look)
+        if np.count_nonzero(valid_v[lo:i]) < min_valid:
+            return False
+        if np.count_nonzero(valid_v[i + 1:hi]) < min_valid:
+            return False
+        b = np.nanmean(vy[lo:i])          # incoming, excludes contact frame i
+        a = np.nanmean(vy[i + 1:hi])      # outgoing, excludes contact frame i
+        if np.isnan(b) or np.isnan(a):
+            return False
+        # genuine, sustained sign flip; magnitude floor on the OUTGOING side only
+        return (b * a < 0) and (abs(a) >= rev_floor)
+
     candidates = {}   # idx -> strength
     for i in range(win, len(frames) - win):
         if not valid[i - win:i + win + 1].all():
@@ -183,7 +222,9 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
                 and min(abs(before), abs(after)) >= vy_min)
         acc_peak = (acc[i] >= acc_thr
                     and acc[i] == np.nanmax(acc[i - win:i + win + 1]))
-        if flip or acc_peak:
+        # acc-only candidates (acc_peak but not flip) now require an independent,
+        # relaxed post-contact reversal confirmation. flip candidates unchanged.
+        if flip or (acc_peak and _persistent_reversal(i)):
             candidates[i] = max(candidates.get(i, 0.0), float(acc[i]))
 
     # player proximity filter
@@ -263,7 +304,8 @@ def classify_stroke(ball_cx, player_box, player_side, hand,
 
 
 def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
-                  vy_min=0.5, acc_thr=1.5, win=4):
+                  vy_min=0.5, acc_thr=1.5, win=4,
+                  reversal_look=6, reversal_vy_frac=0.5):
     """Full pipeline: detect shots and classify them. Return a DataFrame."""
     # Diagnose a frame-numbering mismatch between the ball CSV and the players
     # CSV: if the two frame ranges don't overlap, _nearest_box can never match,
@@ -278,7 +320,9 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                   f"ball CSV and the players CSV; no shots can be detected.")
 
     hits = detect_hits(track, boxes, fps, min_gap_s=min_gap_s,
-                       vy_min=vy_min, acc_thr=acc_thr, win=win)
+                       vy_min=vy_min, acc_thr=acc_thr, win=win,
+                       reversal_look=reversal_look,
+                       reversal_vy_frac=reversal_vy_frac)
     n_dropped = 0
     rows = []
     for f, pid, strength in hits:
@@ -531,6 +575,18 @@ def main() -> None:
                         help="half-window (frames) for the before/after vy "
                              "means and the local acceleration-peak test "
                              "(default 4)")
+    parser.add_argument("--reversal-look", type=int, default=6,
+                        dest="reversal_look",
+                        help="forward/backward half-window (frames) used to "
+                             "confirm an acceleration-only candidate's vertical "
+                             "reversal (default 6); not applied to candidates "
+                             "that already pass the vy sign-reversal test")
+    parser.add_argument("--reversal-vy-frac", type=float, default=0.5,
+                        dest="reversal_vy_frac",
+                        help="relaxed outgoing |mean vy| floor for that "
+                             "confirmation, as a fraction of --vy-min "
+                             "(default 0.5); pass 0 to require only a sign "
+                             "change (closest to the pre-gate behaviour)")
     parser.add_argument("--output", default="outputs/shot_analysis")
     parser.add_argument("--no-frames", action="store_true",
                         help="do not save the shot PNGs")
@@ -555,7 +611,9 @@ def main() -> None:
 
     shots = analyze_shots(track, boxes, conv, args.fps, hands,
                           min_gap_s=args.min_gap, vy_min=args.vy_min,
-                          acc_thr=args.acc_thr, win=args.win)
+                          acc_thr=args.acc_thr, win=args.win,
+                          reversal_look=args.reversal_look,
+                          reversal_vy_frac=args.reversal_vy_frac)
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
