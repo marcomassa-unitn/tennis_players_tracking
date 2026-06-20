@@ -23,6 +23,22 @@ Forehand / backhand at the shot frame:
     for left-handers (--p1-hand/--p2-hand left) the reasoning is inverted;
   - if the ball is almost on the body axis the shot is marked "unknown".
 
+Shot TYPE (flat / slice / dropshot / lob), orthogonal to forehand/backhand,
+from the OUTGOING ball trajectory shape (the frames right after contact):
+  - the angled camera makes a NEAR-player pixel speed ~3x a FAR-player one for
+    the same physical shot, so raw pixel speed is never compared across sides.
+    Perspective is handled by (a) a scale-free "pace" = pixel speed / ball
+    bbox-height, (b) court-meters speed via the homography for the far split,
+    and (c) dimensionless trajectory-SHAPE features (diefrac = how fast the ball
+    stops travelling, reach, and bowback = how much the ball arcs back);
+  - dropshot = the far ball dies quickly (low diefrac + low late speed); lob =
+    a near ball that arcs up and returns (tiny diefrac, slow, short reach);
+    slice = a floated/decelerating ball (bowback, low pace); else flat;
+  - CAVEAT: the court homography is a GROUND plane while the ball is airborne at
+    contact, so the meters-based speeds are approximate — every shot-type
+    threshold is a CLI flag (see --type-self-test) and may need per-camera
+    retuning; the scale-free features (pace/diefrac/reach/bowback) do not.
+
 Use (from project root, after generating the ball CSV with BallTracking):
     python utils/shot_analysis.py --ball outputs/ball_coordinates/ball_Input_video2.csv
     python utils/shot_analysis.py --ball outputs/ball_coordinates/ball_Input_video2.csv \\
@@ -30,6 +46,10 @@ Use (from project root, after generating the ball CSV with BallTracking):
 
 Validation of the logic without the YOLO model (synthetic trajectory):
     python utils/shot_analysis.py --self-test
+
+Validation of the shot-type classifier against the labelled ground truth
+(needs the real ball_Input_video2.csv + shots.csv):
+    python utils/shot_analysis.py --type-self-test
 """
 
 import argparse
@@ -73,8 +93,18 @@ def load_ball_track(ball_csv: str) -> pd.DataFrame:
     if df.empty:
         raise ValueError(f"Empty ball CSV: {ball_csv}")
     idx = range(int(df["frame"].min()), int(df["frame"].max()) + 1)
-    full = df.set_index("frame")[["cx", "cy"]].reindex(idx)
+    # `h` (ball bbox height) is carried alongside cx/cy as the SCALE proxy used by
+    # the shot-type classifier: the ball looks bigger near the camera, so dividing
+    # a pixel speed by the local median(h) yields a perspective-robust ("scale-free")
+    # pace. h is interpolated the same way as cx/cy but is NOT Savitzky-Golay
+    # smoothed below (only a local median of it is ever used). Older CSVs without an
+    # `h` column degrade gracefully: the column is all-NaN and the meters/shape
+    # features (which don't need h) still work; pace/reach become NaN -> unknown.
+    cols = ["cx", "cy"] + (["h"] if "h" in df.columns else [])
+    full = df.set_index("frame")[cols].reindex(idx)
     full = full.interpolate(limit=8, limit_area="inside")
+    if "h" not in full.columns:
+        full["h"] = np.nan
 
     if "interpolated" in df.columns:
         interp = (df.set_index("frame")["interpolated"]
@@ -329,10 +359,176 @@ def classify_stroke(ball_cx, player_box, player_side, hand,
     return "forehand" if (db > 0) == dominant_is_image_right else "backhand"
 
 
+# ── shot-type (flat / slice / dropshot / lob) classification ────────────────────
+#
+# Orthogonal to forehand/backhand: classifies HOW the ball was struck from the
+# shape of its OUTGOING trajectory (the frames right after contact).
+#
+# The footage is shot from an angled camera, so a raw pixel speed is ~3x larger
+# for the NEAR player than the FAR player for the same physical shot. We therefore
+# never compare a raw pixel speed across sides; perspective is handled three ways:
+#   * scale-free `pace`   = 100 * mean(px step speed) / median(ball bbox h); the
+#                           ball's apparent size h shrinks with distance exactly as
+#                           its apparent speed does, so the ratio is scale-free.
+#   * meters `peak_m`/`tail_m` via the court homography (× fps) — physical units,
+#     used only for the FAR flat/slice split. CAVEAT: the homography is a GROUND
+#     plane but the ball is airborne at contact, so these m/s are approximate —
+#     hence every threshold is exposed as a CLI flag for per-camera re-derivation.
+#   * dimensionless SHAPE: `diefrac` (2nd-half / 1st-half outgoing path length — how
+#     fast the ball stops travelling), `reach` (path length / h), and `bb`
+#     (bowback: fraction of the vertical range the ball travels back after an
+#     interior vertical extreme — ~0 for a flat drive, high for a lofted arc).
+#
+# Thresholds were fit against a 23-shot ground truth and sit on wide plateaus
+# (see --type-self-test, which reproduces 23/23 and is stable for K in 22..30).
+
+# Default thresholds (also the CLI-flag defaults in main()). Plateau centers.
+SHOT_TYPE_PARAMS = {
+    "k": 26,                 # outgoing kinematics window (frames after contact)
+    "w30": 30,               # outgoing window for the path-length ratios
+    "drop_diefrac": 0.50,    # FAR dropshot: 2nd/1st half path-length ratio below this
+    "drop_tail_m": 10.0,     # FAR dropshot: late-window speed (m/s) below this
+    "lob_diefrac": 0.25,     # NEAR lob: ball arcs up then returns -> tiny diefrac
+    "lob_pace": 95.0,        # NEAR lob: scale-free pace below this
+    "lob_reach": 25.0,       # NEAR lob: short scale-free penetration
+    "nslice_bb": 0.40,       # NEAR slice: bowback at/above this (floated, not driven)
+    "nslice_diefrac": 0.70,  # NEAR slice: ball loses pace (separates slice from flat)
+    "nslice_peak_m": 39.0,   # NEAR slice: peak speed (m/s) below this (corroborator)
+    "far_peak_m": 37.0,      # FAR flat if peak speed (m/s) at/above this, else slice
+}
+
+
+def _pathlen(cx: np.ndarray, cy: np.ndarray) -> float:
+    """Total polyline length of an (cx, cy) trajectory, ignoring NaN steps."""
+    return float(np.nansum(np.hypot(np.diff(cx), np.diff(cy))))
+
+
+def _bowback(cy: np.ndarray) -> float:
+    """
+    Bowback: after the ball's first INTERIOR vertical extreme in the outgoing
+    window, the fraction of the total vertical range it travels back. ~0 for a
+    monotone drive (the ball keeps going one way); -> 1 for a lofted/floated arc
+    (it rises to an apex then comes back down, or vice-versa). Scale-free.
+    """
+    n = len(cy)
+    if n < 6:
+        return 0.0
+    rng = float(np.nanmax(cy) - np.nanmin(cy))
+    if rng < 20:          # essentially flat in y: no meaningful arc
+        return 0.0
+    imin = int(np.nanargmin(cy))
+    imax = int(np.nanargmax(cy))
+    # interior extreme only (1 <= idx <= n-3): an extreme at the very edge is the
+    # window boundary, not a real turn-around of the trajectory.
+    up_down = (np.nanmax(cy[imin:]) - cy[imin]) / rng if 1 <= imin <= n - 3 else 0.0
+    down_up = (cy[imax] - np.nanmin(cy[imax:])) / rng if 1 <= imax <= n - 3 else 0.0
+    return float(max(up_down, down_up))
+
+
+def _shot_type_features(track, conv, i: int, fps: float,
+                        k: int, w30: int) -> dict:
+    """
+    Outgoing-trajectory features for the contact at integer array-index ``i`` into
+    the (already-smoothed) ball track. Returns a dict of pace, peak_m, tail_m,
+    apex, rise, bb, diefrac, reach, vy_end (any may be NaN on a missing window).
+    """
+    cx = track["cx"].values
+    cy = track["cy"].values
+    h = track["h"].values if "h" in track.columns else np.full(len(cx), np.nan)
+
+    def _mean(a):
+        a = a[~np.isnan(a)]
+        return float(np.mean(a)) if len(a) else np.nan
+
+    cyo = cy[i:i + k + 1]
+    cxo = cx[i:i + k + 1]
+    hc = np.nanmedian(h[max(0, i - 3):i + 4])    # local scale proxy
+
+    # scale-free pixel pace
+    spx = np.hypot(np.diff(cxo), np.diff(cyo))
+    pace = 100.0 * _mean(spx) / hc if hc and not np.isnan(hc) else np.nan
+
+    # perspective-corrected speed in m/s (ground-plane homography; approximate)
+    pm = conv.to_meters_batch(np.column_stack([cxo, cyo]))
+    dm = np.diff(pm, axis=0)
+    spm = np.hypot(dm[:, 0], dm[:, 1]) * fps
+    peak_m = float(np.nanmax(spm)) if np.any(~np.isnan(spm)) else np.nan
+    tail_m = _mean(spm[18:26])                   # late-window speed
+
+    apex = float(cyo[0] - np.nanmin(cyo)) if np.any(~np.isnan(cyo)) else np.nan
+    rise = _mean(np.diff(cyo[:6]))               # initial vertical velocity sign
+    bb = _bowback(cyo)
+
+    # half-vs-half path-length ratio over the (slightly longer) W30 window
+    cyo30 = cy[i:i + w30 + 1]
+    cxo30 = cx[i:i + w30 + 1]
+    half = w30 // 2
+    p1 = _pathlen(cxo30[:half + 1], cyo30[:half + 1])
+    p2 = _pathlen(cxo30[half:], cyo30[half:])
+    diefrac = p2 / p1 if p1 > 1e-6 else np.nan
+    reach = _pathlen(cxo30, cyo30) / hc if hc and not np.isnan(hc) else np.nan
+    vy_end = abs(_mean(np.diff(cyo[k - 5:k + 1])))
+
+    return dict(pace=pace, peak_m=peak_m, tail_m=tail_m, apex=apex, rise=rise,
+                bb=bb, diefrac=diefrac, reach=reach, vy_end=vy_end)
+
+
+def classify_shot_type(feats: dict, side: str, params: dict = None) -> str:
+    """
+    flat | slice | dropshot | lob | unknown, from the outgoing-trajectory features
+    and the striking player's court side. First matching rule wins. Returns
+    "unknown" when the discriminating features could not be computed (missing
+    outgoing window) so a bad shot never silently masquerades as a confident type.
+    """
+    p = params or SHOT_TYPE_PARAMS
+    df = feats.get("diefrac")
+    peak_m = feats.get("peak_m")
+
+    # The shape signals (diefrac for dropshot/lob, peak_m for the far split) are
+    # the load-bearing discriminators; if they're NaN we can't classify safely.
+    if df is None or np.isnan(df):
+        return "unknown"
+
+    # R1 DROPSHOT (far): the ball's path collapses in the 2nd half AND the late
+    # speed is low. diefrac is scale-free and immune to where the apex falls; the
+    # tail_m AND-gate protects a fast far-flat whose diefrac happens to be middling.
+    tail_m = feats.get("tail_m")
+    if (side == "far" and df < p["drop_diefrac"]
+            and tail_m is not None and not np.isnan(tail_m)
+            and tail_m < p["drop_tail_m"]):
+        return "dropshot"
+
+    if side == "near":
+        # R2a LOB: arcs up then returns -> tiny diefrac; triple-confirmed by a slow
+        # pace and a short reach (lob is rare, so it is gated three independent ways).
+        pace = feats.get("pace")
+        reach = feats.get("reach")
+        if (df < p["lob_diefrac"]
+                and pace is not None and not np.isnan(pace) and pace < p["lob_pace"]
+                and reach is not None and not np.isnan(reach)
+                and reach < p["lob_reach"]):
+            return "lob"
+        # R2b NEAR SLICE: bows back, loses pace, and is not a fast drive.
+        bb = feats.get("bb", 0.0)
+        if (bb >= p["nslice_bb"] and df < p["nslice_diefrac"]
+                and peak_m is not None and not np.isnan(peak_m)
+                and peak_m < p["nslice_peak_m"]):
+            return "slice"
+        # R2c default
+        return "flat"
+
+    # R3 FAR branch: a fast drive is flat, a floated ball is a slice.
+    if peak_m is None or np.isnan(peak_m):
+        return "unknown"
+    return "flat" if peak_m >= p["far_peak_m"] else "slice"
+
+
 def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                   vy_min=0.5, acc_thr=1.5, win=4,
-                  reversal_look=6, reversal_vy_frac=0.5):
+                  reversal_look=6, reversal_vy_frac=0.5,
+                  type_params=None):
     """Full pipeline: detect shots and classify them. Return a DataFrame."""
+    tp = type_params or SHOT_TYPE_PARAMS
     # Diagnose a frame-numbering mismatch between the ball CSV and the players
     # CSV: if the two frame ranges don't overlap, _nearest_box can never match,
     # detect_hits yields nothing and the user only sees "No shots detected"
@@ -373,6 +569,13 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         side = "near" if y_m > NET else "far"
         stroke = classify_stroke(ball_cx, box, side, hands[pid])
 
+        # Shot TYPE (flat/slice/dropshot/lob) from the OUTGOING trajectory shape.
+        # The contact frame `f` maps to the integer array-index `i` into the
+        # smoothed track via the (contiguous) frame index.
+        i = int(f - track.index.min())
+        feats = _shot_type_features(track, conv, i, fps, tp["k"], tp["w30"])
+        shot_type = classify_shot_type(feats, side, tp)
+
         # NOTE: to_meters uses the ground-plane (court) homography, but at the
         # moment of contact the ball is airborne (~ racket height). Projecting
         # an above-ground point through a ground homography is only approximate
@@ -381,6 +584,10 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         rows.append({
             "frame": f, "time_s": round(f / fps, 2), "player_id": pid,
             "side": side, "hand": hands[pid], "stroke": stroke,
+            "shot_type": shot_type,
+            "ball_pace": (round(feats["pace"], 1)
+                          if feats["pace"] is not None
+                          and not np.isnan(feats["pace"]) else None),
             "ball_cx": round(ball_cx, 1), "ball_cy": round(ball_cy, 1),
             "player_cx": round(box[0] + box[2] / 2.0, 1),
             "ball_x_m": round(bx_m, 2), "ball_y_m": round(by_m, 2),
@@ -410,10 +617,15 @@ def save_shot_frames(shots: pd.DataFrame, video_path: str, boxes: dict,
             x, y, w, h = (int(v) for v in box)
             cv2.rectangle(fr, (x, y), (x + w, y + h), (0, 255, 0), 2)
         cv2.circle(fr, (int(r.ball_cx), int(r.ball_cy)), 9, (0, 255, 255), 2)
-        label = f"P{r.player_id} {r.stroke} (frame {r.frame})"
+        # shot_type may be absent on a legacy DataFrame; guard with getattr.
+        shot_type = getattr(r, "shot_type", "")
+        label = (f"P{r.player_id} {r.stroke} {shot_type} (frame {r.frame})"
+                 if shot_type else f"P{r.player_id} {r.stroke} (frame {r.frame})")
         cv2.putText(fr, label, (40, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
                     (0, 255, 255), 3)
-        path = out_dir / f"shot_f{r.frame:05d}_P{r.player_id}_{r.stroke}.png"
+        type_tag = f"_{shot_type}" if shot_type else ""
+        path = (out_dir /
+                f"shot_f{r.frame:05d}_P{r.player_id}_{r.stroke}{type_tag}.png")
         cv2.imwrite(str(path), fr)
     cap.release()
     print(f"  Shot PNGs saved in {out_dir}")
@@ -426,9 +638,11 @@ def print_summary(shots: pd.DataFrame, hands: dict) -> None:
     if shots.empty:
         print("  No shots detected.")
         return
+    has_type = "shot_type" in shots.columns
     for r in shots.itertuples():
+        type_str = f"  [{r.shot_type}]" if has_type else ""
         print(f"  frame {r.frame:5d} ({r.time_s:6.2f}s)  "
-              f"P{r.player_id} ({r.side:4s}, {r.hand:5s})  ->  {r.stroke}")
+              f"P{r.player_id} ({r.side:4s}, {r.hand:5s})  ->  {r.stroke}{type_str}")
     print()
     for pid, sub in shots.groupby("player_id"):
         n_fh = (sub["stroke"] == "forehand").sum()
@@ -436,6 +650,12 @@ def print_summary(shots: pd.DataFrame, hands: dict) -> None:
         n_uk = (sub["stroke"] == "unknown").sum()
         print(f"  P{pid} ({hands[pid]:5s}): {len(sub)} shots  "
               f"-  forehands {n_fh}, backhands {n_bh}, unknown {n_uk}")
+    if has_type:
+        print()
+        for t in ("flat", "slice", "dropshot", "lob", "unknown"):
+            n = (shots["shot_type"] == t).sum()
+            if n:
+                print(f"  shot type {t:9s}: {n}")
     print()
 
 
@@ -565,6 +785,102 @@ def self_test() -> None:
           "(including the left-handed case); mid-court bounces ignored.")
 
 
+# ── labelled shot-type validation (real Input_video2 ground truth) ──────────────
+
+# Ground truth for the 23 detected shots of Input_video2, provided by the user.
+# A "dropshot/slice" label is genuinely ambiguous (slow but not dropshot-slow) and
+# counts as correct for EITHER dropshot or slice.
+_TYPE_GROUND_TRUTH = {
+    84: "flat", 109: "flat", 152: "flat", 188: "flat", 225: "flat",
+    252: "dropshot", 322: "flat", 349: "slice", 386: "lob", 432: "flat",
+    469: "flat", 503: "slice", 554: "flat", 594: "flat", 629: "flat",
+    660: "flat", 696: "flat", 740: "dropshot/slice", 775: "flat", 812: "flat",
+    858: "dropshot/slice", 912: "slice", 950: "flat",
+}
+_TYPE_TARGET_ACC = 0.90
+
+
+def type_self_test(ball_csv: str = None, players_csv: str = None,
+                   court_csv: str = None, fps: float = 30.0) -> None:
+    """
+    Validate the shot-TYPE classifier against the labelled Input_video2 ground
+    truth, end-to-end through the real analyze_shots pipeline (not a re-impl).
+
+    Each ground-truth frame is matched to the nearest detected shot within ±3
+    frames; extra detections (e.g. a trailing shot the user did not label) are
+    ignored. Fails with a non-zero exit if accuracy < 90 %.
+    """
+    base = Path(__file__).resolve().parent.parent / "outputs"
+    ball_csv = ball_csv or str(base / "ball_coordinates" / "ball_Input_video2.csv")
+    players_csv = players_csv or str(
+        base / "player_coordinates" / "players_Input_video2.csv")
+    court_csv = court_csv or str(
+        base / "court_coordinates" / "Input_video2_court.csv")
+
+    for label, path in (("ball", ball_csv), ("players", players_csv),
+                        ("court", court_csv)):
+        if not os.path.exists(path):
+            raise SystemExit(
+                f"TYPE-SELF-TEST: missing {label} CSV: {path}\n"
+                "  This test needs the real Input_video2 outputs "
+                "(run the tracking pipeline first).")
+
+    track = load_ball_track(ball_csv)
+    boxes = load_player_boxes(players_csv)
+    conv = CourtConverter(court_csv)
+    # default hands (the ground truth was labelled on the default right/right run)
+    shots = analyze_shots(track, boxes, conv, fps, {1: "right", 2: "right"})
+
+    if shots.empty or "shot_type" not in shots.columns:
+        raise SystemExit("TYPE-SELF-TEST: no shots / no shot_type column produced.")
+
+    det = {int(r.frame): r.shot_type for r in shots.itertuples()}
+    det_frames = sorted(det)
+
+    def _nearest(g):
+        best = None
+        for d in det_frames:
+            if abs(d - g) <= 3 and (best is None or abs(d - g) < abs(best - g)):
+                best = d
+        return best
+
+    print("TYPE-SELF-TEST shot_analysis")
+    print(f"  {'frame':>5} {'GT':>14} {'PRED':>9}  ok")
+    correct = 0
+    missing = 0
+    rows = []
+    for g in sorted(_TYPE_GROUND_TRUTH):
+        gt = _TYPE_GROUND_TRUTH[g]
+        d = _nearest(g)
+        if d is None:
+            pred = "(not detected)"
+            ok = False
+            missing += 1
+        else:
+            pred = det[d]
+            ok = (pred in ("dropshot", "slice") if gt == "dropshot/slice"
+                  else pred == gt)
+        correct += ok
+        rows.append((g, gt, pred, ok))
+        print(f"  {g:>5} {gt:>14} {pred:>9}  {'Y' if ok else 'N'}")
+
+    n = len(_TYPE_GROUND_TRUTH)
+    acc = correct / n
+    print(f"\n  ACCURACY: {correct}/{n} = {acc:.3f}  (target >= {_TYPE_TARGET_ACC:.2f})")
+    if missing:
+        print(f"  Note: {missing} ground-truth shot(s) had no detection within "
+              f"±3 frames (detection drift, counted as wrong).")
+    wrong = [(g, gt, pred) for g, gt, pred, ok in rows if not ok]
+    if acc < _TYPE_TARGET_ACC:
+        print("  FAIL: below target. Misclassified:")
+        for g, gt, pred in wrong:
+            print(f"   - frame {g}: expected {gt}, got {pred}")
+        raise SystemExit(1)
+    print("  PASS:", "all correct." if not wrong else
+          f"{len(wrong)} miss(es) but above the {_TYPE_TARGET_ACC:.0%} target: "
+          f"{[(g, gt, pred) for g, gt, pred in wrong]}")
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -617,16 +933,80 @@ def main() -> None:
                              "confirmation, as a fraction of --vy-min "
                              "(default 0.5); pass 0 to require only a sign "
                              "change (closest to the pre-gate behaviour)")
+    # Shot-TYPE (flat/slice/dropshot/lob) thresholds. Defaults are SHOT_TYPE_PARAMS,
+    # fit against a 23-shot ground truth (see --type-self-test) and sitting on wide
+    # plateaus. The meters-based cuts (--drop-tail-m, --*-peak-m) assume the video
+    # fps and an accurate court homography, so they may need per-camera retuning;
+    # the scale-free cuts (diefrac, pace, reach, bb) do not.
+    parser.add_argument("--k-window", type=int, default=SHOT_TYPE_PARAMS["k"],
+                        dest="k", help="outgoing kinematics window in frames "
+                        "(default %(default)s)")
+    parser.add_argument("--w30-window", type=int, default=SHOT_TYPE_PARAMS["w30"],
+                        dest="w30", help="outgoing window for path-length ratios "
+                        "(default %(default)s)")
+    parser.add_argument("--drop-diefrac", type=float,
+                        default=SHOT_TYPE_PARAMS["drop_diefrac"], dest="drop_diefrac",
+                        help="FAR dropshot: 2nd/1st-half path-length ratio below "
+                        "this (default %(default)s)")
+    parser.add_argument("--drop-tail-m", type=float,
+                        default=SHOT_TYPE_PARAMS["drop_tail_m"], dest="drop_tail_m",
+                        help="FAR dropshot: late-window speed (m/s) below this "
+                        "(default %(default)s)")
+    parser.add_argument("--lob-diefrac", type=float,
+                        default=SHOT_TYPE_PARAMS["lob_diefrac"], dest="lob_diefrac",
+                        help="NEAR lob: path-length ratio below this "
+                        "(default %(default)s)")
+    parser.add_argument("--lob-pace", type=float,
+                        default=SHOT_TYPE_PARAMS["lob_pace"], dest="lob_pace",
+                        help="NEAR lob: scale-free pace below this "
+                        "(default %(default)s)")
+    parser.add_argument("--lob-reach", type=float,
+                        default=SHOT_TYPE_PARAMS["lob_reach"], dest="lob_reach",
+                        help="NEAR lob: scale-free reach below this "
+                        "(default %(default)s)")
+    parser.add_argument("--nslice-bb", type=float,
+                        default=SHOT_TYPE_PARAMS["nslice_bb"], dest="nslice_bb",
+                        help="NEAR slice: bowback at/above this "
+                        "(default %(default)s)")
+    parser.add_argument("--nslice-diefrac", type=float,
+                        default=SHOT_TYPE_PARAMS["nslice_diefrac"],
+                        dest="nslice_diefrac",
+                        help="NEAR slice: path-length ratio below this "
+                        "(default %(default)s)")
+    parser.add_argument("--nslice-peak-m", type=float,
+                        default=SHOT_TYPE_PARAMS["nslice_peak_m"], dest="nslice_peak_m",
+                        help="NEAR slice: peak speed (m/s) below this "
+                        "(default %(default)s)")
+    parser.add_argument("--far-peak-m", type=float,
+                        default=SHOT_TYPE_PARAMS["far_peak_m"], dest="far_peak_m",
+                        help="FAR flat if peak speed (m/s) at/above this, else "
+                        "slice (default %(default)s)")
     parser.add_argument("--output", default="outputs/shot_analysis")
     parser.add_argument("--no-frames", action="store_true",
                         help="do not save the shot PNGs")
     parser.add_argument("--self-test", action="store_true", dest="self_test",
                         help="validate the logic on a synthetic trajectory")
+    parser.add_argument("--type-self-test", action="store_true",
+                        dest="type_self_test",
+                        help="validate shot-type classification against the "
+                        "embedded 23-shot ground truth for Input_video2")
     args = parser.parse_args()
 
     if args.self_test:
         self_test()
         return
+    if args.type_self_test:
+        type_self_test()
+        return
+
+    type_params = {
+        "k": args.k, "w30": args.w30,
+        "drop_diefrac": args.drop_diefrac, "drop_tail_m": args.drop_tail_m,
+        "lob_diefrac": args.lob_diefrac, "lob_pace": args.lob_pace,
+        "lob_reach": args.lob_reach, "nslice_bb": args.nslice_bb,
+        "nslice_diefrac": args.nslice_diefrac, "nslice_peak_m": args.nslice_peak_m,
+        "far_peak_m": args.far_peak_m,
+    }
 
     # Derive the input CSV paths from the video name when not given explicitly,
     # matching the producers' defaults (players_<stem>.csv in player_coordinates/,
@@ -657,7 +1037,8 @@ def main() -> None:
                           min_gap_s=args.min_gap, vy_min=args.vy_min,
                           acc_thr=args.acc_thr, win=args.win,
                           reversal_look=args.reversal_look,
-                          reversal_vy_frac=args.reversal_vy_frac)
+                          reversal_vy_frac=args.reversal_vy_frac,
+                          type_params=type_params)
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)

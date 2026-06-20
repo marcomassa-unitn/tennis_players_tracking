@@ -40,8 +40,8 @@ tracking/BallTracking.py (YOLO) ──> outputs/ball_coordinates/ball_<video>.cs
                        │
                        v
            utils/shot_analysis.py              (hit detection)
-               despike ball track + vy reversals + acceleration peaks + proximity
-               -> hit frames -> forehand/backhand + drive/slice/dropshot per player
+               vy reversals + acceleration peaks + player proximity
+               -> hit frames -> forehand/backhand + flat/slice/dropshot/lob per shot
 ```
 
 ## Setup
@@ -163,16 +163,10 @@ python utils/shot_analysis.py --video data/Input_video2.mp4 \
 
 # validate the detection/classification logic without the YOLO model:
 python utils/shot_analysis.py --self-test
+# validate shot-type classification against the labelled ground truth
+# (needs the real Input_video2 ball + players + court CSVs):
+python utils/shot_analysis.py --type-self-test
 ```
-
-The raw ball track is first **despiked**: a position that jumps far from its
-local neighbours for a single frame and then returns is a tracking outlier (a
-confident YOLO mis-detection — net cord, line, shoe) and is removed before any
-velocity is computed, so it cannot create a huge spurious speed. The gate keys
-on the distance from a local rolling median and fires only when a point exceeds
-*both* an absolute pixel floor (`--despike-px`, default 40) and an adaptive
-multiple of the local MAD (`--despike-mad`, default 4), so a genuinely fast ball
-is never clipped.
 
 Hit detection on the Savitzky-Golay-smoothed ball track: candidates are
 persistent sign reversals of the vertical velocity `vy` **or** peaks of the
@@ -188,23 +182,31 @@ right-hander the shot is a *forehand* when the ball is on the dominant-hand
 side, a *backhand* otherwise, and the reasoning is inverted for left-handers
 (`--p1-hand/--p2-hand left`).
 
-Shot type from the **outgoing ball pace** measured just after contact:
-`drive` (≥ `--drive-thr`, default 15), `slice` (between the two thresholds) or
-`dropshot` (< `--dropshot-thr`, default 4). Pace is a **scale-free** index —
-`100 × (ball pixels/frame just after contact) ÷ (striker's on-screen box
-height)`. We deliberately do **not** use a court-metre km/h: the ball is
-airborne at contact and the ground-plane homography turns its arc into large
-fake distances (worst at the far baseline, where the court spans only a few
-pixels), so homography km/h scatters by which end of the court a player stands
-on rather than by how hard the ball was hit. Dividing the pixel speed by the
-striker's box height cancels perspective, making the near and far players
-directly comparable. Pace alone cannot detect backspin, so `slice` means a
-medium-pace control shot inferred from speed; the numeric `ball_pace` is always
-written too. Defaults fit ~1080p/30fps footage — **calibrate `--drive-thr` /
-`--dropshot-thr` against the saved PNGs**.
+Shot **type** (`flat` / `slice` / `dropshot` / `lob`) is read from the **shape
+of the outgoing trajectory** in the frames right after contact. The fixed,
+angled camera makes the near player's pixel speed ~3× the far player's for the
+same physical shot, so a raw pixel speed is never compared across sides;
+perspective is cancelled three ways: (a) a **scale-free pace** = `100 × (ball
+pixels/frame) ÷ (ball bbox height)` (the ball's apparent size shrinks with
+distance just as its apparent speed does); (b) a **court-metre speed** via the
+homography (used only for the far flat/slice split); and (c) **dimensionless
+shape** features — `diefrac` (how fast the ball stops travelling), `reach`, and
+`bowback` (how much the ball arcs back). The rules: a far ball that dies quickly
+is a `dropshot`; a near ball that arcs up and returns slowly is a `lob`; a
+floated, decelerating ball is a `slice`; otherwise `flat`. **Caveat:** the
+court homography is a ground plane while the ball is airborne at contact, so the
+metre-based speeds are approximate — every threshold is a CLI flag
+(`--far-peak-m`, `--drop-diefrac`, `--drop-tail-m`, `--lob-diefrac`,
+`--lob-pace`, `--lob-reach`, `--nslice-bb`, `--nslice-diefrac`,
+`--nslice-peak-m`, plus the windows `--k-window` / `--w30-window`) and may need
+per-camera retuning; the scale-free features (pace / diefrac / reach / bowback)
+do not. Defaults were fit against a 23-shot ground truth on `Input_video2`
+(`--type-self-test` reproduces **23/23**, stable across `--k-window` 22–30); on
+a different camera the type labels are indicative until recalibrated.
 
-Output: `outputs/shot_analysis/shots.csv` (with `stroke`, `shot_type` and
-`ball_pace` columns), an annotated PNG per shot and a terminal summary.
+Output: `outputs/shot_analysis/shots.csv` (with `stroke`, `shot_type` and the
+numeric `ball_pace` columns), an annotated PNG per shot and a terminal summary
+that tallies forehands/backhands per player and the count of each shot type.
 
 ### 6. Ground truth & evaluation
 
@@ -239,13 +241,8 @@ pixels and metres. Per-frame details are saved in `outputs/evaluation/`.
 | `motionEstimation/block_matching.py` | full-search / three-step block matching |
 | `evaluation/annotate.py` | manual ground-truth annotation tool |
 | `evaluation/evaluate_tracking.py` | quantitative evaluation vs ground truth |
-<<<<<<< HEAD:README.md
-| `utils/shot_analysis.py` | ball despike + hit detection + forehand/backhand + drive/slice/dropshot |
-| `ballTracking/BallTracking.py` | YOLO ball tracking → ball CSV for shot analysis |
-=======
-| `utils/shot_analysis.py` | hit detection + forehand/backhand classification |
+| `utils/shot_analysis.py` | hit detection + forehand/backhand + flat/slice/dropshot/lob shot type |
 | `tracking/BallTracking.py` | YOLO ball tracking → ball CSV for shot analysis |
->>>>>>> f82e3117622e28f121a97efe79f29314e64bc9fa:documents/README.md
 
 ## Design notes & limitations
 
