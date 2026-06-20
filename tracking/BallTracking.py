@@ -72,12 +72,19 @@ class BallTracker:
         the nearest values outward, so trailing gaps after the last detection
         (and leading gaps before the first) aren't left NaN and silently
         dropped downstream. bfill/ffill cover any all-NaN edge rows.
+
+        Returns (filled_positions, real_mask) where real_mask[i] is True iff
+        frame i carried a genuine YOLO detection (a 4-value bbox) BEFORE filling.
+        Downstream (shot analysis) needs this to tell real positions from
+        interpolated straight-line fills, whose junction with real motion would
+        otherwise look like a racket contact and produce a false shot.
         """
+        real_mask = [len(p.get(1, [])) == 4 for p in ball_positions]
         positions_list = [p.get(1, []) for p in ball_positions]
         df = pd.DataFrame(positions_list, columns=["x1", "y1", "x2", "y2"])
         df = df.interpolate(limit_direction="both")
         df = df.bfill().ffill()
-        return [{1: row} for row in df.to_numpy().tolist()]
+        return [{1: row} for row in df.to_numpy().tolist()], real_mask
 
     def draw_bboxes(self, frames, ball_positions):
         """Draws ball bounding boxes on copies of the input frames."""
@@ -93,10 +100,15 @@ class BallTracker:
             output.append(out)
         return output
 
-    def _write_csv(self, csv_path, ball_positions):
+    def _write_csv(self, csv_path, ball_positions, real_mask=None):
+        # `interpolated` is appended as the LAST column (0 = real YOLO detection,
+        # 1 = interpolated fill) so existing readers that index the first 8
+        # columns by position, or by name, are unaffected. real_mask=None keeps
+        # backwards-compatible behaviour (everything written as real).
         with open(csv_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["frame", "x", "y", "w", "h", "cx", "cy", "area"])
+            writer.writerow(["frame", "x", "y", "w", "h", "cx", "cy", "area",
+                             "interpolated"])
             for frame_idx, pos in enumerate(ball_positions):
                 bbox = pos.get(1)
                 if bbox is None or np.any(np.isnan(bbox)):
@@ -106,7 +118,9 @@ class BallTracker:
                 w, h = int(x2 - x1), int(y2 - y1)
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                 area = w * h
-                writer.writerow([frame_idx, x, y, w, h, cx, cy, area])
+                is_real = real_mask[frame_idx] if real_mask is not None else True
+                writer.writerow([frame_idx, x, y, w, h, cx, cy, area,
+                                 0 if is_real else 1])
 
     def run(self, video_path, output_path=None, csv_path=None, display=True):
         cap = cv2.VideoCapture(video_path)
@@ -137,10 +151,10 @@ class BallTracker:
         finally:
             cap.release()
 
-        ball_positions = self.interpolate_ball_positions(ball_positions)
+        ball_positions, real_mask = self.interpolate_ball_positions(ball_positions)
 
         if csv_path:
-            self._write_csv(csv_path, ball_positions)
+            self._write_csv(csv_path, ball_positions, real_mask)
             print(f"CSV saved to {csv_path}")
 
         if not output_path and not display:

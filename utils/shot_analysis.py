@@ -58,15 +58,29 @@ NET = L_m / 2.0
 def load_ball_track(ball_csv: str) -> pd.DataFrame:
     """
     Load the ball CSV, realign it over all frames and smooth cx/cy.
-    Return a DataFrame indexed by frame with columns cx, cy (smoothed),
-    NaN where the ball was never seen.
+    Return a DataFrame indexed by frame with columns cx, cy (smoothed) and a
+    boolean `interp` column, NaN cx/cy where the ball was never seen.
+
+    `interp` marks frames that are interpolated straight-line FILLS rather than
+    real ball detections, so detect_hits can ignore the frozen-BB seam where a
+    long fill meets real motion (which otherwise looks like a contact). It comes
+    from the producer's `interpolated` column (BallTracking) when present; on an
+    older CSV that lacks the column it is all-False (the seam guard is then a
+    no-op — a geometric reconstruction is unreliable after the smoothing below,
+    so we deliberately do not attempt it).
     """
     df = pd.read_csv(ball_csv)
     if df.empty:
         raise ValueError(f"Empty ball CSV: {ball_csv}")
-    full = df.set_index("frame")[["cx", "cy"]].reindex(
-        range(int(df["frame"].min()), int(df["frame"].max()) + 1))
+    idx = range(int(df["frame"].min()), int(df["frame"].max()) + 1)
+    full = df.set_index("frame")[["cx", "cy"]].reindex(idx)
     full = full.interpolate(limit=8, limit_area="inside")
+
+    if "interpolated" in df.columns:
+        interp = (df.set_index("frame")["interpolated"]
+                  .reindex(idx).fillna(0).to_numpy().astype(bool))
+    else:
+        interp = np.zeros(len(list(idx)), dtype=bool)
 
     win = 9
     for col in ("cx", "cy"):
@@ -79,6 +93,7 @@ def load_ball_track(ball_csv: str) -> pd.DataFrame:
         else:
             print(f"  Warning: skipping Savitzky-Golay smoothing of '{col}' "
                   f"(only {int(ok.sum())} valid points, need > {win}).")
+    full["interp"] = interp
     return full
 
 
@@ -244,43 +259,54 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
         if best is not None:
             near_player[i] = (best[0], strength)
 
-    # Minimum gap: keep the strongest candidate in each cluster.
+    # Same-player WIDE-gap clustering: one shot per physical contact.
     #
-    # The suppression window is measured against the FIRST accepted hit's frame
-    # in the current cluster (cluster_anchor), NOT against the representative.
-    # The previous code re-anchored the window to whichever stronger/later
-    # candidate replaced the representative, so the window slid forward on every
-    # replacement and a long rally of closely-spaced candidates collapsed into a
-    # single shot. With a fixed anchor, only candidates within ONE min_gap
-    # window of the cluster start (plus a contiguous tail, see below) are merged.
-    #
-    # A single physical shot produces a *contiguous* spray of candidate frames
-    # that can be slightly wider than min_gap; to avoid splitting it we also
-    # absorb a candidate that directly continues the spray (within chain_gap of
-    # the last absorbed candidate). Distinct rally shots are separated by
-    # non-candidate frames, so they do NOT chain and stay separate.
-    min_gap = int(min_gap_s * fps)
-    chain_gap = 1   # frames: contiguous-spray tolerance for the cluster tail
-    hits = []
-    cluster_anchor = None   # frame of the first accepted hit in the current cluster
-    last_absorbed = None    # frame of the most recent candidate folded into it
+    # A single contact produces TWO reversals a few frames apart (an early
+    # approach-side reversal as the ball nears the player, plus the true contact
+    # reversal), and the old narrow min_gap (~15 frames) let those survive as TWO
+    # shots whenever they were 10-29 frames apart (the observed double spacing).
+    # Distinct same-player rally shots are >= ~64 frames apart on real footage, so
+    # a wider merge_gap collapses each double into one while never merging two
+    # genuine shots. Opposite-player candidates are NEVER merged (the rally
+    # alternates), so the player id is part of the cluster key.
+    merge_gap = max(int(min_gap_s * fps), 30)
+    interp = (track["interp"].to_numpy().astype(bool)
+              if "interp" in track.columns else np.zeros(len(frames), bool))
+
+    def _fill_run(i, step):
+        # Length of the consecutive interpolated-fill run adjacent to index i.
+        c, k = 0, i + step
+        while 0 <= k < len(interp) and interp[k]:
+            c += 1
+            k += step
+        return c
+
+    # Build same-player clusters (frame order), then keep the STRONGEST member of
+    # each (peak acceleration = the most physical contact).
+    clusters = []   # each: list of array-indices i
     for i in sorted(near_player):
-        pid, strength = near_player[i]
+        pid = near_player[i][0]
         f = int(frames[i])
-        same_cluster = (
-            hits and cluster_anchor is not None
-            and (f - cluster_anchor < min_gap            # inside the anchored window
-                 or f - last_absorbed <= chain_gap)      # contiguous tail of the spray
-        )
-        if same_cluster:
-            # Keep the strongest representative but do NOT advance the anchor.
-            if strength > hits[-1][2]:
-                hits[-1] = (f, pid, strength)
-            last_absorbed = f
+        if (clusters
+                and near_player[clusters[-1][-1]][0] == pid
+                and f - int(frames[clusters[-1][-1]]) <= merge_gap):
+            clusters[-1].append(i)
+        else:
+            clusters.append([i])
+
+    hits = []
+    for cl in clusters:
+        best = max(cl, key=lambda j: near_player[j][1])   # strongest member
+        # Frozen-BB seam guard: a candidate sitting at the end of a long
+        # interpolated straight fill (incoming fill >= 10 frames) with no real
+        # ball arriving after it (outgoing fill == 0) is the interpolation kink,
+        # not a contact (the frame-49 false positive). No-op when `interp` is
+        # all-False (legacy CSV without the producer `interpolated` column).
+        if _fill_run(best, -1) >= 10 and _fill_run(best, +1) == 0:
             continue
+        f = int(frames[best])
+        pid, strength = near_player[best]
         hits.append((f, pid, strength))
-        cluster_anchor = f
-        last_absorbed = f
     return hits
 
 
