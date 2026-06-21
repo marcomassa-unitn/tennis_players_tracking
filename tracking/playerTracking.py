@@ -52,6 +52,11 @@ class PlayerTracker:
         self.prev_centroids = None
 
         self.background = None
+        # Static, player-free reference background (temporal median of the first
+        # WARMUP_FRAMES frames). Used for plain background subtraction during the
+        # warmup window while the running-average model converges; None until the
+        # pre-pass in run() builds it.
+        self.static_bg = None
         # Playback delay (ms) passed to cv2.waitKey() between displayed frames.
         self.frame_ms = 5
 
@@ -95,11 +100,10 @@ class PlayerTracker:
         else:
             cv2.accumulateWeighted(gray, self.background, self.ALPHA)
 
-    def _get_foreground_mask(self, gray):
-        if self.background is None:
-            return None
-
-        bg_uint8 = cv2.convertScaleAbs(self.background)
+    def _foreground_from_bg(self, gray, bg_uint8):
+        """Threshold + clean the absolute difference of `gray` against a uint8
+        background image, returning the binary foreground mask. Shared by both
+        the running-average (update) and the static (warmup) backgrounds."""
         diff = cv2.absdiff(gray, bg_uint8)
 
         _, fg = cv2.threshold(diff, self.THRESH, 255, cv2.THRESH_BINARY)
@@ -108,6 +112,40 @@ class PlayerTracker:
         fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, self.KERNEL_BIG)
 
         return fg
+
+    def _get_foreground_mask(self, gray):
+        if self.background is None:
+            return None
+
+        bg_uint8 = cv2.convertScaleAbs(self.background)
+        return self._foreground_from_bg(gray, bg_uint8)
+
+    def _compute_static_background(self):
+        """Pre-pass: build a static, player-free reference background from the
+        temporal median of the first WARMUP_FRAMES frames, then rewind.
+
+        The running-average background needs ~WARMUP_FRAMES to converge, so the
+        original tracker simply skipped detection during that window. Instead we
+        detect those early frames against this static median background (classic
+        "plain" background subtraction): moving players are averaged out by the
+        median, leaving the empty court. The running-average model is still
+        warmed up in parallel and takes over unchanged once the warmup window
+        ends, so frame >= WARMUP_FRAMES behaviour is preserved exactly.
+        """
+        frames = []
+        for _ in range(max(self.WARMUP_FRAMES, 1)):
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+
+        # Rewind so the main loop processes the video from the very first frame.
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        if frames:
+            self.static_bg = np.median(
+                np.stack(frames, axis=0), axis=0
+            ).astype("uint8")
 
 
     def _find_components(self, mask):
@@ -270,6 +308,9 @@ class PlayerTracker:
 
     def run(self):
         frame_idx = 0
+        # Build the static warmup background before the main loop (this reads and
+        # rewinds the first WARMUP_FRAMES frames).
+        self._compute_static_background()
         self._open_csv()
 
         # try/finally guarantees the capture is released and the CSV is closed
@@ -283,10 +324,19 @@ class PlayerTracker:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 self._update_background(gray)
 
-                mask = self._get_foreground_mask(gray)
+                # Past the warmup window: use the converged running-average
+                # (update) background, exactly as before. During warmup: fall
+                # back to the static median background so these early frames are
+                # analysed too instead of being skipped.
+                if frame_idx >= self.WARMUP_FRAMES:
+                    mask = self._get_foreground_mask(gray)
+                elif self.static_bg is not None:
+                    mask = self._foreground_from_bg(gray, self.static_bg)
+                else:
+                    mask = None
 
                 components = []
-                if mask is not None and frame_idx >= self.WARMUP_FRAMES:
+                if mask is not None:
                     candidates = self._find_components(mask)
                     components = self._select_players(candidates)
 
