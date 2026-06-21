@@ -46,12 +46,28 @@ if PROJECT_ROOT not in sys.path:
 # Importing it pins matplotlib to the headless "Agg" backend, which is harmless
 # here (no figures/windows are ever created).
 from utils import player_analysis
-from utils.shot_analysis import load_player_boxes
+from utils.shot_analysis import (
+    load_player_boxes,
+    SHOT_CATEGORY_COLORS,   # hex per category — identical palette to shot_hitmap.png
+    shot_category,          # (stroke, shot_type, overhead) -> single category string
+)
 
 # ── layout constants ────────────────────────────────────────────────────────────
 PANEL_W   = 380          # width (px) of the right column (minimap + stats)
 MINI_FRAC = 0.62         # fraction of the right column height given to the minimap
 FONT      = cv2.FONT_HERSHEY_SIMPLEX
+
+# Shot-type legend drawn INSIDE the minimap, in the free green run-off strip to
+# the LEFT of the court (the court's left sideline is ~x=142 px in a 380 px panel,
+# so x<~135 is clear). One row per entry: a symbol + the shot-type label.
+_LEG_FS    = 0.38            # legend font scale
+_LEG_ROW_H = 16              # row pitch (px)
+_LEG_X     = 6               # left inset of the legend column (px)
+_LEG_TOP   = 14              # baseline y of the first row (px)
+_LEG_GAP   = 6              # gap between a symbol and its label (px)
+# Stable category order so the legend never reshuffles as new shots accumulate.
+_LEG_ORDER = ["forehand", "backhand", "slice", "dropshot",
+              "lob", "serve", "smash", "unknown"]
 
 # Player box colours on the VIDEO, matching playerTracking._draw_players
 # (P1 green, P2 red). The minimap dots use player_analysis._COLORS (P1 red,
@@ -90,6 +106,8 @@ def derive_default_paths(video: str, output: str) -> dict:
         "players": os.path.join(output, "player_coordinates", f"players_{stem}.csv"),
         "ball":    os.path.join(output, "ball_coordinates", f"ball_{stem}.csv"),
         "court":   os.path.join(output, "court_coordinates", f"{stem}_court.csv"),
+        # Shot analysis is per-output (not per-stem) — a single shots.csv.
+        "shots":   os.path.join(output, "shot_analysis", "shots.csv"),
     }
 
 
@@ -103,11 +121,92 @@ def load_ball_boxes(ball_csv: str) -> dict:
             for r in df.itertuples()}
 
 
+def load_shot_markers(shots_csv: str, minimap: "Minimap",
+                      bounds: tuple) -> list:
+    """Pre-resolve shots.csv into render-ready markers, sorted by frame.
+
+    Returns ``[(frame, pid, category, (px, py)), ...]`` where (px, py) are panel
+    pixels (via ``minimap._to_px`` — the SAME transform the live dots use, so
+    markers and dots share one coordinate system). The shot is placed at the
+    PLAYER's feet position (``player_x_m``/``player_y_m``), matching
+    shot_hitmap.png. Done once so the playback loop only filters by frame.
+
+    Edge cases handled here: NaN player position -> skip; position outside the
+    walkable bounds -> skip; several shots on one frame -> all kept.
+    """
+    import pandas as pd
+    x_lo, x_hi, y_lo, y_hi = bounds
+    df = pd.read_csv(shots_csv)
+    out = []
+    for r in df.itertuples():
+        xm = getattr(r, "player_x_m", float("nan"))
+        ym = getattr(r, "player_y_m", float("nan"))
+        if (xm is None or ym is None
+                or (isinstance(xm, float) and np.isnan(xm))
+                or (isinstance(ym, float) and np.isnan(ym))):
+            continue
+        xm, ym = float(xm), float(ym)
+        if not (x_lo <= xm <= x_hi and y_lo <= ym <= y_hi):
+            continue
+        cat = shot_category(getattr(r, "stroke", None),
+                            getattr(r, "shot_type", None),
+                            getattr(r, "overhead", ""))
+        pid = int(getattr(r, "player_id", 0))
+        out.append((int(r.frame), pid, cat, minimap._to_px(xm, ym)))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
 # ── minimap ─────────────────────────────────────────────────────────────────────
 
 # Dot colours (BGR) — match the on-video player box colours (_BOX_COLORS:
 # P1 green, P2 red) so the minimap reads coherently with the boxes.
 _DOT_BGR = {1: (0, 255, 0), 2: (0, 0, 255)}
+
+
+# ── shot markers (live, accumulating; colours match shot_hitmap.png) ─────────────
+
+def _hex_to_bgr(hexstr: str) -> tuple[int, int, int]:
+    """'#rrggbb' -> (B, G, R) for OpenCV. Grey fallback on a malformed value."""
+    s = str(hexstr).lstrip("#")
+    if len(s) != 6:
+        return (127, 127, 127)
+    r, g, b = int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+    return (b, g, r)
+
+
+# Category -> BGR, converted ONCE from the shared hex palette so the live shot
+# markers match shot_hitmap.png exactly (single source of colour truth).
+_CAT_BGR = {cat: _hex_to_bgr(hx) for cat, hx in SHOT_CATEGORY_COLORS.items()}
+_CAT_FALLBACK_BGR = (127, 127, 127)   # grey, mirrors shot_analysis' category fallback
+
+# Shot marker geometry. The player dot is a 6 px FILLED circle; the shot marker is
+# only ~1 px larger and HOLLOW, so it frames the spot without dwarfing the dot.
+_SHOT_MARKER_R = 7    # hollow shot-marker "radius" (px)
+_SHOT_MARKER_TH = 2   # hollow stroke thickness (px)
+# sqrt(3)/2 — half-base offset of an equilateral up-triangle of circumradius r.
+_TRI_H = 0.866
+
+
+def _draw_shot_marker(img, center, pid, color_bgr,
+                      r: int = _SHOT_MARKER_R, th: int = _SHOT_MARKER_TH) -> None:
+    """Hollow, category-coloured marker; the SHAPE encodes the player
+    (P1 = circle, P2 = up-triangle — same convention as shot_hitmap.png).
+
+    A near-black ring 1 px wider is stroked first so the marker stays legible on
+    the green court and over the white court lines.
+    """
+    px, py = int(round(center[0])), int(round(center[1]))
+    outline = (20, 20, 20)
+    if pid == 2:
+        pts = np.array([[px,             py - r],
+                        [px - _TRI_H * r, py + 0.5 * r],
+                        [px + _TRI_H * r, py + 0.5 * r]], dtype=np.int32)
+        cv2.polylines(img, [pts], True, outline, th + 1, cv2.LINE_AA)
+        cv2.polylines(img, [pts], True, color_bgr, th, cv2.LINE_AA)
+    else:   # P1 and any unknown player id -> hollow circle
+        cv2.circle(img, (px, py), r + 1, outline, th, cv2.LINE_AA)
+        cv2.circle(img, (px, py), r, color_bgr, th, cv2.LINE_AA)
 
 
 class Minimap:
@@ -163,17 +262,70 @@ class Minimap:
         self._line_m(img, (pa.CL_X, pa.SVC_T), (pa.CL_X, pa.SVC_B), white)
         # net (yellow, thicker)
         self._line_m(img, (0, pa.NET), (pa.W_m, pa.NET), (60, 200, 240), 2)
-        # legend
-        cv2.putText(img, "P1", (8, 16), FONT, 0.45, _DOT_BGR[1], 1, cv2.LINE_AA)
-        cv2.putText(img, "P2", (40, 16), FONT, 0.45, _DOT_BGR[2], 1, cv2.LINE_AA)
+        # (The shot-type + player legend is stamped per-frame in render(), inside
+        #  the free green strip left of the court, so it can grow as shots occur.)
         return img
 
-    def render(self, positions: dict) -> np.ndarray:
-        """BGR minimap with a dot per player. ``positions`` = {pid: (xm, ym)}."""
+    def _draw_legend(self, img, present_cats) -> None:
+        """Stamp the shot legend INSIDE the minimap, in the free green run-off
+        strip left of the court. One row per shot category that has occurred so
+        far (hollow colour symbol + label in that colour), in the stable
+        _LEG_ORDER, then a P1=circle / P2=triangle shape key. Drawn over a faint
+        dark backdrop so the coloured text reads against the green court.
+        """
+        rows = [c for c in _LEG_ORDER if c in present_cats]
+        n = len(rows) + 2 + 1   # categories + 2 shape-key rows + 1 header row
+        # Backdrop sized to the column; clipped to the panel just in case.
+        x0, y0 = _LEG_X - 3, _LEG_TOP - 12
+        x1 = x0 + 96
+        y1 = y0 + n * _LEG_ROW_H + 4
+        x1, y1 = min(x1, self.w - 1), min(y1, self.h - 1)
+        ov = img[y0:y1, x0:x1].copy()
+        img[y0:y1, x0:x1] = cv2.addWeighted(
+            ov, 0.45, np.zeros_like(ov), 0.0, 0.0)   # darken 55%
+
+        sym_r = 5   # legend symbol radius (compact, < the 7 px live markers)
+        y = _LEG_TOP
+        cv2.putText(img, "Shots", (_LEG_X, y), FONT, _LEG_FS,
+                    (235, 235, 235), 1, cv2.LINE_AA)
+        y += _LEG_ROW_H
+        for cat in rows:
+            color = _CAT_BGR.get(cat, _CAT_FALLBACK_BGR)
+            cv2.circle(img, (_LEG_X + sym_r, y - 4), sym_r, color, 2, cv2.LINE_AA)
+            cv2.putText(img, cat, (_LEG_X + 2 * sym_r + _LEG_GAP, y),
+                        FONT, _LEG_FS, color, 1, cv2.LINE_AA)
+            y += _LEG_ROW_H
+        # player shape key (neutral white so only the shape reads)
+        for pid, lbl in ((1, "P1"), (2, "P2")):
+            _draw_shot_marker(img, (_LEG_X + sym_r, y - 4), pid,
+                              (235, 235, 235), r=sym_r, th=1)
+            cv2.putText(img, lbl, (_LEG_X + 2 * sym_r + _LEG_GAP, y),
+                        FONT, _LEG_FS, (235, 235, 235), 1, cv2.LINE_AA)
+            y += _LEG_ROW_H
+
+    def render(self, positions: dict, shot_markers=None,
+               present_cats=None) -> np.ndarray:
+        """BGR minimap. ``positions`` = {pid: (xm, ym)} for the live player dots;
+        ``shot_markers`` = [(pid, category, (px, py)), ...] already crossed during
+        playback (accumulated); ``present_cats`` = set of categories seen so far,
+        which drives the in-minimap legend (drawn in the free strip left of court).
+
+        Shot markers are stamped FIRST (a static "history" layer) and the live
+        player dots LAST (the moving "present" layer), so a dot is never hidden by
+        an accumulated marker; the markers are hollow, so an overlapping dot still
+        shows the coloured ring around it. The legend is stamped last so it stays
+        readable over everything.
+        """
         img = self._base.copy()
+        if shot_markers:
+            for pid, cat, center in shot_markers:
+                _draw_shot_marker(img, center, pid,
+                                  _CAT_BGR.get(cat, _CAT_FALLBACK_BGR))
         for pid, (xm, ym) in positions.items():
             cv2.circle(img, self._to_px(xm, ym), 6,
                        _DOT_BGR.get(pid, (255, 255, 255)), -1, cv2.LINE_AA)
+        if present_cats:
+            self._draw_legend(img, present_cats)
         return img
 
 
@@ -193,11 +345,17 @@ def render_stats_panel(frame_idx: int, size: tuple[int, int]) -> np.ndarray:
     return panel
 
 
+
+
 # ── compositing ─────────────────────────────────────────────────────────────────
 
 def compose(frame: np.ndarray, minimap: np.ndarray, stats: np.ndarray,
             disp_h: int, panel_w: int, mini_h: int) -> np.ndarray:
-    """Assemble [ video | (minimap / stats) ] into one canvas of height disp_h."""
+    """Assemble [ video | (minimap / stats) ] into one canvas of height disp_h.
+
+    The shot legend now lives INSIDE the minimap (see Minimap._draw_legend), so
+    there is no separate strip and the canvas height equals disp_h exactly.
+    """
     h0, w0 = frame.shape[:2]
     vw = int(round(w0 * (disp_h / h0)))
     video = cv2.resize(frame, (vw, disp_h))
@@ -213,7 +371,7 @@ def compose(frame: np.ndarray, minimap: np.ndarray, stats: np.ndarray,
 # ── playback ────────────────────────────────────────────────────────────────────
 
 def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
-        disp_h, fps_override) -> None:
+        disp_h, fps_override, shots_csv=None, max_shot_markers=0) -> None:
     # --- load per-frame overlays (indexed by absolute frame number) ---
     boxes = load_player_boxes(players_csv)
     print(f"  Player boxes: {len(boxes)} frames from {players_csv}")
@@ -236,6 +394,26 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     y_lo, y_hi = -player_analysis._BEHIND - 1, player_analysis.L_m + player_analysis._BEHIND + 1
     mini_h = int(round(disp_h * MINI_FRAC))
     minimap = Minimap((PANEL_W, mini_h))
+
+    # --- shots: pre-resolve to render-ready markers (optional overlay) ---
+    shot_markers = []
+    if shots_csv and os.path.exists(shots_csv):
+        try:
+            shot_markers = load_shot_markers(
+                shots_csv, minimap, (x_lo, x_hi, y_lo, y_hi))
+            print(f"  Shot markers: {len(shot_markers)} shots from {shots_csv}")
+        except Exception as e:   # malformed/empty CSV must never break playback
+            print(f"  Shot markers: failed to load ({e}); continuing without them.")
+            shot_markers = []
+    else:
+        print(f"  Shot markers: none (no shots CSV at {shots_csv}); shot overlay "
+              "disabled.\n               Run 'python utils/shot_analysis.py' to "
+              "enable it.")
+
+    # FIXED legend: the full set of categories present in shots.csv, computed once
+    # so the key is shown in full from the first frame (it does NOT build up as
+    # shots occur). Empty when there are no shots -> no legend drawn.
+    legend_cats = {cat for _f, _pid, cat, _c in shot_markers} or None
 
     def minimap_positions(frame_idx: int) -> dict:
         """{pid: (xm, ym)} for the players present (and in range) at frame_idx."""
@@ -261,6 +439,11 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     win = "Tennis Live View  (q to quit)"
     print(f"  Playing at {fps:.0f} fps — press 'q' in the window to quit.")
     idx = 0
+    # Shot accumulation: shot_markers is sorted by frame, so a single advancing
+    # pointer reveals each marker once its frame is reached and keeps it shown
+    # for the rest of the clip (O(total shots) overall, not per frame).
+    active_markers = []     # [(pid, cat, center), ...] — frames already crossed
+    next_shot = 0
     try:
         while True:
             t0 = time.perf_counter()
@@ -284,7 +467,17 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
                 cv2.putText(frame, "Ball", (x, max(12, y - 8)),
                             FONT, 0.5, (0, 255, 255), 2)
 
-            mini = minimap.render(minimap_positions(idx))
+            # Reveal every shot whose frame has been reached; it then persists.
+            while next_shot < len(shot_markers) and shot_markers[next_shot][0] <= idx:
+                _f, _pid, _cat, _center = shot_markers[next_shot]
+                active_markers.append((_pid, _cat, _center))
+                next_shot += 1
+            # Optional clutter cap: keep only the most recent N markers (0 = all).
+            shown = (active_markers[-max_shot_markers:]
+                     if max_shot_markers else active_markers)
+
+            # Legend is FIXED (full key from the first frame), not built up live.
+            mini = minimap.render(minimap_positions(idx), shown, legend_cats)
             stats = render_stats_panel(idx, (PANEL_W, disp_h - mini_h))
             cv2.imshow(win, compose(frame, mini, stats, disp_h, PANEL_W, mini_h))
 
@@ -318,6 +511,14 @@ def main() -> None:
     parser.add_argument("--court", default=None,
                         help="court keypoints CSV "
                              "(default: outputs/court_coordinates/<stem>_court.csv)")
+    parser.add_argument("--shots", default=None,
+                        help="shot analysis CSV (default: "
+                             "outputs/shot_analysis/shots.csv; optional — when "
+                             "present, shots accumulate on the minimap)")
+    parser.add_argument("--max-shot-markers", type=int, default=0,
+                        dest="max_shot_markers",
+                        help="cap simultaneously shown shot markers "
+                             "(0 = unlimited, the default accumulate behaviour)")
     parser.add_argument("--min-area", type=int, default=500, dest="min_area",
                         help="drop player detections below this area for the "
                              "minimap (default: 500)")
@@ -335,6 +536,7 @@ def main() -> None:
     players_csv = _resolve(args.players or defaults["players"])
     court_csv   = _resolve(args.court   or defaults["court"])
     ball_csv    = _resolve(args.ball    or defaults["ball"])
+    shots_csv   = _resolve(args.shots   or defaults["shots"])
 
     # Players + court are required; the ball CSV is optional (see run()).
     if not os.path.exists(args.video):
@@ -355,7 +557,8 @@ def main() -> None:
     print(f"  players: {players_csv}")
     print(f"  court  : {court_csv}")
     run(args.video, players_csv, court_csv, ball_csv,
-        args.min_area, args.anchor, args.height, args.fps)
+        args.min_area, args.anchor, args.height, args.fps,
+        shots_csv, args.max_shot_markers)
 
 
 if __name__ == "__main__":
