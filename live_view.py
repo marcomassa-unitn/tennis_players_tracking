@@ -53,9 +53,47 @@ from utils.shot_analysis import (
 )
 
 # ── layout constants ────────────────────────────────────────────────────────────
+# RENDER vs WINDOW size are DECOUPLED. The whole canvas is composed at RENDER_WIDTH
+# (a fixed, generous resolution) so all text — on-video labels AND the panel — is
+# rasterised large and stays sharp. Only at the very end is the finished canvas
+# area-downscaled ONCE to WINDOW_WIDTH for display. Making the window smaller then
+# never costs text quality (it shrinks crisp pixels with INTER_AREA); it used to,
+# because the old single --max-width drove both the render resolution and the
+# window, so a smaller window literally rendered fewer pixels of text.
+RENDER_WIDTH = 1600      # px width the canvas is COMPOSED at (quality; not the window)
+WINDOW_WIDTH = 960       # px width the window is SHOWN at (display size; <= RENDER_WIDTH)
 PANEL_W   = 380          # width (px) of the right column (minimap + stats)
-MINI_FRAC = 0.62         # fraction of the right column height given to the minimap
+MINI_FRAC = 0.50         # fraction of the right column height given to the minimap
+                         # (stats panel gets the other half; it needs the room for
+                         #  8 category rows + totals + footer without crowding)
 FONT      = cv2.FONT_HERSHEY_SIMPLEX
+# Heavier (double-stroke) font for the on-VIDEO player labels: they sit over a busy
+# court at a small on-screen size, where SIMPLEX reads thin. The panel/minimap keep
+# SIMPLEX (denser text on a controlled dark background).
+FONT_VIDEO = cv2.FONT_HERSHEY_DUPLEX
+
+# Supersample factor for the side panels (stats + minimap). They are rendered at
+# SS× their final size and downscaled with INTER_AREA in compose(), so the thin
+# Hershey strokes come out smoothly anti-aliased instead of spindly. 4× the pixel
+# work on a ~380-px column is sub-millisecond, so it never affects playback.
+SS = 2
+
+# On-video label style (drawn at DISPLAY resolution, after the frame is resized,
+# so strokes are crisp). Each label gets a dark semi-transparent plate behind it
+# so the coloured text stays legible over the court.
+_LBL_SCALE_PLAYER = 0.6   # font scale for the "P1"/"P2" tags
+_LBL_TH           = 2     # stroke thickness (true 2 px at display resolution)
+_LBL_PAD          = 4     # padding (px) inside the plate around the glyphs
+_LBL_BG           = (0, 0, 0)   # plate colour (BGR)
+_LBL_BG_ALPHA     = 0.55  # plate opacity (0=invisible, 1=solid)
+
+# Panel text tints (brighter than the pure on-video box colours, which have low
+# luminance on the dark warm panel background). Used for panel/legend TEXT only;
+# the on-video boxes keep the pure _BOX_COLORS.
+_TINT = {1: (90, 255, 90), 2: (90, 90, 255)}   # P1 light-green, P2 light-red (BGR)
+_PANEL_BG   = (40, 30, 25)     # stats panel background (BGR)
+_RULE_BGR   = (70, 60, 55)     # subtle separator-line colour (BGR)
+_PANEL_FG   = (230, 230, 230)  # default near-white panel text
 
 # Shot-type legend drawn INSIDE the minimap, in the free green run-off strip to
 # the LEFT of the court (the court's left sideline is ~x=142 px in a 380 px panel,
@@ -223,6 +261,10 @@ class Minimap:
 
     def __init__(self, size: tuple[int, int]):
         self.w, self.h = size
+        # Supersample scale: the minimap is built at SS× its on-screen width, so
+        # marker/dot radii (and the legend) scale by this to keep their on-screen
+        # size constant after the INTER_AREA downscale in compose().
+        self._s = self.w / PANEL_W
         pa = player_analysis
         # Walkable-area bounds in metres (court + run-off behind/beside).
         self._x0, self._x1 = -pa._SIDE, pa.W_m + pa._SIDE
@@ -269,39 +311,51 @@ class Minimap:
     def _draw_legend(self, img, present_cats) -> None:
         """Stamp the shot legend INSIDE the minimap, in the free green run-off
         strip left of the court. One row per shot category that has occurred so
-        far (hollow colour symbol + label in that colour), in the stable
-        _LEG_ORDER, then a P1=circle / P2=triangle shape key. Drawn over a faint
-        dark backdrop so the coloured text reads against the green court.
+        far (hollow colour swatch + near-WHITE label, so dark/grey hues stay
+        legible), in the stable _LEG_ORDER, then a P1=circle / P2=triangle shape
+        key. Drawn over a dark backdrop so the text reads against the green court.
+
+        The minimap is rendered at SS× its on-screen size, so all geometry/fonts
+        scale by ``s`` (derived from the panel width) and the glyphs come out
+        smooth after the INTER_AREA downscale in compose().
         """
+        s = self.w / PANEL_W
+        def S(v): return int(round(v * s))
+        leg_fs = _LEG_FS * 1.2 * s        # a touch larger than before, then *SS
+        row_h = S(_LEG_ROW_H + 3)
+        leg_x, leg_top, leg_gap = S(_LEG_X), S(_LEG_TOP), S(_LEG_GAP)
+        th = max(2, S(1.5))               # heavier strokes (thickness-1 looked thin)
+
         rows = [c for c in _LEG_ORDER if c in present_cats]
         n = len(rows) + 2 + 1   # categories + 2 shape-key rows + 1 header row
         # Backdrop sized to the column; clipped to the panel just in case.
-        x0, y0 = _LEG_X - 3, _LEG_TOP - 12
-        x1 = x0 + 96
-        y1 = y0 + n * _LEG_ROW_H + 4
+        x0, y0 = leg_x - S(3), leg_top - S(12)
+        x1 = x0 + S(112)
+        y1 = y0 + n * row_h + S(4)
         x1, y1 = min(x1, self.w - 1), min(y1, self.h - 1)
         ov = img[y0:y1, x0:x1].copy()
         img[y0:y1, x0:x1] = cv2.addWeighted(
-            ov, 0.45, np.zeros_like(ov), 0.0, 0.0)   # darken 55%
+            ov, 0.35, np.zeros_like(ov), 0.0, 0.0)   # darken 65% for contrast
 
-        sym_r = 5   # legend symbol radius (compact, < the 7 px live markers)
-        y = _LEG_TOP
-        cv2.putText(img, "Shots", (_LEG_X, y), FONT, _LEG_FS,
-                    (235, 235, 235), 1, cv2.LINE_AA)
-        y += _LEG_ROW_H
+        sym_r = S(6)   # legend swatch radius
+        lbl_x = leg_x + 2 * sym_r + leg_gap
+        y = leg_top
+        cv2.putText(img, "Shots", (leg_x, y), FONT, leg_fs,
+                    _PANEL_FG, th, cv2.LINE_AA)
+        y += row_h
         for cat in rows:
             color = _CAT_BGR.get(cat, _CAT_FALLBACK_BGR)
-            cv2.circle(img, (_LEG_X + sym_r, y - 4), sym_r, color, 2, cv2.LINE_AA)
-            cv2.putText(img, cat, (_LEG_X + 2 * sym_r + _LEG_GAP, y),
-                        FONT, _LEG_FS, color, 1, cv2.LINE_AA)
-            y += _LEG_ROW_H
+            cv2.circle(img, (leg_x + sym_r, y - S(4)), sym_r, color, th, cv2.LINE_AA)
+            cv2.putText(img, cat, (lbl_x, y), FONT, leg_fs, _PANEL_FG, th,
+                        cv2.LINE_AA)
+            y += row_h
         # player shape key (neutral white so only the shape reads)
         for pid, lbl in ((1, "P1"), (2, "P2")):
-            _draw_shot_marker(img, (_LEG_X + sym_r, y - 4), pid,
-                              (235, 235, 235), r=sym_r, th=1)
-            cv2.putText(img, lbl, (_LEG_X + 2 * sym_r + _LEG_GAP, y),
-                        FONT, _LEG_FS, (235, 235, 235), 1, cv2.LINE_AA)
-            y += _LEG_ROW_H
+            _draw_shot_marker(img, (leg_x + sym_r, y - S(4)), pid,
+                              _PANEL_FG, r=sym_r, th=max(1, S(1)))
+            cv2.putText(img, lbl, (lbl_x, y), FONT, leg_fs, _PANEL_FG, th,
+                        cv2.LINE_AA)
+            y += row_h
 
     def render(self, positions: dict, shot_markers=None,
                present_cats=None) -> np.ndarray:
@@ -317,12 +371,18 @@ class Minimap:
         readable over everything.
         """
         img = self._base.copy()
+        # Scale marker/dot geometry to the SS× canvas so they keep their on-screen
+        # size after the downscale in compose().
+        s = self._s
+        mk_r, mk_th = int(round(_SHOT_MARKER_R * s)), max(1, int(round(_SHOT_MARKER_TH * s)))
+        dot_r = int(round(6 * s))
         if shot_markers:
             for pid, cat, center in shot_markers:
                 _draw_shot_marker(img, center, pid,
-                                  _CAT_BGR.get(cat, _CAT_FALLBACK_BGR))
+                                  _CAT_BGR.get(cat, _CAT_FALLBACK_BGR),
+                                  r=mk_r, th=mk_th)
         for pid, (xm, ym) in positions.items():
-            cv2.circle(img, self._to_px(xm, ym), 6,
+            cv2.circle(img, self._to_px(xm, ym), dot_r,
                        _DOT_BGR.get(pid, (255, 255, 255)), -1, cv2.LINE_AA)
         if present_cats:
             self._draw_legend(img, present_cats)
@@ -344,53 +404,83 @@ def render_stats_panel(size: tuple[int, int], counts: dict,
     freezes on the last frame).
     """
     w, h = size
-    panel = np.full((h, w, 3), (40, 30, 25), np.uint8)
+    # The panel is rendered at SS× its on-screen size (then area-downscaled in
+    # compose), so derive a scale from the incoming width and express all sizes in
+    # NATIVE units * s. This keeps the layout readable in native terms and makes
+    # the panel resolution-agnostic. Category labels are drawn in near-white with
+    # the colour carried ONLY in the swatch, so every row clears a contrast floor
+    # regardless of hue; body strokes are thickness 2 (spindly thickness-1 was a
+    # big part of the "low quality" look).
+    panel = np.full((h, w, 3), _PANEL_BG, np.uint8)
+    s = w / PANEL_W                                   # native -> render scale
+    def S(v): return int(round(v * s))                # scale a length
+    def fs(v): return v * s                           # scale a font size
+    th_body = max(1, S(1))                            # thickness ~2 at SS=2
+    th_bold = max(2, S(1.5))
 
+    # Title band + a separator rule beneath it.
     title = "FINAL STATS" if ended else "SHOT STATS"
-    cv2.putText(panel, title, (12, 26), FONT, 0.62, (235, 235, 235), 2,
-                cv2.LINE_AA)
+    cv2.putText(panel, title, (S(16), S(28)), FONT, fs(0.7), _PANEL_FG,
+                th_bold, cv2.LINE_AA)
+    cv2.line(panel, (S(12), S(40)), (w - S(12), S(40)), _RULE_BGR, max(1, S(1)),
+             cv2.LINE_AA)
 
-    # Two equal columns; header in each player's box colour.
-    col_x = {1: 14, 2: w // 2 + 6}
-    head_y = 50
+    # Two equal columns, headed by each player in their (brightened) tint, with a
+    # vertical rule between them.
+    col_x = {1: S(16), 2: w // 2 + S(10)}
+    head_y = S(62)
     for pid in (1, 2):
-        cv2.putText(panel, f"P{pid}", (col_x[pid], head_y), FONT, 0.6,
-                    _BOX_COLORS.get(pid, (235, 235, 235)), 2, cv2.LINE_AA)
+        cv2.putText(panel, f"P{pid}", (col_x[pid], head_y), FONT, fs(0.66),
+                    _TINT.get(pid, _PANEL_FG), th_bold, cv2.LINE_AA)
 
-    # One counter row per category + a total row. The row pitch ADAPTS to the
-    # panel height (which shrinks when the canvas is sized to the screen width),
-    # so the rows + total always fit between the header and the two footer lines
-    # without overlapping. Clamped to a readable range.
-    foot_h = 40                       # space reserved at the bottom for the footer
-    top = head_y + 22                 # first counter row baseline
-    n_rows = len(cats) + 1            # categories + the "total" row
-    avail = max(1, (h - foot_h) - top)
-    row_h = int(np.clip(avail / n_rows, 14, 22))
-    fs = 0.42 if row_h >= 17 else 0.38   # shrink the font a touch on a short panel
+    # One counter row per category + a total row. The pitch is FIT-DRIVEN: it
+    # divides the space between the header and the footer band by the row count so
+    # the rows + total ALWAYS sit above the footer (no overlap), clamped to a
+    # readable max. The row font tracks the pitch (so a short panel shrinks text a
+    # touch rather than colliding) with a legible floor.
+    top = S(86)                                  # first counter baseline
+    foot = S(48)                                 # footer band reserved at bottom
+    n_rows = len(cats) + 1                        # categories + the "total" row
+    # Distribute the available height across all rows INCLUDING the total, so the
+    # total baseline always lands above the footer rule.
+    avail = (h - foot) - top
+    pitch = int(np.clip(avail / max(1, n_rows), S(13), S(24)))
+    row_fs = float(np.clip(pitch / s / 24.0 * 0.5, 0.40, 0.52))  # native font, tracks pitch
+    cv2.line(panel, (w // 2, S(70)), (w // 2, h - foot), _RULE_BGR,
+             max(1, S(1)), cv2.LINE_AA)
 
     y = top
     for cat in cats:
         color = _CAT_BGR.get(cat, _CAT_FALLBACK_BGR)
         for pid in (1, 2):
             n = counts.get(pid, {}).get(cat, 0)
-            cv2.circle(panel, (col_x[pid] + 5, y - 4), 5, color, 2, cv2.LINE_AA)
-            cv2.putText(panel, f"{cat}: {n}", (col_x[pid] + 16, y), FONT, fs,
-                        color, 1, cv2.LINE_AA)
-        y += row_h
+            cv2.circle(panel, (col_x[pid] + S(6), y - S(5)), max(2, S(5)), color,
+                       th_body, cv2.LINE_AA)
+            cv2.putText(panel, f"{cat}: {n}", (col_x[pid] + S(18), y), FONT,
+                        fs(row_fs), _PANEL_FG, th_body, cv2.LINE_AA)
+        y += pitch
 
-    # per-player total (its own row, same adaptive pitch)
+    # per-player total flows directly after the last category (the pitch reserved a
+    # slot for it via n_rows), then a thin rule separates it from the footer band.
+    cv2.line(panel, (S(12), y - pitch + S(4)), (w - S(12), y - pitch + S(4)),
+             _RULE_BGR, max(1, S(1)), cv2.LINE_AA)
     for pid in (1, 2):
         total = sum(counts.get(pid, {}).values())
-        cv2.putText(panel, f"total: {total}", (col_x[pid], y), FONT, fs + 0.02,
-                    _BOX_COLORS.get(pid, (235, 235, 235)), 1, cv2.LINE_AA)
+        cv2.putText(panel, f"total: {total}", (col_x[pid], y), FONT,
+                    fs(row_fs + 0.02), _TINT.get(pid, _PANEL_FG), th_bold,
+                    cv2.LINE_AA)
 
     # footer: rally length = total shots played by BOTH players
+    cv2.line(panel, (S(12), h - foot + S(4)), (w - S(12), h - foot + S(4)),
+             _RULE_BGR, max(1, S(1)), cv2.LINE_AA)
     rally_total = sum(sum(counts.get(pid, {}).values()) for pid in (1, 2))
     cv2.putText(panel, f"Rally length: {rally_total} shots",
-                (14, h - 22), FONT, 0.48, (200, 220, 255), 1, cv2.LINE_AA)
+                (S(16), h - S(22)), FONT, fs(0.52), (200, 220, 255), th_body,
+                cv2.LINE_AA)
     if ended:
         cv2.putText(panel, "clip ended - press q to quit",
-                    (14, h - 6), FONT, 0.4, (160, 200, 160), 1, cv2.LINE_AA)
+                    (S(16), h - S(6)), FONT, fs(0.46), (160, 200, 160),
+                    th_body, cv2.LINE_AA)
     return panel
 
 
@@ -398,38 +488,100 @@ def render_stats_panel(size: tuple[int, int], counts: dict,
 
 # ── compositing ─────────────────────────────────────────────────────────────────
 
+def draw_label(img: np.ndarray, text: str, anchor: tuple[int, int],
+               color: tuple, scale: float = _LBL_SCALE_PLAYER,
+               thickness: int = _LBL_TH, pad: int = _LBL_PAD,
+               above: bool = True) -> None:
+    """Draw ``text`` with a dark semi-transparent plate behind it for contrast.
+
+    Crisp because it is called on the ALREADY-RESIZED display-resolution image,
+    so the glyphs are rasterised once at the final pixel size (no later
+    downscale to soften them). ``anchor`` is a point on the bbox edge: with
+    ``above=True`` the plate sits just above it (so it frames a box top-left).
+    The plate is clamped to the image so a label near an edge never indexes out
+    of range. Drawn in place.
+    """
+    (tw, th), base = cv2.getTextSize(text, FONT_VIDEO, scale, thickness)
+    pw, ph = tw + 2 * pad, th + base + 2 * pad
+    ax, ay = anchor
+    x0 = int(np.clip(ax, 0, max(0, img.shape[1] - pw)))
+    if above:
+        y0 = int(np.clip(ay - ph - 2, 0, max(0, img.shape[0] - ph)))
+    else:
+        y0 = int(np.clip(ay, 0, max(0, img.shape[0] - ph)))
+    x1, y1 = x0 + pw, y0 + ph
+    roi = img[y0:y1, x0:x1]
+    if roi.size:   # blend a dark plate (same addWeighted idiom as the legend)
+        plate = np.full_like(roi, _LBL_BG)
+        img[y0:y1, x0:x1] = cv2.addWeighted(
+            roi, 1.0 - _LBL_BG_ALPHA, plate, _LBL_BG_ALPHA, 0.0)
+    cv2.putText(img, text, (x0 + pad, y1 - pad - base), FONT_VIDEO, scale,
+                color, thickness, cv2.LINE_AA)
+
+
 def compose(frame: np.ndarray, minimap: np.ndarray, stats: np.ndarray,
-            disp_h: int, panel_w: int, mini_h: int) -> np.ndarray:
+            disp_h: int, panel_w: int, mini_h: int,
+            player_overlays=(), ball_overlay=None) -> np.ndarray:
     """Assemble [ video | (minimap / stats) ] into one canvas of height disp_h.
 
-    The shot legend now lives INSIDE the minimap (see Minimap._draw_legend), so
-    there is no separate strip and the canvas height equals disp_h exactly.
+    The player/ball overlays are drawn HERE, on the resized display-resolution
+    video — NOT on the source frame — so the player-label text strokes are crisp
+    at the final size instead of being softened by the source→display downscale.
+    ``player_overlays`` = [(pid, x, y, w, h, color), ...] (box + "P#" label) and
+    ``ball_overlay`` = (x, y, w, h) (box only, no label) in SOURCE-pixel coords;
+    they are scaled by the same factor the frame is resized with.
+
+    The shot legend lives INSIDE the minimap (see Minimap._draw_legend), so there
+    is no separate strip and the canvas height equals disp_h exactly. The minimap
+    and stats panels arrive at SS× their final size and are area-downscaled here
+    (smooth anti-aliasing for their thin text).
     """
     h0, w0 = frame.shape[:2]
     vw = int(round(w0 * (disp_h / h0)))
-    video = cv2.resize(frame, (vw, disp_h))
+    # INTER_AREA is the correct, alias-free filter for this downscale (the frame
+    # shrinks ~0.5×); INTER_LINEAR softened the court and box edges.
+    video = cv2.resize(frame, (vw, disp_h), interpolation=cv2.INTER_AREA)
+
+    # Overlays at DISPLAY resolution: scale source-pixel coords to the resized
+    # video, then draw crisp boxes + plated labels.
+    sx, sy = vw / w0, disp_h / h0
+    for pid, x, y, w, h, color in player_overlays:
+        X, Y, W, H = (int(round(x * sx)), int(round(y * sy)),
+                      int(round(w * sx)), int(round(h * sy)))
+        cv2.rectangle(video, (X, Y), (X + W, Y + H), color, 2, cv2.LINE_AA)
+        draw_label(video, f"P{pid}", (X, Y), color, _LBL_SCALE_PLAYER)
+    if ball_overlay is not None:
+        x, y, w, h = ball_overlay
+        X, Y, W, H = (int(round(x * sx)), int(round(y * sy)),
+                      int(round(w * sx)), int(round(h * sy)))
+        cv2.rectangle(video, (X, Y), (X + W, Y + H), (0, 255, 255), 2, cv2.LINE_AA)
 
     canvas = np.zeros((disp_h, vw + panel_w, 3), np.uint8)
     canvas[:, :vw] = video
-    # Resize panels to their exact sub-regions so assembly never shape-mismatches.
-    canvas[0:mini_h, vw:vw + panel_w]      = cv2.resize(minimap, (panel_w, mini_h))
-    canvas[mini_h:disp_h, vw:vw + panel_w] = cv2.resize(stats, (panel_w, disp_h - mini_h))
+    # Area-downscale the SS× panels to their exact sub-regions (also guarantees
+    # assembly never shape-mismatches).
+    canvas[0:mini_h, vw:vw + panel_w]      = cv2.resize(
+        minimap, (panel_w, mini_h), interpolation=cv2.INTER_AREA)
+    canvas[mini_h:disp_h, vw:vw + panel_w] = cv2.resize(
+        stats, (panel_w, disp_h - mini_h), interpolation=cv2.INTER_AREA)
     return canvas
 
 
-def _fit_to_screen(canvas: np.ndarray, max_width: int) -> np.ndarray:
-    """Safety clamp: scale the WHOLE canvas down (preserving aspect) only if it
-    still exceeds ``max_width``.
+def _fit_to_screen(canvas: np.ndarray, window_width: int) -> np.ndarray:
+    """Downscale the WHOLE finished canvas (preserving aspect) to the on-screen
+    ``window_width``. This is the ONE place render resolution becomes window size.
 
-    The layout in run() already solves disp_h so video_width + PANEL_W == max_width,
-    so in the normal case this is a NO-OP and the stats text is shown at native
-    resolution (no blur from downscaling). It only triggers as a backstop for an
-    unusually wide source frame. ``max_width<=0`` disables it.
+    The canvas is composed at RENDER_WIDTH (high, for sharp text); this single
+    INTER_AREA step shrinks those already-crisp pixels to the smaller window, so a
+    smaller window costs no text quality. A no-op when the canvas is already <=
+    window_width (e.g. window_width >= render_width); ``window_width<=0`` disables
+    scaling entirely (show at full render resolution).
     """
-    if max_width and max_width > 0 and canvas.shape[1] > max_width:
-        scale = max_width / canvas.shape[1]
+    if window_width and window_width > 0 and canvas.shape[1] > window_width:
+        scale = window_width / canvas.shape[1]
         new_h = int(round(canvas.shape[0] * scale))
-        return cv2.resize(canvas, (max_width, new_h), interpolation=cv2.INTER_AREA)
+        return cv2.resize(canvas, (window_width, new_h),
+                          interpolation=cv2.INTER_AREA)
     return canvas
 
 
@@ -437,20 +589,20 @@ def _fit_to_screen(canvas: np.ndarray, max_width: int) -> np.ndarray:
 
 def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
         disp_h, fps_override, shots_csv=None, max_shot_markers=0,
-        max_width=1280) -> None:
-    # Solve the display height UP FRONT so the FINAL canvas width (video + the
-    # PANEL_W stats column) already equals the on-screen max_width. The panel and
-    # its small text are then drawn at native resolution and NEVER downscaled
-    # (post-render downscaling was what blurred the stats text). The video keeps
-    # its true aspect ratio:  vw + PANEL_W = max_width, vw = src_w*disp_h/src_h
-    # => disp_h = (max_width - PANEL_W) * src_h / src_w. Done before the minimap
-    # is built so all overlays are sized to the final height in one pass.
+        render_width=RENDER_WIDTH, window_width=WINDOW_WIDTH) -> None:
+    # Solve the RENDER height up front so the composed canvas width (video + the
+    # PANEL_W stats column) equals render_width — a fixed, generous resolution that
+    # keeps all text sharp. The window the user sees is a SEPARATE, smaller size:
+    # the finished canvas is area-downscaled to window_width ONCE at display time,
+    # so shrinking the window never re-rasterises (and thus never softens) the text.
+    # The video keeps its true aspect ratio: vw + PANEL_W = render_width,
+    # vw = src_w*disp_h/src_h  =>  disp_h = (render_width - PANEL_W) * src_h / src_w.
     probe = cv2.VideoCapture(video)
     src_w = probe.get(cv2.CAP_PROP_FRAME_WIDTH) or 1920.0
     src_h = probe.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1080.0
     probe.release()
-    if max_width and max_width > PANEL_W + 80 and src_w > 0:
-        disp_h = int(round((max_width - PANEL_W) * src_h / src_w))
+    if render_width and render_width > PANEL_W + 80 and src_w > 0:
+        disp_h = int(round((render_width - PANEL_W) * src_h / src_w))
 
     # --- load per-frame overlays (indexed by absolute frame number) ---
     boxes = load_player_boxes(players_csv)
@@ -473,7 +625,11 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     x_lo, x_hi = -player_analysis._SIDE - 1, player_analysis.W_m + player_analysis._SIDE + 1
     y_lo, y_hi = -player_analysis._BEHIND - 1, player_analysis.L_m + player_analysis._BEHIND + 1
     mini_h = int(round(disp_h * MINI_FRAC))
-    minimap = Minimap((PANEL_W, mini_h))
+    # The minimap is built at SS× its final size so its court lines + legend text
+    # come out smooth after the INTER_AREA downscale in compose(). _to_px (and the
+    # shot markers pre-resolved through it) inherit the SS× scale automatically, so
+    # everything stays self-consistent.
+    minimap = Minimap((PANEL_W * SS, mini_h * SS))
 
     # --- shots: pre-resolve to render-ready markers (optional overlay) ---
     shot_markers = []
@@ -519,9 +675,17 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     frame_period = 0.915 / fps   # real seconds-per-frame of the source video
 
     win = "Tennis Live View  (q to quit)"
-    # Resizable window so the user can still rescale if they want; at the default
-    # size nothing is clipped and the text is rendered at its native resolution.
+    # Resizable window opened at the chosen (small) window_width; the frames pushed
+    # to it are already downscaled to that width, so what's shown is 1:1 crisp.
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    if window_width and window_width > 0:
+        # Open the window at window_width, preserving the canvas aspect ratio
+        # (the canvas is vw + PANEL_W wide by disp_h tall).
+        canvas_w = int(round(src_w * disp_h / src_h)) + PANEL_W
+        cv2.resizeWindow(win, window_width,
+                         int(round(disp_h * window_width / canvas_w)))
+    print(f"  Render @ {render_width}px wide → window @ {window_width}px "
+          f"(text rendered high, shown small).")
     print(f"  Playing at {fps:.0f} fps — press 'q' in the window to quit.")
     idx = 0
     # Shot accumulation: shot_markers is sorted by frame, so a single advancing
@@ -540,21 +704,17 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             if not ret:
                 break
 
-            # Player boxes (absolute frame lookup; missing -> nothing drawn).
+            # Collect overlays in SOURCE-pixel coords; compose() draws them on the
+            # resized display-resolution video so the text comes out crisp.
+            player_overlays = []
             for pid, box in boxes.get(idx, {}).items():
                 x, y, w, h = (int(v) for v in box)
                 color = _BOX_COLORS.get(pid, (0, 255, 0))
-                cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-                cv2.putText(frame, f"P{pid}", (x, max(12, y - 8)),
-                            FONT, 0.7, color, 2)
+                player_overlays.append((pid, x, y, w, h, color))
 
-            # Ball box (yellow).
+            # Ball box (yellow), drawn without a label.
             ball = ball_boxes.get(idx)
-            if ball is not None:
-                x, y, w, h = ball
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
-                cv2.putText(frame, "Ball", (x, max(12, y - 8)),
-                            FONT, 0.5, (0, 255, 255), 2)
+            ball_overlay = ball[:4] if ball is not None else None
 
             # Reveal every shot whose frame has been reached; it then persists.
             # Each reveal bumps that player's per-category counter so the stats
@@ -570,11 +730,15 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
                      if max_shot_markers else active_markers)
 
             # Legend is FIXED (full key from the first frame), not built up live.
+            # Panels are rendered at SS× and area-downscaled in compose() for
+            # smoothly anti-aliased text.
             mini = minimap.render(minimap_positions(idx), shown, legend_cats)
-            stats = render_stats_panel((PANEL_W, disp_h - mini_h), counts,
-                                       stat_cats)
-            last_canvas = compose(frame, mini, stats, disp_h, PANEL_W, mini_h)
-            cv2.imshow(win, _fit_to_screen(last_canvas, max_width))
+            stats = render_stats_panel((PANEL_W * SS, (disp_h - mini_h) * SS),
+                                       counts, stat_cats)
+            last_canvas = compose(frame, mini, stats, disp_h, PANEL_W, mini_h,
+                                  player_overlays, ball_overlay)
+            # Downscale the high-res canvas to the (smaller) window size ONCE here.
+            cv2.imshow(win, _fit_to_screen(last_canvas, window_width))
 
             # Wait only the time LEFT in this frame's period after the per-frame
             # processing, so render overhead doesn't slow playback below real time.
@@ -592,14 +756,16 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
                                   (active_markers[-max_shot_markers:]
                                    if max_shot_markers else active_markers),
                                   legend_cats)
-            stats = render_stats_panel((PANEL_W, disp_h - mini_h), counts,
-                                       stat_cats, ended=True)
-            # reuse the last decoded video frame held in `last_canvas`'s left part
+            stats = render_stats_panel((PANEL_W * SS, (disp_h - mini_h) * SS),
+                                       counts, stat_cats, ended=True)
+            # reuse the last decoded video frame held in `last_canvas`'s left part;
+            # area-downscale the SS× panels (same as compose) for crisp text.
             final = last_canvas.copy()
-            final[0:mini_h, -PANEL_W:] = cv2.resize(mini, (PANEL_W, mini_h))
+            final[0:mini_h, -PANEL_W:] = cv2.resize(
+                mini, (PANEL_W, mini_h), interpolation=cv2.INTER_AREA)
             final[mini_h:disp_h, -PANEL_W:] = cv2.resize(
-                stats, (PANEL_W, disp_h - mini_h))
-            cv2.imshow(win, _fit_to_screen(final, max_width))
+                stats, (PANEL_W, disp_h - mini_h), interpolation=cv2.INTER_AREA)
+            cv2.imshow(win, _fit_to_screen(final, window_width))
             print("  Clip finished — frozen on last frame; press 'q' to quit.")
             while True:
                 if cv2.waitKey(50) & 0xFF == ord("q"):
@@ -645,11 +811,18 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=720,
                         help="display height in px of the composited window "
                              "(default: 720)")
-    parser.add_argument("--max-width", type=int, default=1280, dest="max_width",
-                        help="max on-screen width (px) of the whole window; the "
-                             "composited canvas is scaled down to fit so the "
-                             "stats panel is never clipped (0 = no scaling, "
-                             "default: 1280)")
+    parser.add_argument("--window-width", type=int, default=WINDOW_WIDTH,
+                        dest="window_width",
+                        help="on-screen WIDTH (px) of the window. Smaller = smaller "
+                             "window; text stays sharp because it is rendered at "
+                             "--render-width and downscaled once for display "
+                             f"(0 = show at full render width, default: {WINDOW_WIDTH})")
+    parser.add_argument("--render-width", "--max-width", type=int,
+                        default=RENDER_WIDTH, dest="render_width",
+                        help="internal RENDER width (px) the canvas is composed at "
+                             "— the text-quality knob; higher = crisper text, more "
+                             "CPU. Independent of the window size "
+                             f"(default: {RENDER_WIDTH}). --max-width is a legacy alias.")
     parser.add_argument("--fps", type=float, default=None,
                         help="playback fps (default: read from the video)")
     args = parser.parse_args()
@@ -680,7 +853,7 @@ def main() -> None:
     print(f"  court  : {court_csv}")
     run(args.video, players_csv, court_csv, ball_csv,
         args.min_area, args.anchor, args.height, args.fps,
-        shots_csv, args.max_shot_markers, args.max_width)
+        shots_csv, args.max_shot_markers, args.render_width, args.window_width)
 
 
 if __name__ == "__main__":
