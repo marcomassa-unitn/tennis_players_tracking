@@ -41,7 +41,10 @@ tracking/BallTracking.py (YOLO) ──> outputs/ball_coordinates/ball_<video>.cs
                        v
            utils/shot_analysis.py              (hit detection)
                vy reversals + acceleration peaks + player proximity
-               -> hit frames -> forehand/backhand per player
+               -> hit frames -> forehand/backhand + flat/slice/dropshot/lob per shot
+
+   ── all three CSVs ──> live_view.py   (front-end: replays the clip with boxes +
+       minimap + live stats, auto-builds and shows the end-of-clip summary figures)
 ```
 
 ## Setup
@@ -52,6 +55,43 @@ pip install -r requirements.txt
 
 Put the input clips in `data/` (broadcast footage of a singles match from a
 fixed camera; the rally clip used in the examples is `data/Input_video2.mp4`).
+
+## Quick start — launch sequence
+
+Everything is keyed off the **video file name**, so every script below takes the
+same `--video`; the CSVs are auto-named after the video stem and found
+automatically by the next step. Run from the **project root**.
+
+**You must run the three tracking scripts FIRST** — they produce the CSVs that
+everything else (analysis, shot detection, the live viewer) reads. The order is
+court → players → ball:
+
+```bash
+# 1. tracking — produces the CSVs (run these three first, in this order)
+python tracking/court_tracking.py  --video data/Input_video2.mp4 --no-display
+python tracking/playerTracking.py  --video data/Input_video2.mp4 --no-display
+python tracking/BallTracking.py    --video data/Input_video2.mp4 --no-display --no-video
+
+# 2. watch everything in one window (live overlays + end-of-clip stats)
+python live_view.py --video data/Input_video2.mp4
+```
+
+That's the whole flow for a new clip. `live_view.py` is the front door: it
+**auto-generates** the heatmaps, court-zone map and shot hitmap on launch (so you
+don't run `player_analysis.py` / `shot_analysis.py` by hand) and shows them in a
+summary window when the clip ends — see [§7](#7-live-viewer-live_viewpy).
+
+**One-shot alternative.** `pipeline.py` chains all the tracking + analysis steps
+itself (headless by default):
+
+```bash
+python pipeline.py --video data/Input_video2.mp4        # then: python live_view.py --video data/Input_video2.mp4
+```
+
+Swap in your own clip by changing `--video` everywhere (e.g.
+`--video data/my_match.mp4`); no other paths need editing. The standalone
+analysis/evaluation tools in §3–§6 below are for inspecting one stage in
+isolation — the quick start above already covers the normal path.
 
 ## Usage (from the project root)
 
@@ -165,7 +205,7 @@ python motionEstimation/block_matching.py --method both [--display]
 Outputs go to `outputs/motion_estimation/` (`flow_speeds.csv`, flow HSV /
 arrow images, LK trails, block-matching vector fields).
 
-### 5. Ball & shot analysis (hit detection, forehand/backhand)
+### 5. Ball & shot analysis (hit detection, forehand/backhand, shot type)
 
 Requires the ball CSV produced by the existing YOLO ball tracker
 (`tracking/BallTracking.py`, needs `ultralytics` + the `ball_tracker.pt`
@@ -178,6 +218,9 @@ python utils/shot_analysis.py --video data/Input_video2.mp4 \
 
 # validate the detection/classification logic without the YOLO model:
 python utils/shot_analysis.py --self-test
+# validate shot-type classification against the labelled ground truth
+# (needs the real Input_video2 ball + players + court CSVs):
+python utils/shot_analysis.py --type-self-test
 ```
 
 Hit detection on the Savitzky-Golay-smoothed ball track: candidates are
@@ -192,8 +235,33 @@ player's body axis. The near player is seen from behind (his right = image
 right), the far player faces the camera (his right = image left); for a
 right-hander the shot is a *forehand* when the ball is on the dominant-hand
 side, a *backhand* otherwise, and the reasoning is inverted for left-handers
-(`--p1-hand/--p2-hand left`). Output: `outputs/shot_analysis/shots.csv`,
-annotated PNG per shot and a terminal summary.
+(`--p1-hand/--p2-hand left`).
+
+Shot **type** (`flat` / `slice` / `dropshot` / `lob`) is read from the **shape
+of the outgoing trajectory** in the frames right after contact. The fixed,
+angled camera makes the near player's pixel speed ~3× the far player's for the
+same physical shot, so a raw pixel speed is never compared across sides;
+perspective is cancelled three ways: (a) a **scale-free pace** = `100 × (ball
+pixels/frame) ÷ (ball bbox height)` (the ball's apparent size shrinks with
+distance just as its apparent speed does); (b) a **court-metre speed** via the
+homography (used only for the far flat/slice split); and (c) **dimensionless
+shape** features — `diefrac` (how fast the ball stops travelling), `reach`, and
+`bowback` (how much the ball arcs back). The rules: a far ball that dies quickly
+is a `dropshot`; a near ball that arcs up and returns slowly is a `lob`; a
+floated, decelerating ball is a `slice`; otherwise `flat`. **Caveat:** the
+court homography is a ground plane while the ball is airborne at contact, so the
+metre-based speeds are approximate — every threshold is a CLI flag
+(`--far-peak-m`, `--drop-diefrac`, `--drop-tail-m`, `--lob-diefrac`,
+`--lob-pace`, `--lob-reach`, `--nslice-bb`, `--nslice-diefrac`,
+`--nslice-peak-m`, plus the windows `--k-window` / `--w30-window`) and may need
+per-camera retuning; the scale-free features (pace / diefrac / reach / bowback)
+do not. Defaults were fit against a 23-shot ground truth on `Input_video2`
+(`--type-self-test` reproduces **23/23**, stable across `--k-window` 22–30); on
+a different camera the type labels are indicative until recalibrated.
+
+Output: `outputs/shot_analysis/shots.csv` (with `stroke`, `shot_type` and the
+numeric `ball_pace` columns), an annotated PNG per shot and a terminal summary
+that tallies forehands/backhands per player and the count of each shot type.
 
 ### 6. Ground truth & evaluation
 
@@ -216,20 +284,44 @@ Reported metrics: mean/median IoU, precision and recall @ IoU 0.5, centre
 error (px), feet-point error (m), ID switches, per-keypoint court error in
 pixels and metres. Per-frame details are saved in `outputs/evaluation/`.
 
-### 7. Live viewer
+### 7. Live viewer (`live_view.py`)
+
+The single window that ties it all together: it replays the original clip with
+the player boxes + ball box drawn on it, a synced top-down minimap, and a live
+shot-tally stats panel, then shows a combined-statistics window at the end.
 
 ```bash
-python live_view.py --video data/Input_video2.mp4
+python live_view.py --video data/Input_video2.mp4        # press 'q' to quit
 ```
 
-Display-only window (nothing is saved): plays the original clip with the
-player + ball bounding boxes drawn on it and, docked on the right, a top-down
-minimap that moves in lockstep with the video (below it a panel is reserved
-for a future statistics chart). It consumes the already-produced CSVs — player
-boxes from `outputs/player_coordinates/`, the ball box from
-`outputs/ball_coordinates/` (optional; the overlay is skipped if absent), and
-the court CSV for the minimap homography — all defaulting to the `<video name>`
-stem and overridable with `--players` / `--ball` / `--court`. Press `q` to quit.
+**Prerequisite:** the three tracking CSVs for that video must already exist —
+run §1 court, §2 players and §3’s `BallTracking.py` first (or `pipeline.py`).
+The viewer **aborts with a clear message** if a required CSV is missing.
+
+On launch it regenerates the three summary figures in-process and headless
+(combined heatmap + court zones + shot hitmap), so they always reflect the
+current CSVs — you never have to run `player_analysis.py` / `shot_analysis.py`
+by hand. The slow `minimap.gif` and per-shot PNGs are **not** regenerated here.
+
+While the clip plays you see:
+
+- the player boxes (`P1`/`P2`) and the ball box, drawn at display resolution so
+  the labels stay crisp;
+- a top-down **minimap** with the live player dots and a shot-type legend;
+- a **stats panel** tallying each player’s shots per type, updated as shots occur.
+
+When the clip ends it **freezes on the last frame** (full final tally) and opens
+a **second, centred window** tiling the three whole-clip figures —
+combined heatmap | court zones | shot hitmap — so the totals can be studied.
+Press `q` to close.
+
+Paths default to the same stem-based CSVs as everything else and can be
+overridden (`--players`, `--ball`, `--court`, `--shots`, `--output`). Display
+size is decoupled from render quality: the canvas is composed at
+`--render-width` (1600 px, the text-sharpness knob) and shown at the smaller
+`--window-width` (1100 px) — make the window any size without softening the text.
+Other flags: `--anchor feet|centroid`, `--min-area`, `--max-shot-markers`,
+`--fps`.
 
 ## Project structure
 
@@ -245,8 +337,10 @@ stem and overridable with `--players` / `--ball` / `--court`. Press `q` to quit.
 | `motionEstimation/block_matching.py` | full-search / three-step block matching |
 | `evaluation/annotate.py` | manual ground-truth annotation tool |
 | `evaluation/evaluate_tracking.py` | quantitative evaluation vs ground truth |
-| `utils/shot_analysis.py` | hit detection + forehand/backhand classification |
+| `utils/shot_analysis.py` | hit detection + forehand/backhand + flat/slice/dropshot/lob shot type |
 | `tracking/BallTracking.py` | YOLO ball tracking → ball CSV for shot analysis |
+| `live_view.py` | live viewer: video + boxes + minimap + stats; auto-builds and shows the end-of-clip summary figures |
+| `pipeline.py` | one-shot runner that chains all tracking + analysis steps (headless by default) |
 
 ## Design notes & limitations
 

@@ -58,11 +58,42 @@ CL_X  = W_m / 2.0            # 4.1148 m  center service line
 # colour -> player reliably:  P1 = warm (red),  P2 = cool (blue).
 # The solid colours below are paired with the warm/cool colormaps used for the
 # heatmaps (_HEAT_CMAPS) and the matching legend patches (_HEAT_LEGEND).
-_COLORS = {1: "red",       2: "steelblue"}
+_COLORS = {1: "red",       2: "deepskyblue"}
 _LABELS = {1: "P1 (red)",  2: "P2 (blue)"}
-# heatmap colormaps + legend patch colours, same warm/cool mapping as _COLORS
-_HEAT_CMAPS  = {1: "hot",        2: "Blues_r"}
-_HEAT_LEGEND = {1: "red",        2: "steelblue"}
+
+# Heatmap colormaps. The old maps (`hot` + `Blues_r`) made the COMBINED map
+# unreadable: `Blues_r` sends P2's DENSEST zones to white, and both layers
+# painted every bin (even empty ones) at a flat alpha, so the two players fogged
+# into an indistinct haze where they overlapped. These custom maps instead ramp
+# ALPHA from 0 (empty -> fully transparent, background stays clean) to 1 (dense ->
+# vivid, fully opaque), over two well-separated hues (P1 warm red→yellow, P2 cool
+# cyan→blue). Transparent tails mean overlap reads as "both were here", not mud.
+def _alpha_ramp_cmap(name, rgb_lo, rgb_hi):
+    """Colormap going transparent (low density) -> saturated opaque (high)."""
+    from matplotlib.colors import LinearSegmentedColormap
+    r0, g0, b0 = rgb_lo
+    r1, g1, b1 = rgb_hi
+    cdict = {
+        "red":   [(0.0, r0, r0), (1.0, r1, r1)],
+        "green": [(0.0, g0, g0), (1.0, g1, g1)],
+        "blue":  [(0.0, b0, b0), (1.0, b1, b1)],
+        # alpha 0 at the very bottom (empty bins stay invisible), then climb
+        # FAST: faint traffic reaches a readable opacity early (0.20 -> 0.55,
+        # 0.40 -> 0.90) so a low-density zone is never lost in the background.
+        "alpha": [(0.0, 0.0, 0.0), (0.05, 0.0, 0.0), (0.20, 0.55, 0.55),
+                  (0.40, 0.90, 0.90), (1.0, 1.0, 1.0)],
+    }
+    return LinearSegmentedColormap(name, cdict, N=256)
+
+# P1: bright orange-red -> yellow (warm). P2: sky-blue -> cyan (cool). The LOW end
+# is deliberately luminous (not a dark red/blue) so the faintest traffic still
+# separates clearly from the near-black background instead of blending into it.
+_HEAT_CMAPS  = {
+    1: _alpha_ramp_cmap("p1_warm", (1.0, 0.45, 0.10), (1.0, 0.95, 0.25)),
+    2: _alpha_ramp_cmap("p2_cool", (0.20, 0.65, 1.0), (0.35, 0.97, 1.0)),
+}
+# Legend patches: a vivid mid-ramp colour of each map (what a busy zone looks like).
+_HEAT_LEGEND = {1: "#ff5a1f",     2: "#19c3ff"}
 
 # ── court zones ────────────────────────────────────────────────────────────────
 # The analysis covers the whole walkable area, not just the playing rectangle:
@@ -330,7 +361,16 @@ def _make_heat_array(x_m: np.ndarray, y_m: np.ndarray,
                              range=[_HEAT_X, _HEAT_Y])
     H = gaussian_filter(H.T.astype(float), sigma=sigma)
     H /= H.max() + 1e-10
-    return H
+    # MASK the empty court: bins below a small floor become transparent (NaN ->
+    # not drawn), so the dark background stays clean and only real traffic is
+    # painted. Without this, every bin gets the colormap's base colour and the
+    # two players' faint tails fog the whole figure.
+    return np.ma.masked_less(H, 0.04)
+
+
+# Background for the heatmap figures — a touch darker than the other figures so
+# the vivid, alpha-ramped heat colours stand out with maximum contrast.
+_HEAT_BG = "#10101c"
 
 
 def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
@@ -339,11 +379,14 @@ def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
 
     for pid, sub in player_data.items():
         fig, ax = plt.subplots(figsize=(4, 9))
-        fig.patch.set_facecolor("#1a1a2e")
+        fig.patch.set_facecolor(_HEAT_BG)
         _draw_court(ax)
         H = _make_heat_array(sub["x_m"].values, sub["y_m"].values)
-        ax.imshow(H, origin="lower", extent=_HEAT_EXTENT,
-                  cmap=cmaps.get(pid, "hot"), alpha=0.70, aspect="auto")
+        # alpha is baked into the colormap (transparent -> opaque with density),
+        # so no flat `alpha=` here: dense zones render fully vivid.
+        ax.imshow(H, origin="lower", extent=_HEAT_EXTENT, vmin=0.0, vmax=1.0,
+                  cmap=cmaps.get(pid, "hot"), aspect="auto",
+                  interpolation="bilinear")
         ax.set_title(f"Heatmap – Player {pid}", color="white",
                      fontsize=11, pad=4)
         path = out_dir / f"heatmap_p{pid}.png"
@@ -352,23 +395,25 @@ def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
         plt.close(fig)
         print(f"  Saved: {path}")
 
-    # combined heatmap
+    # combined heatmap — the SAME alpha-ramped maps as the single ones, so each
+    # player keeps an identical, recognisable colour. Transparent empty bins let
+    # the two layers coexist: red where only P1 was, cyan where only P2 was, and a
+    # clearly blended zone only where they genuinely overlapped.
     fig, ax = plt.subplots(figsize=(4, 9))
-    fig.patch.set_facecolor("#1a1a2e")
+    fig.patch.set_facecolor(_HEAT_BG)
     _draw_court(ax)
-    cmap_alpha = {1: (_HEAT_CMAPS[1], 0.55), 2: (_HEAT_CMAPS[2], 0.55)}
-    for pid, (cmap, alpha) in cmap_alpha.items():
+    for pid in (1, 2):
         if pid not in player_data:
             continue
         H = _make_heat_array(player_data[pid]["x_m"].values,
                              player_data[pid]["y_m"].values)
-        ax.imshow(H, origin="lower", extent=_HEAT_EXTENT,
-                  cmap=cmap, alpha=alpha, aspect="auto")
+        ax.imshow(H, origin="lower", extent=_HEAT_EXTENT, vmin=0.0, vmax=1.0,
+                  cmap=_HEAT_CMAPS[pid], aspect="auto", interpolation="bilinear")
     # legend colours match the warm/cool player convention (_HEAT_LEGEND)
     patches = [mpatches.Patch(color=_HEAT_LEGEND[1], label="Player 1"),
                mpatches.Patch(color=_HEAT_LEGEND[2], label="Player 2")]
     ax.legend(handles=patches, loc="upper right", fontsize=8,
-              framealpha=0.5, facecolor="#333", edgecolor="none",
+              framealpha=0.6, facecolor="#222", edgecolor="none",
               labelcolor="white")
     ax.set_title("Combined heatmap", color="white", fontsize=11, pad=4)
     path = out_dir / "heatmap_combined.png"
