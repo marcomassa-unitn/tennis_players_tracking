@@ -61,7 +61,7 @@ from utils.shot_analysis import (
 # because the old single --max-width drove both the render resolution and the
 # window, so a smaller window literally rendered fewer pixels of text.
 RENDER_WIDTH = 1600      # px width the canvas is COMPOSED at (quality; not the window)
-WINDOW_WIDTH = 960       # px width the window is SHOWN at (display size; <= RENDER_WIDTH)
+WINDOW_WIDTH = 1100      # px width the window is SHOWN at (display size; <= RENDER_WIDTH)
 PANEL_W   = 380          # width (px) of the right column (minimap + stats)
 MINI_FRAC = 0.50         # fraction of the right column height given to the minimap
                          # (stats panel gets the other half; it needs the room for
@@ -585,6 +585,28 @@ def _fit_to_screen(canvas: np.ndarray, window_width: int) -> np.ndarray:
     return canvas
 
 
+def _screen_size(default=(1920, 1080)) -> tuple[int, int]:
+    """(width, height) of the primary screen in px; safe fallback if unknown."""
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        u.SetProcessDPIAware()
+        w, h = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+        if w > 0 and h > 0:
+            return int(w), int(h)
+    except Exception:
+        pass
+    return default
+
+
+def _center_window(win_name: str, w: int, h: int) -> None:
+    """Move an OpenCV window so its w×h box is centred on the primary screen."""
+    sw, sh = _screen_size()
+    x = max(0, (sw - w) // 2)
+    y = max(0, (sh - h) // 2)
+    cv2.moveWindow(win_name, x, y)
+
+
 # ── on-launch analysis generation ────────────────────────────────────────────────
 
 def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
@@ -665,9 +687,10 @@ def _summary_panel(title: str, img, panel_h: int, bar_h: int = 34) -> np.ndarray
 
 
 def _show_summary_window(output_dir: str, window_name: str,
-                         max_width: int = 1600, panel_h: int = 760) -> bool:
-    """Open a SEPARATE window tiling the combined heatmap, the zones map and the
-    shot hitmap side by side, so the whole-clip stats can be studied at the end.
+                         max_width: int = 1360, panel_h: int = 660) -> bool:
+    """Open a SEPARATE, screen-centred window tiling the combined heatmap, the
+    zones map and the shot hitmap side by side, so the whole-clip stats can be
+    studied at the end.
 
     Returns True if at least one figure was found/shown. Missing figures become a
     labelled placeholder rather than an error, so a partial pipeline still works.
@@ -698,6 +721,7 @@ def _show_summary_window(output_dir: str, window_name: str,
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, board.shape[1], board.shape[0])
     cv2.imshow(window_name, board)
+    _center_window(window_name, board.shape[1], board.shape[0])
     return found
 
 
@@ -812,10 +836,11 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     if window_width and window_width > 0:
         # Open the window at window_width, preserving the canvas aspect ratio
-        # (the canvas is vw + PANEL_W wide by disp_h tall).
+        # (the canvas is vw + PANEL_W wide by disp_h tall), centred on the screen.
         canvas_w = int(round(src_w * disp_h / src_h)) + PANEL_W
-        cv2.resizeWindow(win, window_width,
-                         int(round(disp_h * window_width / canvas_w)))
+        win_h = int(round(disp_h * window_width / canvas_w))
+        cv2.resizeWindow(win, window_width, win_h)
+        _center_window(win, window_width, win_h)
     print(f"  Render @ {render_width}px wide → window @ {window_width}px "
           f"(text rendered high, shown small).")
     print(f"  Playing at {fps:.0f} fps — press 'q' in the window to quit.")
