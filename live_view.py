@@ -331,17 +331,66 @@ class Minimap:
 
 # ── stats placeholder ───────────────────────────────────────────────────────────
 
-def render_stats_panel(frame_idx: int, size: tuple[int, int]) -> np.ndarray:
-    """Placeholder for the future statistics chart (minimap sits above it).
+def render_stats_panel(size: tuple[int, int], counts: dict,
+                       cats: list, ended: bool = False) -> np.ndarray:
+    """Live per-player shot tally, two columns (P1 | P2).
 
-    Receives the current ``frame_idx`` already, so a moving cursor / live
-    readout can be wired in here later without touching the playback loop.
+    ``counts`` = {pid: {category: n}} updated as shots are registered; ``cats``
+    is the fixed ordered category list (so rows never reshuffle). Each column is
+    headed by the player in their on-video box colour (P1 green, P2 red) and
+    lists one counter per shot category, then the per-player total. The footer
+    shows the rally length = the TOTAL shots played by both players; when
+    ``ended`` is True it also marks the clip as finished (the playback loop
+    freezes on the last frame).
     """
     w, h = size
     panel = np.full((h, w, 3), (40, 30, 25), np.uint8)
-    cv2.putText(panel, "STATS", (12, 30), FONT, 0.8, (200, 200, 200), 2)
-    cv2.putText(panel, "(chart coming soon)", (12, 58), FONT, 0.5, (150, 150, 150), 1)
-    cv2.putText(panel, f"frame {frame_idx}", (12, h - 14), FONT, 0.5, (120, 120, 120), 1)
+
+    title = "FINAL STATS" if ended else "SHOT STATS"
+    cv2.putText(panel, title, (12, 26), FONT, 0.62, (235, 235, 235), 2,
+                cv2.LINE_AA)
+
+    # Two equal columns; header in each player's box colour.
+    col_x = {1: 14, 2: w // 2 + 6}
+    head_y = 50
+    for pid in (1, 2):
+        cv2.putText(panel, f"P{pid}", (col_x[pid], head_y), FONT, 0.6,
+                    _BOX_COLORS.get(pid, (235, 235, 235)), 2, cv2.LINE_AA)
+
+    # One counter row per category + a total row. The row pitch ADAPTS to the
+    # panel height (which shrinks when the canvas is sized to the screen width),
+    # so the rows + total always fit between the header and the two footer lines
+    # without overlapping. Clamped to a readable range.
+    foot_h = 40                       # space reserved at the bottom for the footer
+    top = head_y + 22                 # first counter row baseline
+    n_rows = len(cats) + 1            # categories + the "total" row
+    avail = max(1, (h - foot_h) - top)
+    row_h = int(np.clip(avail / n_rows, 14, 22))
+    fs = 0.42 if row_h >= 17 else 0.38   # shrink the font a touch on a short panel
+
+    y = top
+    for cat in cats:
+        color = _CAT_BGR.get(cat, _CAT_FALLBACK_BGR)
+        for pid in (1, 2):
+            n = counts.get(pid, {}).get(cat, 0)
+            cv2.circle(panel, (col_x[pid] + 5, y - 4), 5, color, 2, cv2.LINE_AA)
+            cv2.putText(panel, f"{cat}: {n}", (col_x[pid] + 16, y), FONT, fs,
+                        color, 1, cv2.LINE_AA)
+        y += row_h
+
+    # per-player total (its own row, same adaptive pitch)
+    for pid in (1, 2):
+        total = sum(counts.get(pid, {}).values())
+        cv2.putText(panel, f"total: {total}", (col_x[pid], y), FONT, fs + 0.02,
+                    _BOX_COLORS.get(pid, (235, 235, 235)), 1, cv2.LINE_AA)
+
+    # footer: rally length = total shots played by BOTH players
+    rally_total = sum(sum(counts.get(pid, {}).values()) for pid in (1, 2))
+    cv2.putText(panel, f"Rally length: {rally_total} shots",
+                (14, h - 22), FONT, 0.48, (200, 220, 255), 1, cv2.LINE_AA)
+    if ended:
+        cv2.putText(panel, "clip ended - press q to quit",
+                    (14, h - 6), FONT, 0.4, (160, 200, 160), 1, cv2.LINE_AA)
     return panel
 
 
@@ -368,10 +417,41 @@ def compose(frame: np.ndarray, minimap: np.ndarray, stats: np.ndarray,
     return canvas
 
 
+def _fit_to_screen(canvas: np.ndarray, max_width: int) -> np.ndarray:
+    """Safety clamp: scale the WHOLE canvas down (preserving aspect) only if it
+    still exceeds ``max_width``.
+
+    The layout in run() already solves disp_h so video_width + PANEL_W == max_width,
+    so in the normal case this is a NO-OP and the stats text is shown at native
+    resolution (no blur from downscaling). It only triggers as a backstop for an
+    unusually wide source frame. ``max_width<=0`` disables it.
+    """
+    if max_width and max_width > 0 and canvas.shape[1] > max_width:
+        scale = max_width / canvas.shape[1]
+        new_h = int(round(canvas.shape[0] * scale))
+        return cv2.resize(canvas, (max_width, new_h), interpolation=cv2.INTER_AREA)
+    return canvas
+
+
 # ── playback ────────────────────────────────────────────────────────────────────
 
 def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
-        disp_h, fps_override, shots_csv=None, max_shot_markers=0) -> None:
+        disp_h, fps_override, shots_csv=None, max_shot_markers=0,
+        max_width=1280) -> None:
+    # Solve the display height UP FRONT so the FINAL canvas width (video + the
+    # PANEL_W stats column) already equals the on-screen max_width. The panel and
+    # its small text are then drawn at native resolution and NEVER downscaled
+    # (post-render downscaling was what blurred the stats text). The video keeps
+    # its true aspect ratio:  vw + PANEL_W = max_width, vw = src_w*disp_h/src_h
+    # => disp_h = (max_width - PANEL_W) * src_h / src_w. Done before the minimap
+    # is built so all overlays are sized to the final height in one pass.
+    probe = cv2.VideoCapture(video)
+    src_w = probe.get(cv2.CAP_PROP_FRAME_WIDTH) or 1920.0
+    src_h = probe.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1080.0
+    probe.release()
+    if max_width and max_width > PANEL_W + 80 and src_w > 0:
+        disp_h = int(round((max_width - PANEL_W) * src_h / src_w))
+
     # --- load per-frame overlays (indexed by absolute frame number) ---
     boxes = load_player_boxes(players_csv)
     print(f"  Player boxes: {len(boxes)} frames from {players_csv}")
@@ -414,6 +494,8 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     # so the key is shown in full from the first frame (it does NOT build up as
     # shots occur). Empty when there are no shots -> no legend drawn.
     legend_cats = {cat for _f, _pid, cat, _c in shot_markers} or None
+    # Ordered category list for the stats columns (stable, only types that occur).
+    stat_cats = [c for c in _LEG_ORDER if legend_cats and c in legend_cats]
 
     def minimap_positions(frame_idx: int) -> dict:
         """{pid: (xm, ym)} for the players present (and in range) at frame_idx."""
@@ -437,6 +519,9 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     frame_period = 0.915 / fps   # real seconds-per-frame of the source video
 
     win = "Tennis Live View  (q to quit)"
+    # Resizable window so the user can still rescale if they want; at the default
+    # size nothing is clipped and the text is rendered at its native resolution.
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     print(f"  Playing at {fps:.0f} fps — press 'q' in the window to quit.")
     idx = 0
     # Shot accumulation: shot_markers is sorted by frame, so a single advancing
@@ -444,6 +529,10 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     # for the rest of the clip (O(total shots) overall, not per frame).
     active_markers = []     # [(pid, cat, center), ...] — frames already crossed
     next_shot = 0
+    # Live per-player tally, incremented exactly when a shot is revealed so the
+    # stats panel counter for each category stays in step with the markers.
+    counts = {1: {}, 2: {}}
+    last_canvas = None      # keep the final composite to freeze on after the clip
     try:
         while True:
             t0 = time.perf_counter()
@@ -468,9 +557,13 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
                             FONT, 0.5, (0, 255, 255), 2)
 
             # Reveal every shot whose frame has been reached; it then persists.
+            # Each reveal bumps that player's per-category counter so the stats
+            # panel updates exactly when its marker appears.
             while next_shot < len(shot_markers) and shot_markers[next_shot][0] <= idx:
                 _f, _pid, _cat, _center = shot_markers[next_shot]
                 active_markers.append((_pid, _cat, _center))
+                pc = counts.setdefault(_pid, {})
+                pc[_cat] = pc.get(_cat, 0) + 1
                 next_shot += 1
             # Optional clutter cap: keep only the most recent N markers (0 = all).
             shown = (active_markers[-max_shot_markers:]
@@ -478,15 +571,39 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
 
             # Legend is FIXED (full key from the first frame), not built up live.
             mini = minimap.render(minimap_positions(idx), shown, legend_cats)
-            stats = render_stats_panel(idx, (PANEL_W, disp_h - mini_h))
-            cv2.imshow(win, compose(frame, mini, stats, disp_h, PANEL_W, mini_h))
+            stats = render_stats_panel((PANEL_W, disp_h - mini_h), counts,
+                                       stat_cats)
+            last_canvas = compose(frame, mini, stats, disp_h, PANEL_W, mini_h)
+            cv2.imshow(win, _fit_to_screen(last_canvas, max_width))
 
             # Wait only the time LEFT in this frame's period after the per-frame
             # processing, so render overhead doesn't slow playback below real time.
             wait_ms = max(1, int(round((frame_period - (time.perf_counter() - t0)) * 1000)))
             if cv2.waitKey(wait_ms) & 0xFF == ord("q"):
-                break
+                cv2.destroyAllWindows()
+                return
             idx += 1
+
+        # --- clip finished: FREEZE on the last frame so the final statistics can
+        # be studied. Recompose the last frame with the full final tally (total
+        # shots + per-player totals) and block until the user presses 'q'. ---
+        if last_canvas is not None:
+            mini = minimap.render(minimap_positions(max(idx - 1, 0)),
+                                  (active_markers[-max_shot_markers:]
+                                   if max_shot_markers else active_markers),
+                                  legend_cats)
+            stats = render_stats_panel((PANEL_W, disp_h - mini_h), counts,
+                                       stat_cats, ended=True)
+            # reuse the last decoded video frame held in `last_canvas`'s left part
+            final = last_canvas.copy()
+            final[0:mini_h, -PANEL_W:] = cv2.resize(mini, (PANEL_W, mini_h))
+            final[mini_h:disp_h, -PANEL_W:] = cv2.resize(
+                stats, (PANEL_W, disp_h - mini_h))
+            cv2.imshow(win, _fit_to_screen(final, max_width))
+            print("  Clip finished — frozen on last frame; press 'q' to quit.")
+            while True:
+                if cv2.waitKey(50) & 0xFF == ord("q"):
+                    break
     finally:
         cap.release()
         cv2.destroyAllWindows()
@@ -528,6 +645,11 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=720,
                         help="display height in px of the composited window "
                              "(default: 720)")
+    parser.add_argument("--max-width", type=int, default=1280, dest="max_width",
+                        help="max on-screen width (px) of the whole window; the "
+                             "composited canvas is scaled down to fit so the "
+                             "stats panel is never clipped (0 = no scaling, "
+                             "default: 1280)")
     parser.add_argument("--fps", type=float, default=None,
                         help="playback fps (default: read from the video)")
     args = parser.parse_args()
@@ -558,7 +680,7 @@ def main() -> None:
     print(f"  court  : {court_csv}")
     run(args.video, players_csv, court_csv, ball_csv,
         args.min_area, args.anchor, args.height, args.fps,
-        shots_csv, args.max_shot_markers)
+        shots_csv, args.max_shot_markers, args.max_width)
 
 
 if __name__ == "__main__":
