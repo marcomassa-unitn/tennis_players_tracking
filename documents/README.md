@@ -55,6 +55,21 @@ fixed camera; the rally clip used in the examples is `data/Input_video2.mp4`).
 
 ## Usage (from the project root)
 
+### 0. Full pipeline (one command)
+
+`pipeline.py` runs the whole chain end-to-end (court → player tracking →
+analysis → motion estimation → ball tracking → shot analysis → evaluation),
+deriving every intermediate path from `--video`:
+
+```bash
+python pipeline.py --video data/Input_video2.mp4          # headless by default
+python pipeline.py --video data/Input_video2.mp4 --display # show OpenCV windows
+```
+
+Each step is wrapped in its own try/except (one failing step is reported and
+skipped, not fatal) and can be skipped with its `--skip-*` flag to reuse CSVs
+already on disk. The individual steps below can also be run on their own.
+
 ### 1. Court keypoint detection
 
 ```bash
@@ -201,10 +216,27 @@ Reported metrics: mean/median IoU, precision and recall @ IoU 0.5, centre
 error (px), feet-point error (m), ID switches, per-keypoint court error in
 pixels and metres. Per-frame details are saved in `outputs/evaluation/`.
 
+### 7. Live viewer
+
+```bash
+python live_view.py --video data/Input_video2.mp4
+```
+
+Display-only window (nothing is saved): plays the original clip with the
+player + ball bounding boxes drawn on it and, docked on the right, a top-down
+minimap that moves in lockstep with the video (below it a panel is reserved
+for a future statistics chart). It consumes the already-produced CSVs — player
+boxes from `outputs/player_coordinates/`, the ball box from
+`outputs/ball_coordinates/` (optional; the overlay is skipped if absent), and
+the court CSV for the minimap homography — all defaulting to the `<video name>`
+stem and overridable with `--players` / `--ball` / `--court`. Press `q` to quit.
+
 ## Project structure
 
 | Path | Purpose |
 |---|---|
+| `pipeline.py` | unified entry point — runs the whole chain from one command |
+| `live_view.py` | live viewer — video + player/ball boxes + synced minimap |
 | `tracking/court_tracking.py` | court keypoint detection (Hough + ITF proportions) |
 | `tracking/playerTracking.py` | two-player tracking (background subtraction) |
 | `utils/court_converter.py` | pixel → metre homography from the court CSV |
