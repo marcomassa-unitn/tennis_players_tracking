@@ -585,11 +585,128 @@ def _fit_to_screen(canvas: np.ndarray, window_width: int) -> np.ndarray:
     return canvas
 
 
+# ── on-launch analysis generation ────────────────────────────────────────────────
+
+def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
+                               fps, min_area, anchor):
+    """Regenerate the three end-of-clip summary figures in-process, headless:
+    heatmap_combined.png + zones.png (player_analysis) and shot_hitmap.png
+    (shot_analysis). Only the FAST figures are produced — the slow minimap.gif and
+    the per-shot frame PNGs are intentionally skipped.
+
+    Both analysis modules use matplotlib's Agg backend, so nothing pops up. Raises
+    on any failure so the caller can abort (the figures are required for the
+    end-of-clip summary).
+    """
+    from pathlib import Path
+    from utils import player_analysis as pa
+    from utils import shot_analysis as sa
+    from utils.court_converter import CourtConverter
+
+    fps = fps or 30.0
+    hand_map = {1: "right", 2: "right"}
+
+    # --- player analysis: combined heatmap + court zones (skip the slow gif) ---
+    pa_dir = Path(output_dir) / "player_analysis"
+    pa_dir.mkdir(parents=True, exist_ok=True)
+    player_data = pa._load_and_convert(players_csv, court_csv, min_area, anchor)
+    if not player_data:
+        raise RuntimeError("player analysis produced no player tracks.")
+    pa._save_heatmaps(player_data, pa_dir)                 # -> heatmap_combined.png
+    zone_df = pa._compute_zone_stats(player_data, fps)
+    pa._save_zone_outputs(player_data, zone_df, pa_dir)    # -> zones.png
+
+    # --- shot analysis: shot hitmap (needs the ball CSV) ---
+    if not (ball_csv and os.path.exists(ball_csv)):
+        raise RuntimeError(
+            f"ball CSV not found ({ball_csv}); the shot hitmap can't be built.\n"
+            "Run 'python tracking/BallTracking.py' first, or launch without the "
+            "summary by removing this requirement.")
+    sa_dir = Path(output_dir) / "shot_analysis"
+    sa_dir.mkdir(parents=True, exist_ok=True)
+    track = sa.load_ball_track(ball_csv)
+    boxes = sa.load_player_boxes(players_csv)
+    conv = CourtConverter(court_csv)
+    shots = sa.analyze_shots(track, boxes, conv, fps, hand_map)
+    shots.to_csv(sa_dir / "shots.csv", index=False)
+    sa.save_shot_hitmap(shots, sa_dir)                     # -> shot_hitmap.png
+
+
+# ── end-of-clip summary window ───────────────────────────────────────────────────
+
+# The three analysis figures shown together when the clip ends, with their fixed
+# paths relative to the --output base dir (see player_analysis.py / shot_analysis.py).
+_SUMMARY_FIGS = [
+    ("Combined heatmap", os.path.join("player_analysis", "heatmap_combined.png")),
+    ("Court zones",      os.path.join("player_analysis", "zones.png")),
+    ("Shot hitmap",      os.path.join("shot_analysis",   "shot_hitmap.png")),
+]
+_SUMMARY_BG = (26, 26, 46)   # dark indigo, matches the analysis figures' bg (BGR)
+
+
+def _summary_panel(title: str, img, panel_h: int, bar_h: int = 34) -> np.ndarray:
+    """One labelled column of the summary window: a title bar over the figure
+    (or a 'not found' placeholder), scaled to ``panel_h`` total height."""
+    fig_h = panel_h - bar_h
+    if img is None:                      # missing/unreadable -> placeholder column
+        w = int(round(fig_h * 0.45))
+        col = np.full((panel_h, w, 3), _SUMMARY_BG, np.uint8)
+        cv2.putText(col, "not found", (10, panel_h // 2), FONT, 0.6,
+                    (120, 120, 160), 1, cv2.LINE_AA)
+    else:
+        h0, w0 = img.shape[:2]
+        w = max(1, int(round(w0 * fig_h / h0)))
+        fig = cv2.resize(img, (w, fig_h), interpolation=cv2.INTER_AREA)
+        col = np.full((panel_h, w, 3), _SUMMARY_BG, np.uint8)
+        col[bar_h:bar_h + fig_h, :] = fig
+    # title bar
+    cv2.putText(col, title, (10, 23), FONT, 0.62, (235, 235, 235), 2, cv2.LINE_AA)
+    return col
+
+
+def _show_summary_window(output_dir: str, window_name: str,
+                         max_width: int = 1600, panel_h: int = 760) -> bool:
+    """Open a SEPARATE window tiling the combined heatmap, the zones map and the
+    shot hitmap side by side, so the whole-clip stats can be studied at the end.
+
+    Returns True if at least one figure was found/shown. Missing figures become a
+    labelled placeholder rather than an error, so a partial pipeline still works.
+    """
+    cols, found = [], False
+    for title, rel in _SUMMARY_FIGS:
+        path = os.path.join(output_dir, rel)
+        img = cv2.imread(path) if os.path.exists(path) else None
+        if img is not None:
+            found = True
+        else:
+            print(f"  Summary: '{title}' not found at {path} (skipped).")
+        cols.append(_summary_panel(title, img, panel_h))
+
+    gap = 12
+    total_w = sum(c.shape[1] for c in cols) + gap * (len(cols) + 1)
+    board = np.full((panel_h + 2 * gap, total_w, 3), _SUMMARY_BG, np.uint8)
+    x = gap
+    for c in cols:
+        board[gap:gap + panel_h, x:x + c.shape[1]] = c
+        x += c.shape[1] + gap
+
+    if max_width and board.shape[1] > max_width:     # fit to a sane on-screen width
+        scale = max_width / board.shape[1]
+        board = cv2.resize(board, (max_width, int(round(board.shape[0] * scale))),
+                           interpolation=cv2.INTER_AREA)
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, board.shape[1], board.shape[0])
+    cv2.imshow(window_name, board)
+    return found
+
+
 # ── playback ────────────────────────────────────────────────────────────────────
 
 def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
         disp_h, fps_override, shots_csv=None, max_shot_markers=0,
-        render_width=RENDER_WIDTH, window_width=WINDOW_WIDTH) -> None:
+        render_width=RENDER_WIDTH, window_width=WINDOW_WIDTH,
+        output_dir="outputs") -> None:
     # Solve the RENDER height up front so the composed canvas width (video + the
     # PANEL_W stats column) equals render_width — a fixed, generous resolution that
     # keeps all text sharp. The window the user sees is a SEPARATE, smaller size:
@@ -603,6 +720,21 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     probe.release()
     if render_width and render_width > PANEL_W + 80 and src_w > 0:
         disp_h = int(round((render_width - PANEL_W) * src_h / src_w))
+
+    # --- regenerate the end-of-clip summary figures up front, headless, so they
+    # always reflect the CURRENT CSVs (no manual run of the analysis scripts). The
+    # slow minimap.gif / per-shot PNGs are skipped; only the 3 fast figures are
+    # built. Abort on failure — the summary requires them. ---
+    print("  Generating analysis figures (heatmap, zones, shot hitmap)...")
+    try:
+        _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
+                                   fps_override or 30.0, min_area, anchor)
+    except Exception as e:
+        raise SystemExit(
+            f"Analysis generation failed: {e}\n"
+            "Fix the inputs above and relaunch (the end-of-clip summary needs "
+            "the combined heatmap, zones and shot hitmap).")
+    print("  Analysis figures ready.")
 
     # --- load per-frame overlays (indexed by absolute frame number) ---
     boxes = load_player_boxes(players_csv)
@@ -766,6 +898,12 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             final[mini_h:disp_h, -PANEL_W:] = cv2.resize(
                 stats, (PANEL_W, disp_h - mini_h), interpolation=cv2.INTER_AREA)
             cv2.imshow(win, _fit_to_screen(final, window_width))
+            # Separate window with the whole-clip analysis figures (combined
+            # heatmap + court zones + shot hitmap) so the totals can be studied.
+            summary_win = "Clip summary  (combined heatmap | zones | shot hitmap)"
+            if _show_summary_window(output_dir, summary_win):
+                print(f"  Summary window: combined heatmap + zones + shot hitmap "
+                      f"(from {output_dir}).")
             print("  Clip finished — frozen on last frame; press 'q' to quit.")
             while True:
                 if cv2.waitKey(50) & 0xFF == ord("q"):
@@ -853,7 +991,8 @@ def main() -> None:
     print(f"  court  : {court_csv}")
     run(args.video, players_csv, court_csv, ball_csv,
         args.min_area, args.anchor, args.height, args.fps,
-        shots_csv, args.max_shot_markers, args.render_width, args.window_width)
+        shots_csv, args.max_shot_markers, args.render_width, args.window_width,
+        args.output)
 
 
 if __name__ == "__main__":
