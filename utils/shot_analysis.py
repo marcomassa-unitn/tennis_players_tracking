@@ -547,7 +547,13 @@ OVERHEAD_PARAMS = {
     # Serve gate
     "stationary_mps": 1.0,     # server feet speed (m/s) must be below this (~standing)
     "behind_baseline_m": 1.5,  # server feet within this many m BEHIND his own baseline
-    "serve_incoming_slow_mps": 6.0,  # incoming ("toss") ball speed (m/s) must be below this
+    "serve_toss_vy_px": 2.0,         # incoming ("toss") must be RISING or near apex: median
+                                     # per-step dcy (px/frame) must be <= this (image y grows
+                                     # down, so rising = negative). Replaces the m/s "slow toss"
+                                     # test, unreliable because the ground homography distorts
+                                     # the airborne toss near the baseline.
+    "smash_incoming_down_px": 5.0,   # incoming ball must be DESCENDING for a smash: median
+                                     # per-step dcy (px/frame) must be >= this (positive = down).
     "serve_toss_local_m": 6.0,       # pre-contact ball must be on the server's OWN side of the
                                      # net, within this margin past the net line (a toss stays on
                                      # the server's half; a returned/across-net ball does not).
@@ -612,7 +618,7 @@ def _incoming_ball_features(track, conv, i, fps, win=10):
       in_x_m     : the ball's court x (meters) ~win frames before contact. NaN if
                    unavailable.
     """
-    out = dict(in_speed_m=np.nan, in_y_m=np.nan, in_x_m=np.nan)
+    out = dict(in_speed_m=np.nan, in_y_m=np.nan, in_x_m=np.nan, in_vy_px=np.nan)
     lo = max(0, i - win)
     if i - lo < 3:
         return out
@@ -624,6 +630,14 @@ def _incoming_ball_features(track, conv, i, fps, win=10):
     spm = spm[~np.isnan(spm)]
     if len(spm):
         out["in_speed_m"] = float(np.nanmedian(spm))
+    # Vertical direction of the incoming ball, in PIXELS (scale-free, robust to
+    # the ground homography distorting an airborne ball near the baseline). Image
+    # y grows downward, so median per-step dcy < 0 means the ball is RISING (a
+    # serve toss) and > 0 means it is DESCENDING (a ball coming down for a smash).
+    dcy = np.diff(cy)
+    dcy = dcy[~np.isnan(dcy)]
+    if len(dcy):
+        out["in_vy_px"] = float(np.median(dcy))
     # earliest valid pre-contact ball court position (origin of the incoming ball)
     for k in range(len(pm)):
         if np.all(np.isfinite(pm[k])):
@@ -679,10 +693,14 @@ def classify_overhead(box, ball_cx, ball_cy, player_x_m, player_y_m, side,
             behind = player_y_m <= 0.0 + p["behind_baseline_m"]
         stationary = (player_speed is not None
                       and player_speed < p["stationary_mps"])
-        # the toss is slow and originates on the server's OWN side of the net, not
-        # from across it (a smash's incoming ball comes from the opponent's half).
-        slow = (in_speed is not None and not np.isnan(in_speed)
-                and in_speed < p["serve_incoming_slow_mps"])
+        # the toss RISES (or sits near its apex) just before contact and originates
+        # on the server's OWN side of the net (a smash's incoming ball descends and
+        # comes from across the net). Direction is used instead of an m/s "slow"
+        # test, which is unreliable: the ground homography hugely inflates the
+        # speed of the airborne toss near the baseline.
+        in_vy = in_feats.get("in_vy_px") if in_feats else None
+        tossing = (in_vy is not None and not np.isnan(in_vy)
+                   and in_vy <= p["serve_toss_vy_px"])
         if in_y is not None and not np.isnan(in_y):
             if side == "near":   # near half is y_m > NET
                 local = in_y > NET - p["serve_toss_local_m"]
@@ -690,7 +708,7 @@ def classify_overhead(box, ball_cx, ball_cy, player_x_m, player_y_m, side,
                 local = in_y < NET + p["serve_toss_local_m"]
         else:
             local = False
-        if behind and stationary and slow and local:
+        if behind and stationary and tossing and local:
             return "serve"
 
     # ── SMASH: opponent ball arrives fast, driven DOWNWARD on the way out ──
@@ -706,13 +724,16 @@ def classify_overhead(box, ball_cx, ball_cy, player_x_m, player_y_m, side,
 
     rise = out_feats.get("rise") if out_feats else None     # +ve = ball goes DOWN
     apex = out_feats.get("apex") if out_feats else None      # px the ball rose above contact
-    fast_incoming = (in_speed is not None and not np.isnan(in_speed)
-                     and in_speed >= p["smash_incoming_fast_mps"])
+    in_vy = in_feats.get("in_vy_px") if in_feats else None
+    # a smash is struck off an opponent ball that ARRIVES DESCENDING (cy increasing
+    # -> in_vy_px clearly positive), unlike a serve toss that rises.
+    descending_in = (in_vy is not None and not np.isnan(in_vy)
+                     and in_vy >= p["smash_incoming_down_px"])
     downward = (rise is not None and not np.isnan(rise)
                 and rise >= p["smash_down_rise"])
     low_apex = (apex is not None and not np.isnan(apex)
                 and apex <= p["smash_min_apex"])
-    if fast_incoming and downward and low_apex:
+    if descending_in and downward and low_apex:
         return "smash"
 
     return ""
@@ -1319,10 +1340,10 @@ def overhead_self_test() -> None:
         ball_cy = head_y - 0.5 * bh             # above the head at contact
         boxes = {f: {1: box} for f in range(80)}
         i = 30
-        # Incoming: ball comes from across the net (far baseline px), fast.
-        far_px = m2px(W_m / 2.0, 3.0)
-        # Outgoing: driven DOWN (cy increases, image-down) and forward, low apex.
-        seg = [(i - 12, far_px[0], far_px[1]),
+        # Incoming: a lobbed ball DESCENDING into the contact from above the
+        # head (cy increasing toward contact -> in_vy_px > 0), then driven DOWN
+        # on the way out (cy increases) with a low apex.
+        seg = [(i - 12, ball_cx - 30, ball_cy - 140),
                (i, ball_cx, ball_cy),
                (i + 26, ball_cx + 40, ball_cy + 260)]
         track = build_track(seg, frames=80)
