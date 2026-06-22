@@ -7,17 +7,9 @@ import numpy as np
 # Origin = TL (top-left corner of the far baseline).
 #   x : 0 (left sideline)  →  8.2296 m (right sideline)
 #   y : 0 (far baseline)   →  23.7744 m (near baseline)
-_FT = 0.3048
-_REAL_WORLD = {
-    "TL":  (0.0,           0.0),
-    "TR":  (27.0 * _FT,    0.0),
-    "BL":  (0.0,           78.0 * _FT),
-    "BR":  (27.0 * _FT,    78.0 * _FT),
-    "STL": (0.0,           18.0 * _FT),
-    "STR": (27.0 * _FT,    18.0 * _FT),
-    "SBL": (0.0,           78.0 * _FT - 18.0 * _FT),
-    "SBR": (27.0 * _FT,    78.0 * _FT - 18.0 * _FT),
-}
+# Defined once in utils/court_geometry; re-imported here (and re-exported, since
+# evaluation/evaluate_tracking.py imports _REAL_WORLD from this module).
+from utils.court_geometry import _REAL_WORLD
 
 
 class CourtConverter:
@@ -72,10 +64,10 @@ class CourtConverter:
         w = res[:, 2:3]
         # Mark near-horizon rows (|w| ~ 0) and divide safely; those rows become
         # NaN rather than ±inf.
-        bad = np.abs(w[:, 0]) < self._W_EPS
-        safe_w = np.where(np.abs(w) < self._W_EPS, np.nan, w)
+        bad = np.abs(w) < self._W_EPS                   # (N, 1)
+        safe_w = np.where(bad, np.nan, w)
         out = res[:, :2] / safe_w
-        out[bad] = np.nan
+        out[bad[:, 0]] = np.nan
         return out
 
     # ── private ───────────────────────────────────────────────────────────────

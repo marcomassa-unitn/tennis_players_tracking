@@ -7,6 +7,14 @@ import numpy as np
 import pandas as pd
 from ultralytics import YOLO
 
+# Shared fps guard. Dual import so it resolves both standalone
+# (`python tracking/BallTracking.py`, tracking/ on sys.path) and orchestrated
+# (imported as tracking.BallTracking, project root on sys.path via pipeline.py).
+try:
+    from tracking._fps_utils import safe_fps
+except ImportError:
+    from _fps_utils import safe_fps
+
 
 # Minimum YOLO confidence for a ball detection to be accepted.
 BALL_CONF = 0.65
@@ -128,10 +136,8 @@ class BallTracker:
             print("Cannot open video:", video_path)
             return
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
         # Robust fps guard: reject missing / non-finite / non-positive values.
-        if not fps or not np.isfinite(fps) or fps <= 0:
-            fps = 30.0
+        fps = safe_fps(cap.get(cv2.CAP_PROP_FPS))
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         # Pass 1: detect the ball frame by frame, keeping only the tiny

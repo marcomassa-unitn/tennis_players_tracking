@@ -5,6 +5,14 @@ import os
 import cv2
 import numpy as np
 
+# Shared fps guard. Dual import so it resolves both standalone
+# (`python tracking/playerTracking.py`, tracking/ on sys.path) and orchestrated
+# (imported as tracking.playerTracking, project root on sys.path via pipeline.py).
+try:
+    from tracking._fps_utils import safe_fps
+except ImportError:
+    from _fps_utils import safe_fps
+
 
 # Foreground intensity-difference threshold (0-255). Decoupled from fps: an
 # intensity threshold has nothing to do with frame rate. 15 preserves the prior
@@ -38,10 +46,8 @@ class PlayerTracker:
 
         self.warmup_seconds = 1.0
 
-        fps = self.cap.get(cv2.CAP_PROP_FPS)
         # Robust fps guard: reject missing / non-finite / non-positive values.
-        if not fps or not np.isfinite(fps) or fps <= 0:
-            fps = 30.0
+        fps = safe_fps(self.cap.get(cv2.CAP_PROP_FPS))
         self.WARMUP_FRAMES = int(self.warmup_seconds * fps)
         # Intensity difference threshold no longer depends on fps (see DIFF_THRESH).
         self.THRESH = DIFF_THRESH
@@ -312,7 +318,6 @@ class PlayerTracker:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             new_prev.append((cx, cy))
         self.prev_centroids = new_prev
-        return new_prev
 
     def run(self):
         frame_idx = 0

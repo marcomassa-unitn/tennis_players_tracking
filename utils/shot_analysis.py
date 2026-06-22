@@ -66,11 +66,8 @@ from scipy.signal import savgol_filter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_converter import CourtConverter
-
-_FT = 0.3048
-W_m = 27.0 * _FT
-L_m = 78.0 * _FT
-NET = L_m / 2.0
+# Court dimensions shared via utils/court_geometry (formerly redefined here).
+from utils.court_geometry import _FT, W_m, L_m, NET
 
 
 # ── loading ────────────────────────────────────────────────────────────────────
@@ -281,7 +278,7 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
         for pid in (1, 2):
             box = _nearest_box(boxes, f, pid)
             if box is not None and _ball_near_player(ball_xy, box):
-                bx_c = box[0] + box[2] / 2.0
+                bx_c = _box_cx(box)
                 by_c = box[1] + box[3] / 2.0
                 d = np.hypot(ball_xy[0] - bx_c, ball_xy[1] - by_c)
                 if best is None or d < best[1]:
@@ -430,7 +427,7 @@ def _shot_type_features(track, conv, i: int, fps: float,
     """
     Outgoing-trajectory features for the contact at integer array-index ``i`` into
     the (already-smoothed) ball track. Returns a dict of pace, peak_m, tail_m,
-    apex, rise, bb, diefrac, reach, vy_end (any may be NaN on a missing window).
+    apex, rise, bb, diefrac, reach (any may be NaN on a missing window).
     """
     cx = track["cx"].values
     cy = track["cy"].values
@@ -467,10 +464,9 @@ def _shot_type_features(track, conv, i: int, fps: float,
     p2 = _pathlen(cxo30[half:], cyo30[half:])
     diefrac = p2 / p1 if p1 > 1e-6 else np.nan
     reach = _pathlen(cxo30, cyo30) / hc if hc and not np.isnan(hc) else np.nan
-    vy_end = abs(_mean(np.diff(cyo[k - 5:k + 1])))
 
     return dict(pace=pace, peak_m=peak_m, tail_m=tail_m, apex=apex, rise=rise,
-                bb=bb, diefrac=diefrac, reach=reach, vy_end=vy_end)
+                bb=bb, diefrac=diefrac, reach=reach)
 
 
 def classify_shot_type(feats: dict, side: str, params: dict = None) -> str:
@@ -568,10 +564,15 @@ OVERHEAD_PARAMS = {
 }
 
 
+def _box_cx(box):
+    """Horizontal centre (pixels) of a player box (x, y, w, h)."""
+    return box[0] + box[2] / 2.0
+
+
 def _box_feet(box):
     """Feet (mid-bottom) pixel point of a player box (x, y, w, h)."""
     x, y, w, h = box
-    return (x + w / 2.0, y + h)
+    return (_box_cx(box), y + h)
 
 
 def _player_speed_mps(boxes, conv, f, pid, fps, dt=3):
@@ -781,12 +782,11 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         ball_cx = float(np.nanmedian(cx_win))
         ball_cy = float(np.nanmedian(cy_win))
 
-        feet = (box[0] + box[2] / 2.0, box[1] + box[3])
+        feet = _box_feet(box)
         # Player court position (feet) in meters — used by the shot hitmap to
         # place the marker where the PLAYER hit the ball (not where the ball was).
         player_x_m, player_y_m = conv.to_meters(*feet)
-        y_m = player_y_m
-        side = "near" if y_m > NET else "far"
+        side = "near" if player_y_m > NET else "far"
         stroke = classify_stroke(ball_cx, box, side, hands[pid])
 
         # Shot TYPE (flat/slice/dropshot/lob) from the OUTGOING trajectory shape.
@@ -822,7 +822,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                           if feats["pace"] is not None
                           and not np.isnan(feats["pace"]) else None),
             "ball_cx": round(ball_cx, 1), "ball_cy": round(ball_cy, 1),
-            "player_cx": round(box[0] + box[2] / 2.0, 1),
+            "player_cx": round(_box_cx(box), 1),
             "player_x_m": round(player_x_m, 2),
             "player_y_m": round(player_y_m, 2),
             "ball_x_m": round(bx_m, 2), "ball_y_m": round(by_m, 2),

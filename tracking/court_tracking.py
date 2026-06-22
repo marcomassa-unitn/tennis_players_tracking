@@ -5,6 +5,14 @@ import os
 import cv2
 import numpy as np
 
+# Shared fps guard. Dual import so it resolves both standalone
+# (`python tracking/court_tracking.py`, tracking/ on sys.path) and orchestrated
+# (imported as tracking.court_tracking, project root on sys.path via pipeline.py).
+try:
+    from tracking._fps_utils import safe_fps
+except ImportError:
+    from _fps_utils import safe_fps
+
 # ── White HSV bounds ──────────────────────────────────────────────────────────
 LOWER_WHITE = np.array([0,   0, 180], dtype=np.uint8)
 UPPER_WHITE = np.array([180, 50, 255], dtype=np.uint8)
@@ -477,8 +485,9 @@ class CourtTracker:
             # inverted) would make the net band meaningless, so skip net filtering.
             if court_span > 0:
                 net_y = tl[1] + court_span * NET_Y_FRACTION
+                net_band = court_span * NET_Y_BAND
                 dots = [d for d in dots
-                        if abs(d[1] - net_y) > court_span * NET_Y_BAND]
+                        if abs(d[1] - net_y) > net_band]
 
             # 8. Save all 8 named corners to CSV
             keypoints = {**corners, **service}
@@ -494,57 +503,61 @@ class CourtTracker:
             if self.no_display:
                 return keypoints
 
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if not fps or not np.isfinite(fps) or fps <= 0:
-                fps = 30
-            delay = max(1, int(PLAYBACK_DELAY_BASE_MS / fps))
-
-            # Rewind to the first frame. Note: seeking by frame index can be
-            # unreliable on some codecs/containers (it may land on a nearby
-            # keyframe rather than frame 0).
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            quad_pts = np.array([tl, tr, br, bl], dtype=np.int32)
-
-            while True:
-                ret, current_frame = cap.read()
-                if not ret:
-                    break
-
-                # Semi-transparent green fill over the court area
-                overlay = current_frame.copy()
-                cv2.fillPoly(overlay, [quad_pts], (0, 180, 0))
-                cv2.addWeighted(overlay, 0.20, current_frame, 0.80, 0, current_frame)
-
-                # Court boundary outline
-                cv2.polylines(current_frame, [quad_pts], isClosed=True, color=(0, 255, 0), thickness=2)
-
-                # All detected dots — red filled circles
-                for (x, y) in dots:
-                    cv2.circle(current_frame, (x, y), DOT_RADIUS, (0, 0, 255), -1)
-
-                # Court corners — magenta ring + label
-                for label, corner in corners.items():
-                    cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 0, 255), 2)
-                    cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 0, 255), 2)
-
-                # Service-line corners — cyan ring + label; STL gets a red fill too because
-                # it is computed geometrically (not from Hough), so it has no red dot yet.
-                for label, corner in service.items():
-                    if label == "STL":
-                        cv2.circle(current_frame, corner, DOT_RADIUS, (0, 0, 255), -1)
-                    cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 255, 0), 2)
-                    cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
-
-                cv2.imshow("Tennis Court - Video Playback", current_frame)
-                if cv2.waitKey(delay) & 0xFF == ord("q"):
-                    break
-
+            self._play_back(cap, corners, service, dots, tl, tr, bl, br)
             return keypoints
         finally:
             cap.release()
             cv2.destroyAllWindows()
+
+    def _play_back(self, cap, corners, service, dots, tl, tr, bl, br):
+        """Annotated video playback: rewind and draw, per frame, the court fill +
+        outline, all detected dots, and the corner/service-line markers. Display
+        only — writes nothing. The caller owns cap.release()/destroyAllWindows()
+        and the no_display early-return."""
+        fps = safe_fps(cap.get(cv2.CAP_PROP_FPS))
+        delay = max(1, int(PLAYBACK_DELAY_BASE_MS / fps))
+
+        # Rewind to the first frame. Note: seeking by frame index can be
+        # unreliable on some codecs/containers (it may land on a nearby
+        # keyframe rather than frame 0).
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        quad_pts = np.array([tl, tr, br, bl], dtype=np.int32)
+
+        while True:
+            ret, current_frame = cap.read()
+            if not ret:
+                break
+
+            # Semi-transparent green fill over the court area
+            overlay = current_frame.copy()
+            cv2.fillPoly(overlay, [quad_pts], (0, 180, 0))
+            cv2.addWeighted(overlay, 0.20, current_frame, 0.80, 0, current_frame)
+
+            # Court boundary outline
+            cv2.polylines(current_frame, [quad_pts], isClosed=True, color=(0, 255, 0), thickness=2)
+
+            # All detected dots — red filled circles
+            for (x, y) in dots:
+                cv2.circle(current_frame, (x, y), DOT_RADIUS, (0, 0, 255), -1)
+
+            # Court corners — magenta ring + label
+            for label, corner in corners.items():
+                cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 0, 255), 2)
+                cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 0, 255), 2)
+
+            # Service-line corners — cyan ring + label; STL gets a red fill too because
+            # it is computed geometrically (not from Hough), so it has no red dot yet.
+            for label, corner in service.items():
+                if label == "STL":
+                    cv2.circle(current_frame, corner, DOT_RADIUS, (0, 0, 255), -1)
+                cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 255, 0), 2)
+                cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
+
+            cv2.imshow("Tennis Court - Video Playback", current_frame)
+            if cv2.waitKey(delay) & 0xFF == ord("q"):
+                break
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

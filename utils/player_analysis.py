@@ -39,19 +39,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.colors import LinearSegmentedColormap
 from scipy.ndimage import gaussian_filter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_converter import CourtConverter
 
 # ── ITF singles court dimensions ───────────────────────────────────────────────
-_FT   = 0.3048
-W_m   = 27.0 * _FT          # 8.2296 m  width (singles)
-L_m   = 78.0 * _FT          # 23.7744 m length
-SVC_T = 18.0 * _FT          # 5.4864 m  service line far side
-SVC_B = L_m - SVC_T         # 18.288 m  service line near side
-NET   = L_m / 2.0            # 11.8872 m net
-CL_X  = W_m / 2.0            # 4.1148 m  center service line
+# Shared with court_converter / shot_analysis via utils/court_geometry. Imported
+# (not redefined) here; live_view.py reads these as player_analysis.<name>, so the
+# import keeps them as module attributes.
+from utils.court_geometry import W_m, L_m, SVC_T, SVC_B, NET, CL_X
 
 # Player color convention — kept CONSISTENT across every figure (minimap,
 # zones, single heatmaps, combined heatmap legend) so a reader can always map
@@ -70,7 +68,6 @@ _LABELS = {1: "P1 (red)",  2: "P2 (blue)"}
 # cyan→blue). Transparent tails mean overlap reads as "both were here", not mud.
 def _alpha_ramp_cmap(name, rgb_lo, rgb_hi):
     """Colormap going transparent (low density) -> saturated opaque (high)."""
-    from matplotlib.colors import LinearSegmentedColormap
     r0, g0, b0 = rgb_lo
     r1, g1, b1 = rgb_hi
     cdict = {
@@ -113,6 +110,10 @@ _SIDES = [("OL", "outer left"), ("L", "left"), ("R", "right"), ("OR", "outer rig
 _SIDE_X = {"OL": (-_SIDE, 0.0), "L": (0.0, CL_X),
            "R": (CL_X, W_m), "OR": (W_m, W_m + _SIDE)}
 
+# Shared y-axis limits for every court figure: far baseline (y=0) at top, near
+# baseline + run-off at bottom (y inverted to match the camera view).
+_COURT_YLIM = (L_m + _BEHIND + 0.4, -_BEHIND - 0.4)
+
 
 # ── court drawing ──────────────────────────────────────────────────────────────
 
@@ -136,9 +137,19 @@ def _draw_court(ax: plt.Axes) -> None:
     # limits extended to the whole walkable area (lateral and baseline run-off);
     # y inverted: far baseline (y=0) at top, as in the camera view
     ax.set_xlim(-_SIDE - 0.4, W_m + _SIDE + 0.4)
-    ax.set_ylim(L_m + _BEHIND + 0.4, -_BEHIND - 0.4)
+    ax.set_ylim(*_COURT_YLIM)
     ax.set_aspect("equal")
     ax.axis("off")
+
+
+def _save_fig(fig, path) -> None:
+    """Write a figure PNG (dark facecolor preserved), close it and log the path.
+    Shared by the zone and heatmap exports (the animated minimap saves via its
+    own writer, so it is not routed through here)."""
+    fig.savefig(path, dpi=120, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"  Saved: {path}")
 
 
 # ── loading and conversion ─────────────────────────────────────────────────────
@@ -314,7 +325,7 @@ def _save_zone_outputs(player_data: dict, zone_df: pd.DataFrame,
 
     for ax, pid in zip(axes, pids):
         _draw_court(ax)
-        ax.set_ylim(L_m + _BEHIND + 0.4, -_BEHIND - 0.4)
+        ax.set_ylim(*_COURT_YLIM)
         sub_df = zone_df[zone_df["player_id"] == pid]
         pct = dict(zip(sub_df["zone"], sub_df["percent"]))
         max_pct = max(pct.values()) if pct else 1.0
@@ -339,10 +350,7 @@ def _save_zone_outputs(player_data: dict, zone_df: pd.DataFrame,
                      fontsize=11, pad=4)
 
     path = out_dir / "zones.png"
-    fig.savefig(path, dpi=120, bbox_inches="tight",
-                facecolor=fig.get_facecolor())
-    plt.close(fig)
-    print(f"  Saved: {path}")
+    _save_fig(fig, path)
 
 
 # ── heatmap ────────────────────────────────────────────────────────────────────
@@ -375,8 +383,6 @@ _HEAT_BG = "#10101c"
 
 def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
     # same warm/cool convention as _COLORS (P1 warm, P2 cool)
-    cmaps = _HEAT_CMAPS
-
     for pid, sub in player_data.items():
         fig, ax = plt.subplots(figsize=(4, 9))
         fig.patch.set_facecolor(_HEAT_BG)
@@ -385,15 +391,12 @@ def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
         # alpha is baked into the colormap (transparent -> opaque with density),
         # so no flat `alpha=` here: dense zones render fully vivid.
         ax.imshow(H, origin="lower", extent=_HEAT_EXTENT, vmin=0.0, vmax=1.0,
-                  cmap=cmaps.get(pid, "hot"), aspect="auto",
+                  cmap=_HEAT_CMAPS.get(pid, "hot"), aspect="auto",
                   interpolation="bilinear")
         ax.set_title(f"Heatmap – Player {pid}", color="white",
                      fontsize=11, pad=4)
         path = out_dir / f"heatmap_p{pid}.png"
-        fig.savefig(path, dpi=120, bbox_inches="tight",
-                    facecolor=fig.get_facecolor())
-        plt.close(fig)
-        print(f"  Saved: {path}")
+        _save_fig(fig, path)
 
     # combined heatmap — the SAME alpha-ramped maps as the single ones, so each
     # player keeps an identical, recognisable colour. Transparent empty bins let
@@ -417,10 +420,7 @@ def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
               labelcolor="white")
     ax.set_title("Combined heatmap", color="white", fontsize=11, pad=4)
     path = out_dir / "heatmap_combined.png"
-    fig.savefig(path, dpi=120, bbox_inches="tight",
-                facecolor=fig.get_facecolor())
-    plt.close(fig)
-    print(f"  Saved: {path}")
+    _save_fig(fig, path)
 
 
 # ── animated minimap ───────────────────────────────────────────────────────────
