@@ -49,7 +49,15 @@ class PlayerTracker:
         self.KERNEL_SMALL = np.ones((3, 3), np.uint8)
         self.KERNEL_BIG = np.ones((5, 5), np.uint8)
 
+        # Tracking state is kept SEPARATE per foreground method so the warmup
+        # "plain" frame-diff (static median bg) can never corrupt the
+        # running-average ("bg update") tracker, which is the reliable one.
+        #   prev_warmup : identities tracked during the warmup window
+        #   prev_bg     : identities tracked by the running-average background
+        # self.prev_centroids is just the ACTIVE slot for the current frame.
         self.prev_centroids = None
+        self.prev_warmup = None
+        self.prev_bg = None
 
         self.background = None
         # Static, player-free reference background (temporal median of the first
@@ -324,16 +332,21 @@ class PlayerTracker:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 self._update_background(gray)
 
-                # Past the warmup window: use the converged running-average
-                # (update) background, exactly as before. During warmup: fall
-                # back to the static median background so these early frames are
-                # analysed too instead of being skipped.
-                if frame_idx >= self.WARMUP_FRAMES:
-                    mask = self._get_foreground_mask(gray)
-                elif self.static_bg is not None:
-                    mask = self._foreground_from_bg(gray, self.static_bg)
+                # The two foreground methods run on COMPLETELY SEPARATE tracking
+                # state. The warmup "plain" frame-diff (static median bg) handles
+                # only the first WARMUP_FRAMES; the running-average ("bg update")
+                # method handles the rest and RE-SEEDS itself from scratch when it
+                # takes over (prev_bg starts None, so both players are picked from
+                # its own first mask). A bad warmup seed can therefore never make
+                # the bg-update tracker lose a player.
+                warmup = frame_idx < self.WARMUP_FRAMES
+                if warmup:
+                    mask = (self._foreground_from_bg(gray, self.static_bg)
+                            if self.static_bg is not None else None)
+                    self.prev_centroids = self.prev_warmup
                 else:
-                    mask = None
+                    mask = self._get_foreground_mask(gray)
+                    self.prev_centroids = self.prev_bg
 
                 components = []
                 if mask is not None:
@@ -343,6 +356,13 @@ class PlayerTracker:
                 if components:
                     self._draw_players(frame, components)
                     self._write_csv_rows(frame_idx, components)
+
+                # Persist the active state back into its own slot so the warmup
+                # and bg-update trackers never share identities.
+                if warmup:
+                    self.prev_warmup = self.prev_centroids
+                else:
+                    self.prev_bg = self.prev_centroids
 
                 if self.display:
                     vis = cv2.resize(frame, (960, 540))
