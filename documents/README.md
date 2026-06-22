@@ -95,6 +95,21 @@ isolation — the quick start above already covers the normal path.
 
 ## Usage (from the project root)
 
+### 0. Full pipeline (one command)
+
+`pipeline.py` runs the whole chain end-to-end (court → player tracking →
+analysis → motion estimation → ball tracking → shot analysis → evaluation),
+deriving every intermediate path from `--video`:
+
+```bash
+python pipeline.py --video data/Input_video2.mp4          # headless by default
+python pipeline.py --video data/Input_video2.mp4 --display # show OpenCV windows
+```
+
+Each step is wrapped in its own try/except (one failing step is reported and
+skipped, not fatal) and can be skipped with its `--skip-*` flag to reuse CSVs
+already on disk. The individual steps below can also be run on their own.
+
 ### 1. Court keypoint detection
 
 ```bash
@@ -312,6 +327,8 @@ Other flags: `--anchor feet|centroid`, `--min-area`, `--max-shot-markers`,
 
 | Path | Purpose |
 |---|---|
+| `pipeline.py` | unified entry point — runs the whole chain from one command |
+| `live_view.py` | live viewer — video + player/ball boxes + synced minimap |
 | `tracking/court_tracking.py` | court keypoint detection (Hough + ITF proportions) |
 | `tracking/playerTracking.py` | two-player tracking (background subtraction) |
 | `utils/court_converter.py` | pixel → metre homography from the court CSV |
