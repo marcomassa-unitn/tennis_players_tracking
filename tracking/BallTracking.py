@@ -7,19 +7,17 @@ import numpy as np
 import pandas as pd
 from ultralytics import YOLO
 
-# Shared fps guard. Dual import so it resolves both standalone
-# (`python tracking/BallTracking.py`, tracking/ on sys.path) and orchestrated
-# (imported as tracking.BallTracking, project root on sys.path via pipeline.py).
+# Dual import: works standalone (tracking/ on sys.path) and orchestrated
+# (imported as tracking.BallTracking via pipeline.py with project root on path).
 try:
     from tracking._fps_utils import safe_fps
 except ImportError:
     from _fps_utils import safe_fps
 
 
-# Minimum YOLO confidence for a ball detection to be accepted.
+# Min YOLO confidence to accept a ball detection.
 BALL_CONF = 0.65
-# Per-pixel intensity-difference threshold (0-255) used to detect motion
-# inside a candidate box.
+# Per-pixel intensity-diff threshold (0-255) marking a pixel as moved.
 MOTION_THRESH = 15
 
 
@@ -28,10 +26,10 @@ class BallTracker:
         self.model = YOLO(model_path)
 
     def _has_motion(self, prev_gray, curr_gray, x1, y1, x2, y2, threshold=0.05):
-        """Returns True if at least `threshold` fraction of pixels in the box moved."""
+        """True if at least `threshold` fraction of box pixels changed between frames."""
         H, W = curr_gray.shape[:2]
-        # Clamp coords to frame bounds and validate ordering before slicing,
-        # so a bad/empty/out-of-range box never reaches cv2.absdiff().
+        # Clamp to frame bounds and check ordering so a bad/out-of-range box
+        # never reaches cv2.absdiff().
         x1 = max(0, min(int(x1), W))
         x2 = max(0, min(int(x2), W))
         y1 = max(0, min(int(y1), H))
@@ -50,7 +48,7 @@ class BallTracker:
         return (binary.sum() / 255) / total >= threshold
 
     def detect_frame(self, frame, prev_gray=None):
-        """Returns {1: [x1,y1,x2,y2]} for the highest-confidence detection with motion, or {}."""
+        """Highest-confidence detection passing the motion gate as {1: [x1,y1,x2,y2]}, else {}."""
         curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         results = self.model.predict(frame, conf=BALL_CONF, verbose=False)[0]
         for idx in results.boxes.conf.argsort(descending=True):
@@ -61,10 +59,9 @@ class BallTracker:
         return {}, curr_gray
 
     def detect_frames(self, frames):
-        """Returns list of per-frame detection dicts.
+        """Per-frame detection dicts for in-memory frame lists.
 
-        Standalone helper: not used by run()/__main__ (which stream frames one
-        at a time). Kept for callers that already hold all frames in memory.
+        Not used by run()/__main__, which stream frames one at a time.
         """
         ball_positions = []
         prev_gray = None
@@ -74,18 +71,16 @@ class BallTracker:
         return ball_positions
 
     def interpolate_ball_positions(self, ball_positions):
-        """Fills gaps with linear interpolation, extending to both ends.
+        """Linearly fill detection gaps, extending past both ends.
 
-        limit_direction="both" interpolates interior gaps and also propagates
-        the nearest values outward, so trailing gaps after the last detection
-        (and leading gaps before the first) aren't left NaN and silently
-        dropped downstream. bfill/ffill cover any all-NaN edge rows.
+        limit_direction="both" also propagates nearest values outward so
+        leading/trailing gaps aren't left NaN and dropped downstream; bfill/ffill
+        cover all-NaN edge rows.
 
-        Returns (filled_positions, real_mask) where real_mask[i] is True iff
-        frame i carried a genuine YOLO detection (a 4-value bbox) BEFORE filling.
-        Downstream (shot analysis) needs this to tell real positions from
-        interpolated straight-line fills, whose junction with real motion would
-        otherwise look like a racket contact and produce a false shot.
+        Returns (filled_positions, real_mask); real_mask[i] is True only where
+        frame i held a genuine 4-value YOLO bbox before filling. Shot analysis
+        needs this: a straight-line fill meeting real motion mimics a racket
+        contact and would trigger a false shot.
         """
         real_mask = [len(p.get(1, [])) == 4 for p in ball_positions]
         positions_list = [p.get(1, []) for p in ball_positions]
@@ -95,7 +90,7 @@ class BallTracker:
         return [{1: row} for row in df.to_numpy().tolist()], real_mask
 
     def draw_bboxes(self, frames, ball_positions):
-        """Draws ball bounding boxes on copies of the input frames."""
+        """Draw ball boxes on copies of the frames (originals untouched)."""
         output = []
         for frame, pos in zip(frames, ball_positions):
             out = frame.copy()
@@ -109,10 +104,8 @@ class BallTracker:
         return output
 
     def _write_csv(self, csv_path, ball_positions, real_mask=None):
-        # `interpolated` is appended as the LAST column (0 = real YOLO detection,
-        # 1 = interpolated fill) so existing readers that index the first 8
-        # columns by position, or by name, are unaffected. real_mask=None keeps
-        # backwards-compatible behaviour (everything written as real).
+        # `interpolated` is the LAST column (0=real, 1=fill) so readers indexing
+        # the first 8 columns stay unaffected. real_mask=None => all marked real.
         with open(csv_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["frame", "x", "y", "w", "h", "cx", "cy", "area",
@@ -136,17 +129,16 @@ class BallTracker:
             print("Cannot open video:", video_path)
             return
 
-        # Robust fps guard: reject missing / non-finite / non-positive values.
+        # Rejects missing / non-finite / non-positive fps.
         fps = safe_fps(cap.get(cv2.CAP_PROP_FPS))
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        # Pass 1: detect the ball frame by frame, keeping only the tiny
-        # per-frame positions. Frames are released immediately (never held
-        # all at once) so memory stays bounded even on long 1080p clips.
+        # Pass 1: detect frame by frame, keeping only the tiny position dicts.
+        # Frames are dropped immediately so memory stays bounded on long clips.
         print(f"Detecting ball in {total or '?'} frames...")
         ball_positions = []
         prev_gray = None
-        # try/finally guarantees the Pass-1 capture is released even on error.
+        # Release the capture even if detection raises.
         try:
             while True:
                 ret, frame = cap.read()
@@ -171,17 +163,14 @@ class BallTracker:
         cap = cv2.VideoCapture(video_path)
         writer = None
         idx = 0
-        # try/finally guarantees the Pass-2 capture AND the VideoWriter are
-        # released even on error, so the output .mp4 is always finalized.
+        # Release capture AND writer even on error, so the .mp4 is finalized.
         try:
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
-                # Assumes Pass 1 and Pass 2 read the same number of frames in
-                # the same order (true for constant-frame-rate files). The
-                # idx < len(...) guard prevents IndexError, but variable-frame-
-                # rate (VFR) input could desync detections from frames here.
+                # Assumes both passes read the same frames in order (true for
+                # CFR). The guard avoids IndexError; VFR input could desync.
                 pos = ball_positions[idx] if idx < len(ball_positions) else {}
                 out = self.draw_bboxes([frame], [pos])[0]
 
@@ -229,9 +218,8 @@ if __name__ == "__main__":
                         help="run headless (no OpenCV window)")
     args = parser.parse_args()
 
-    # Derive the CSV name from the input video when not given explicitly, so a
-    # different --video produces a distinct output instead of overwriting the
-    # previous run's file (mirrors playerTracking.py).
+    # Default CSV name from the video stem so distinct --video inputs don't
+    # overwrite each other (mirrors playerTracking.py).
     if args.csv is None:
         video_stem = os.path.splitext(os.path.basename(args.video))[0]
         args.csv = os.path.join("outputs", "ball_coordinates",

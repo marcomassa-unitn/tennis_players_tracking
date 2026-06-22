@@ -5,22 +5,19 @@ import os
 import cv2
 import numpy as np
 
-# Shared fps guard. Dual import so it resolves both standalone
-# (`python tracking/playerTracking.py`, tracking/ on sys.path) and orchestrated
-# (imported as tracking.playerTracking, project root on sys.path via pipeline.py).
+# Dual import so safe_fps resolves both standalone (tracking/ on sys.path) and
+# orchestrated as tracking.playerTracking (project root on sys.path via pipeline.py).
 try:
     from tracking._fps_utils import safe_fps
 except ImportError:
     from _fps_utils import safe_fps
 
 
-# Foreground intensity-difference threshold (0-255). Decoupled from fps: an
-# intensity threshold has nothing to do with frame rate. 15 preserves the prior
-# 30fps behaviour (0.5 * 30 == 15) used in cv2.threshold().
+# Foreground intensity-difference threshold (0-255), fps-independent. 15
+# reproduces the old 30fps behaviour (0.5 * 30).
 DIFF_THRESH = 15
 
-# Minimum connected-component area (in pixels) for a blob to be considered a
-# player candidate. Filters out tiny noise components below this size.
+# Min connected-component area (px) to count as a player candidate; rejects noise.
 MIN_COMPONENT_AREA = 300
 
 
@@ -33,8 +30,7 @@ class PlayerTracker:
 
         ret, frame = self.cap.read()
         if not ret:
-            # Release the capture before raising so it isn't leaked when
-            # construction fails on an unreadable first frame.
+            # Release before raising so the capture isn't leaked on failure.
             self.cap.release()
             raise RuntimeError("Cannot read first frame")
         self.H, self.W = frame.shape[:2]
@@ -46,32 +42,28 @@ class PlayerTracker:
 
         self.warmup_seconds = 1.0
 
-        # Robust fps guard: reject missing / non-finite / non-positive values.
+        # safe_fps rejects missing / non-finite / non-positive values.
         fps = safe_fps(self.cap.get(cv2.CAP_PROP_FPS))
         self.WARMUP_FRAMES = int(self.warmup_seconds * fps)
-        # Intensity difference threshold no longer depends on fps (see DIFF_THRESH).
         self.THRESH = DIFF_THRESH
 
         self.KERNEL_SMALL = np.ones((3, 3), np.uint8)
         self.KERNEL_BIG = np.ones((5, 5), np.uint8)
 
-        # Tracking state is kept SEPARATE per foreground method so the warmup
-        # "plain" frame-diff (static median bg) can never corrupt the
-        # running-average ("bg update") tracker, which is the reliable one.
-        #   prev_warmup : identities tracked during the warmup window
-        #   prev_bg     : identities tracked by the running-average background
-        # self.prev_centroids is just the ACTIVE slot for the current frame.
+        # Per-method tracking state so the warmup static-median tracker can never
+        # corrupt the reliable running-average ("bg update") one.
+        #   prev_warmup : identities during the warmup window
+        #   prev_bg     : identities under the running-average background
+        # prev_centroids is just the ACTIVE slot for the current frame.
         self.prev_centroids = None
         self.prev_warmup = None
         self.prev_bg = None
 
         self.background = None
-        # Static, player-free reference background (temporal median of the first
-        # WARMUP_FRAMES frames). Used for plain background subtraction during the
-        # warmup window while the running-average model converges; None until the
-        # pre-pass in run() builds it.
+        # Player-free reference (temporal median of the first WARMUP_FRAMES);
+        # built by the run() pre-pass. None until then.
         self.static_bg = None
-        # Playback delay (ms) passed to cv2.waitKey() between displayed frames.
+        # waitKey() playback delay (ms) between displayed frames.
         self.frame_ms = 5
 
         self.csv_path = csv_path
@@ -115,9 +107,8 @@ class PlayerTracker:
             cv2.accumulateWeighted(gray, self.background, self.ALPHA)
 
     def _foreground_from_bg(self, gray, bg_uint8):
-        """Threshold + clean the absolute difference of `gray` against a uint8
-        background image, returning the binary foreground mask. Shared by both
-        the running-average (update) and the static (warmup) backgrounds."""
+        """Binary foreground mask from |gray - bg|, thresholded and morphologically
+        cleaned. Shared by the running-average and static (warmup) backgrounds."""
         diff = cv2.absdiff(gray, bg_uint8)
 
         _, fg = cv2.threshold(diff, self.THRESH, 255, cv2.THRESH_BINARY)
@@ -135,16 +126,12 @@ class PlayerTracker:
         return self._foreground_from_bg(gray, bg_uint8)
 
     def _compute_static_background(self):
-        """Pre-pass: build a static, player-free reference background from the
-        temporal median of the first WARMUP_FRAMES frames, then rewind.
+        """Build static_bg from the temporal median of the first WARMUP_FRAMES, then rewind.
 
-        The running-average background needs ~WARMUP_FRAMES to converge, so the
-        original tracker simply skipped detection during that window. Instead we
-        detect those early frames against this static median background (classic
-        "plain" background subtraction): moving players are averaged out by the
-        median, leaving the empty court. The running-average model is still
-        warmed up in parallel and takes over unchanged once the warmup window
-        ends, so frame >= WARMUP_FRAMES behaviour is preserved exactly.
+        Lets the warmup window detect against a player-free court (median averages
+        moving players out) instead of skipping detection while the running-average
+        model converges. That model warms up in parallel and takes over unchanged at
+        frame >= WARMUP_FRAMES.
         """
         frames = []
         for _ in range(max(self.WARMUP_FRAMES, 1)):
@@ -153,7 +140,7 @@ class PlayerTracker:
                 break
             frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
 
-        # Rewind so the main loop processes the video from the very first frame.
+        # Rewind so the main loop starts from frame 0.
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         if frames:
@@ -168,7 +155,7 @@ class PlayerTracker:
         candidates = []
         for i in range(1, num_labels):
             x, y, w, h, area = stats[i]
-            # Gate out tiny noise blobs below the minimum area threshold.
+            # Drop sub-threshold noise blobs.
             if area < MIN_COMPONENT_AREA:
                 continue
             cx, cy = centroids[i]
@@ -185,14 +172,10 @@ class PlayerTracker:
         if self.prev_centroids is None:
             comps = candidates[:2]
         elif len(self.prev_centroids) == 2:
-            # Stable two-player association: pick the 2x2 assignment with the
-            # minimum total displacement so identities don't swap when the
-            # players cross (greedy-nearest would otherwise flip them).
             comps = self._associate_two(candidates)
-            # Each comp is already bound to a distinct tracked identity, so the
-            # "too close -> merge" rule must NOT fire here: it would delete the
-            # smaller (far) player whenever the two centroids are within
-            # MIN_DIST, which is exactly how P2 was being lost.
+            # Comps are already bound to distinct identities; the merge rule would
+            # delete the far player when centroids fall within MIN_DIST (this is
+            # how P2 was being lost), so disable it here.
             merge_allowed = False
         else:
             comps = []
@@ -214,9 +197,8 @@ class PlayerTracker:
                     comps.append(candidates[best_idx])
                     used.add(best_idx)
 
-            # Fallback to reach two players: only borrow an unused candidate
-            # that is itself within MAX_MOVE of one of the previous centroids.
-            # Never teleport in an arbitrary far blob.
+            # Borrow an unused candidate to reach two players, but only one within
+            # MAX_MOVE of a previous centroid -- never teleport in a far blob.
             if len(comps) < 2 and self.prev_centroids:
                 for idx, cand in enumerate(candidates):
                     if idx in used:
@@ -233,9 +215,8 @@ class PlayerTracker:
                     if len(comps) == 2:
                         break
 
-        # "Two players too close -> merge": collapse to one box when two
-        # detections are nearer than MIN_DIST. Handle the >2 case defensively
-        # too (keep the first, drop any others that crowd it).
+        # Collapse detections nearer than MIN_DIST to a single box; for >2,
+        # keep the first and drop any that crowd it.
         if merge_allowed and len(comps) >= 2:
             _, _, _, _, _, cx1, cy1 = comps[0]
             merged = [comps[0]]
@@ -248,12 +229,11 @@ class PlayerTracker:
         return comps
 
     def _associate_two(self, candidates):
-        """Associate exactly two previous identities to current detections by
-        the minimum-total-displacement 2x2 assignment (respecting MAX_MOVE).
+        """Match the two prior identities to detections via the global
+        minimum-total-displacement 2x2 assignment (respecting MAX_MOVE).
 
-        Returns up to two components ordered to match self.prev_centroids, so
-        comps[0] stays player 1 and comps[1] stays player 2 across crossings.
-        Logs when an identity is lost / re-acquired.
+        Returns up to two components ordered to match self.prev_centroids so
+        identities survive a crossing. Logs identity loss / re-acquisition.
         """
         (p0x, p0y), (p1x, p1y) = self.prev_centroids
 
@@ -261,17 +241,15 @@ class PlayerTracker:
             _, _, _, _, _, cx, cy = cand
             return np.hypot(cx - px, cy - py)
 
-        # Each identity may match ANY candidate, not just the two largest by
-        # area: the far player is small and would otherwise be excluded whenever
-        # the near player's foreground fragments into the two biggest blobs.
-        # Pick the global minimum-total-displacement assignment of the two
-        # previous identities to two distinct candidates so identities don't
-        # swap when the players cross.
+        # Allow ANY candidate (not just the two largest): the far player is small
+        # and would be excluded if the near player's blob fragments into the two
+        # biggest. Global min-total-displacement over distinct candidates keeps
+        # identities stable across a crossing.
         comps = [None, None]
         if len(candidates) >= 2:
             best_cost = None
             best_pair = None
-            # Search all ordered pairs (i != j): i -> identity 0, j -> identity 1.
+            # Ordered pairs (i != j): i -> identity 0, j -> identity 1.
             for i, ci in enumerate(candidates):
                 di0 = d(p0x, p0y, ci)
                 for j, cj in enumerate(candidates):
@@ -287,15 +265,15 @@ class PlayerTracker:
             if d(p1x, p1y, cj) <= self.MAX_MOVE:
                 comps[1] = cj
         else:
-            # Single candidate: assign it to whichever identity it is closest to
-            # (within MAX_MOVE); the other identity is left unmatched.
+            # Single candidate: give it to the nearer identity (within MAX_MOVE);
+            # the other stays unmatched.
             only = candidates[0]
             d0, d1 = d(p0x, p0y, only), d(p1x, p1y, only)
             slot = 0 if d0 <= d1 else 1
             if min(d0, d1) <= self.MAX_MOVE:
                 comps[slot] = only
 
-        # Log identity loss / re-acquisition per slot (player_id == slot + 1).
+        # Log per-slot loss / re-acquisition (player_id == slot + 1).
         for slot in range(2):
             had = slot < len(self.prev_centroids)
             has = comps[slot] is not None
@@ -305,7 +283,7 @@ class PlayerTracker:
             elif not had and has:
                 print(f"[playerTracking] Identity re-acquired for player {slot + 1}")
 
-        # Drop unmatched slots, preserving order so player_id mapping is stable.
+        # Drop unmatched slots; order preserved to keep player_id stable.
         return [c for c in comps if c is not None]
 
     def _draw_players(self, frame, components):
@@ -321,13 +299,11 @@ class PlayerTracker:
 
     def run(self):
         frame_idx = 0
-        # Build the static warmup background before the main loop (this reads and
-        # rewinds the first WARMUP_FRAMES frames).
+        # Reads and rewinds the first WARMUP_FRAMES to build static_bg.
         self._compute_static_background()
         self._open_csv()
 
-        # try/finally guarantees the capture is released and the CSV is closed
-        # even if an exception is raised mid-loop.
+        # finally guarantees capture release + CSV close even on mid-loop error.
         try:
             while True:
                 ret, frame = self.cap.read()
@@ -337,13 +313,11 @@ class PlayerTracker:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 self._update_background(gray)
 
-                # The two foreground methods run on COMPLETELY SEPARATE tracking
-                # state. The warmup "plain" frame-diff (static median bg) handles
-                # only the first WARMUP_FRAMES; the running-average ("bg update")
-                # method handles the rest and RE-SEEDS itself from scratch when it
-                # takes over (prev_bg starts None, so both players are picked from
-                # its own first mask). A bad warmup seed can therefore never make
-                # the bg-update tracker lose a player.
+                # The two foreground methods keep separate tracking state. Warmup
+                # (static median bg) handles the first WARMUP_FRAMES; the
+                # running-average method handles the rest and re-seeds from scratch
+                # on takeover (prev_bg starts None), so a bad warmup seed can't make
+                # it lose a player.
                 warmup = frame_idx < self.WARMUP_FRAMES
                 if warmup:
                     mask = (self._foreground_from_bg(gray, self.static_bg)
@@ -362,8 +336,8 @@ class PlayerTracker:
                     self._draw_players(frame, components)
                     self._write_csv_rows(frame_idx, components)
 
-                # Persist the active state back into its own slot so the warmup
-                # and bg-update trackers never share identities.
+                # Persist active state into its own slot so the trackers never
+                # share identities.
                 if warmup:
                     self.prev_warmup = self.prev_centroids
                 else:
@@ -400,9 +374,8 @@ if __name__ == "__main__":
                         help="run headless (no OpenCV windows)")
     args = parser.parse_args()
 
-    # Derive the CSV name from the input video when not given explicitly, so a
-    # different --video produces a distinct output instead of overwriting the
-    # previous run's file.
+    # Default the CSV name to the video stem so different --video inputs don't
+    # overwrite each other.
     if args.csv is None:
         video_stem = os.path.splitext(os.path.basename(args.video))[0]
         args.csv = os.path.join("outputs", "player_coordinates",

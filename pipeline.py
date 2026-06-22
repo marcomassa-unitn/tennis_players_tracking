@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
-"""Unified entry point for the tennis players tracking pipeline.
+"""Single-command driver for the full tennis-tracking chain.
 
-Runs the full chain end-to-end from a single command:
+Stages, in order:
 
     court detection -> player tracking -> player analysis ->
     motion estimation -> ball tracking -> shot analysis -> evaluation
 
-All intermediate paths are derived from --video and --output, so a typical
-run is simply:
+All intermediate paths derive from --video and --output, so a typical run is
+just `python pipeline.py --video data/Input_video2.mp4`.
 
-    python pipeline.py --video data/Input_video2.mp4
+Headless by default (no OpenCV windows). --display enables interactive
+windows; --no-display is kept for backward compatibility and also forces
+headless. Every step runs in its own try/except so one failure (missing
+model, bad path) is reported and skipped, never aborting the run; the end
+summary lists succeeded/skipped/failed steps.
 
-The pipeline is HEADLESS BY DEFAULT (no OpenCV windows / batch mode). Pass
---display to enable interactive windows; --no-display is still accepted for
-backward compatibility and forces headless. Each step is wrapped in its own
-try/except, so one failing step (a missing model, a bad path) is reported and
-skipped rather than aborting the whole run; a summary at the end lists which
-steps succeeded, were skipped, or failed.
-
-Each step can be skipped with its --skip-* flag (reusing any CSV already on
-disk). Steps are run by importing and calling the underlying module classes
-and functions directly -- no subprocess. The class-based modules (court,
-player, ball trackers) are instantiated; the function-based modules
-(player_analysis, optical_flow, block_matching, shot_analysis) are driven by
-temporarily overriding sys.argv and calling their unchanged main(), so every
-per-module CLI keeps working exactly as documented in the README.
+Any step is skippable via --skip-* (reusing a CSV already on disk). Steps
+call the underlying module code directly -- no subprocess. Class-based
+modules (court/player/ball trackers) are instantiated; function-based modules
+(player_analysis, optical_flow, block_matching, shot_analysis) run via their
+unchanged main() under a temporarily overridden sys.argv, so each per-module
+CLI behaves exactly as the README documents.
 """
 
 import argparse
@@ -32,9 +28,8 @@ import contextlib
 import os
 import sys
 
-# Project root = directory of this file. Ensure it is importable so that the
-# package directories (tracking/, utils/, ...) resolve as
-# namespace packages regardless of the current working directory.
+# Put this file's directory on sys.path so tracking/, utils/, ... resolve as
+# namespace packages regardless of the cwd.
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -44,7 +39,7 @@ DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "ball_tracker.pt")
 
 @contextlib.contextmanager
 def _override_argv(argv):
-    """Temporarily replace sys.argv with `argv` for a module main() call."""
+    """Swap sys.argv to `argv` for the duration of a module main() call."""
     saved = sys.argv
     sys.argv = list(argv)
     try:
@@ -54,17 +49,16 @@ def _override_argv(argv):
 
 
 def _ensure_parent(path):
-    """Make sure the parent directory of `path` exists."""
+    """Create the parent directory of `path` if needed."""
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
 
 
 def _resolve_fps(video):
-    """Read the real frame rate from `video`, falling back to 30.0.
+    """Frame rate of `video`, or 30.0 if unreadable/invalid.
 
-    Imports cv2/numpy lazily so the pipeline can still be parsed/--help'd in
-    environments without OpenCV installed.
+    cv2/numpy are imported lazily so --help works without OpenCV installed.
     """
     fps = None
     try:
@@ -86,15 +80,13 @@ def _resolve_fps(video):
 # Path derivation
 # --------------------------------------------------------------------------- #
 def derive_paths(video, output):
-    """Derive every intermediate artifact path from the video and output dir."""
+    """Map of every intermediate artifact path, keyed off the video stem."""
     output = output.rstrip("/\\") or "outputs"
     stem = os.path.splitext(os.path.basename(video))[0]          # e.g. Input_video2
 
-    # Every artifact is named after the video stem and lives in its own
-    # per-modality subfolder, matching each module's standalone default:
-    #   playerTracking -> outputs/player_coordinates/players_<stem>.csv
-    #   BallTracking   -> outputs/ball_coordinates/ball_<stem>.csv
-    #   court_tracking -> outputs/court_coordinates/<stem>_court.csv
+    # Each artifact is named after the stem in its own per-modality subfolder,
+    # matching each module's standalone default (e.g. player_coordinates/,
+    # ball_coordinates/, court_coordinates/).
     return {
         "video": video,
         "output": output,
@@ -124,10 +116,9 @@ def step_court(p, args, produced):
         return
 
     from tracking.court_tracking import CourtTracker
-    # Court detection finishes (and writes the CSV) before the interactive
-    # playback loop in run(); that loop is a standalone-CLI visualization only,
-    # so we always run it headless here -- it would otherwise block the pipeline
-    # waiting for a keypress (and can exhaust memory on long videos).
+    # Force headless: run()'s trailing playback loop is standalone-CLI viz only,
+    # and would otherwise block on a keypress (and can OOM on long videos). The
+    # CSV is already written before that loop.
     keypoints = CourtTracker(
         video_path=p["video"],
         no_display=True,
@@ -177,7 +168,7 @@ def step_analysis(p, args, produced):
         "--anchor", args.anchor,
     ]
     if args.no_display:
-        # Skip the (slow) minimap animation when running headless/batch.
+        # Minimap animation is slow; drop it in batch mode.
         argv.append("--no-animation")
     with _override_argv(argv):
         player_analysis.main()
@@ -197,8 +188,8 @@ def step_motion(p, args, produced):
     os.makedirs(p["motion_dir"], exist_ok=True)
 
     # --- Optical flow ---
-    # Dense optical flow is expensive; cap the number of frames so a long video
-    # doesn't dominate the whole run. --flow-frames 0 means the whole video.
+    # Dense flow is expensive; --flow-frames caps the frame count (0 = whole
+    # video) so a long clip doesn't dominate the run.
     from motionEstimation import optical_flow
     of_argv = [
         "optical_flow",
@@ -231,8 +222,7 @@ def step_ball(p, args, produced):
     if args.skip_ball:
         print("Skipped (--skip-ball).")
         return
-    # Ball tracking is expensive: if it has already been run, reuse the CSV
-    # instead of recomputing it.
+    # Expensive: reuse an existing CSV rather than recompute.
     if os.path.exists(p["ball_csv"]):
         print(f"Already done; reusing existing {p['ball_csv']}.")
         produced["ball_csv"] = p["ball_csv"]
@@ -256,7 +246,7 @@ def step_ball(p, args, produced):
     tracker = BallTracker(model_path)
     tracker.run(
         p["video"],
-        output_path=None,                 # CSV only in pipeline mode
+        output_path=None,                 # no annotated video; CSV only here
         csv_path=p["ball_csv"],
         display=not args.no_display,
     )
@@ -272,9 +262,8 @@ def step_shots(p, args, produced):
     if not os.path.exists(p["players_csv"]):
         print(f"Skipped: players CSV not found ({p['players_csv']}).")
         return
-    # shot_analysis treats --ball as required and exits (SystemExit) if the file
-    # is missing; ball tracking may have been skipped (no weights / no
-    # ultralytics), so guard here instead of passing a nonexistent path.
+    # shot_analysis requires --ball and SystemExits without it; ball tracking
+    # may have been skipped, so guard rather than pass a nonexistent path.
     if not os.path.exists(p["ball_csv"]):
         print("Skipped: ball CSV not found (run ball tracking first).")
         return
@@ -293,7 +282,7 @@ def step_shots(p, args, produced):
         "--output", p["shots_dir"],
     ]
     if args.no_display:
-        # Don't dump per-shot frames when running headless/batch.
+        # Skip per-shot frame dumps in batch mode.
         argv.append("--no-frames")
     with _override_argv(argv):
         shot_analysis.main()
@@ -344,8 +333,8 @@ def build_parser():
     parser.add_argument("--fps", type=float, default=None,
                         help="video frame rate (default: auto-read from the "
                              "input video, falling back to 30)")
-    # Headless by default. --display turns windows on; --no-display is kept for
-    # backward compatibility and forces headless (see main()).
+    # Headless by default. --display turns windows on; --no-display forces
+    # headless (kept for backward compatibility -- see main()).
     parser.add_argument("--display", action="store_true", dest="display",
                         help="enable interactive OpenCV windows (default: headless)")
     parser.add_argument("--no-display", action="store_true", dest="no_display",
@@ -400,7 +389,7 @@ def build_parser():
     return parser
 
 
-# Ordered (name, function) list so main() can drive + report on every step.
+# Execution order; main() iterates this to run and report on each step.
 STEPS = [
     ("court", step_court),
     ("tracking", step_tracking),
@@ -415,11 +404,11 @@ STEPS = [
 def main():
     args = build_parser().parse_args()
 
-    # Headless by default: with no flags args.display is False -> no_display
-    # True. --display turns windows on; --no-display always forces headless.
+    # No flags -> display False -> headless. --display opts in; --no-display
+    # always forces headless.
     args.no_display = args.no_display or (not args.display)
 
-    # Resolve fps from the source video unless the user gave an explicit value.
+    # Auto-detect fps unless explicitly given.
     if args.fps is None:
         args.fps = _resolve_fps(args.video)
 
@@ -432,11 +421,10 @@ def main():
     print(f"  fps   : {args.fps}")
     print(f"  mode  : {'headless' if args.no_display else 'display'}")
 
-    # Run each step in isolation: a failure (including SystemExit raised by a
-    # sub-module's argparse) is reported and recorded, then we move on. One bad
-    # step must not abort the whole pipeline. A step that runs without error but
-    # records no artifact (e.g. a --skip-* or a missing-input early return) is
-    # classified as "skipped"; one that records/ reuses its artifact "succeeded".
+    # Each step runs in isolation: any failure (including SystemExit from a
+    # sub-module's argparse) is recorded and we continue. A step that returns
+    # without recording an artifact (--skip-* or missing-input early return)
+    # counts as "skipped"; one that records/reuses an artifact "succeeded".
     succeeded, skipped, failed = [], [], []
     for idx, (name, func) in enumerate(STEPS, start=1):
         before = set(produced)
@@ -453,8 +441,8 @@ def main():
 
     print("\n=== Pipeline complete ===")
 
-    # Per-step status. The `produced` map below is the accurate record of the
-    # real artifacts (only populated when a step actually ran / reused / wrote).
+    # `produced` is the source of truth for real artifacts -- only populated
+    # when a step actually ran, reused, or wrote one.
     print("Steps:")
     print(f"  succeeded: {', '.join(succeeded) if succeeded else '(none)'}")
     print(f"  skipped  : {', '.join(skipped) if skipped else '(none)'}")

@@ -33,7 +33,7 @@ import os
 
 import cv2
 
-DISPLAY_W = 1280  # annotation window width (coords are scaled back)
+DISPLAY_W = 1280  # display width; clicks are divided back to source coords
 
 COURT_LABELS = ["TL", "TR", "BL", "BR", "STL", "STR", "SBL", "SBR"]
 COURT_HINTS = {
@@ -49,10 +49,9 @@ COURT_HINTS = {
 
 
 def _scaled(frame):
+    """Resize for display and return (resized_frame, scale). Never upscales."""
     h, w = frame.shape[:2]
-    # Cap the display scale at 1.0: never enlarge a frame narrower than
-    # DISPLAY_W, otherwise we upscale past the source resolution and waste
-    # precision (annotated coords are divided back by `s` anyway).
+    # Cap scale at 1.0 so a frame narrower than DISPLAY_W stays at native res.
     s = min(1.0, DISPLAY_W / w)
     return cv2.resize(frame, (int(w * s), int(h * s))), s
 
@@ -60,6 +59,7 @@ def _scaled(frame):
 # ── boxes mode ─────────────────────────────────────────────────────────────────
 
 def annotate_boxes(video, step, start, output):
+    """Draw P1 (near) and P2 (far) boxes every `step` frames; write a GT CSV."""
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video}")
@@ -86,13 +86,9 @@ def annotate_boxes(video, step, start, output):
                         (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                         (0, 255, 255), 2)
             roi = cv2.selectROI("annotate", view, showCrosshair=True)
-            # A zero-AREA roi (w==0 or h==0) is treated as "no box for this
-            # player". selectROI returns the fully-empty (0,0,0,0) both for a
-            # plain ENTER and for ESC, and a one-axis drag yields e.g.
-            # (x,y,w,0); none of these is a usable box, so we route them all
-            # through the skip/quit prompt rather than appending a degenerate
-            # zero-area box. (selectROI gives no way to tell ESC from an empty
-            # confirm apart, hence the explicit prompt below.)
+            # Zero-area roi == "skip this player". selectROI returns (0,0,0,0)
+            # for both plain ENTER and ESC (and a one-axis drag gives w or h==0),
+            # with no way to tell them apart, so we fall through to the prompt.
             rx, ry, rw, rh = roi
             if rw == 0 or rh == 0:
                 view2 = view.copy()
@@ -105,7 +101,7 @@ def annotate_boxes(video, step, start, output):
                     quit_all = True
                     break
                 continue
-            x, y, w, h = (int(round(c / s)) for c in roi)
+            x, y, w, h = (int(round(c / s)) for c in roi)  # back to source coords
             rows.append([frame_idx, pid, x, y, w, h])
             print(f"  frame {frame_idx}  P{pid}: x={x} y={y} w={w} h={h}")
 
@@ -124,6 +120,7 @@ def annotate_boxes(video, step, start, output):
 # ── court mode ─────────────────────────────────────────────────────────────────
 
 def annotate_court(video, frame_no, output):
+    """Click the 8 court keypoints on one frame; write label,x,y CSV."""
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video}")
@@ -134,9 +131,10 @@ def annotate_court(video, frame_no, output):
         raise RuntimeError(f"Cannot read frame {frame_no}")
 
     disp, s = _scaled(frame)
-    points = []   # [(label, x_orig, y_orig)]
+    points = []   # collected as (label, x_source, y_source)
 
     def on_mouse(event, x, y, flags, param):
+        # Record next keypoint at source-resolution coords; ignore extra clicks.
         if event == cv2.EVENT_LBUTTONDOWN and len(points) < len(COURT_LABELS):
             label = COURT_LABELS[len(points)]
             points.append((label, int(round(x / s)), int(round(y / s))))
@@ -164,7 +162,7 @@ def annotate_court(video, frame_no, output):
         key = cv2.waitKey(30) & 0xFF
         if key == ord("u") and points:
             points.pop()
-        elif key in (13, 10) and len(points) == len(COURT_LABELS):
+        elif key in (13, 10) and len(points) == len(COURT_LABELS):  # CR/LF = save
             break
         elif key == ord("q"):
             cv2.destroyAllWindows()
@@ -183,6 +181,7 @@ def annotate_court(video, frame_no, output):
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main():
+    """Dispatch to the boxes or court annotator per the CLI subcommand."""
     parser = argparse.ArgumentParser(description="Ground-truth annotation tool")
     sub = parser.add_subparsers(dest="mode", required=True)
 

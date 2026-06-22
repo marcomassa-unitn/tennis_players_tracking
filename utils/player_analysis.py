@@ -1,24 +1,15 @@
 """
-utils/player_analysis.py
+Project player pixel positions to court meters (via CourtConverter) and emit
+movement analytics.
 
-Converts the players' pixel positions into real-world coordinates (meters)
-through CourtConverter and generates:
-  - minimap.gif           top-down animation of the court
-  - heatmap_p1/p2.png     density map per player
-  - heatmap_combined.png  both overlaid
-  - speed_stats.csv       per-frame speed in km/h
-  - zone_stats.csv        time spent in each zone of the court
-  - zones.png             zone occupancy drawn on the court
-  + statistics summary in the terminal
+Outputs: minimap.gif, heatmap_p1/p2.png, heatmap_combined.png, speed_stats.csv,
+zone_stats.csv, zones.png, plus a terminal summary.
 
-The point projected to the ground is by default the feet point (bottom-center
-of the bounding box): the body centroid is ~1 m above the ground and the
-homography would project it much farther from the net than it really is.
+Ground anchor defaults to the feet point (bbox bottom-center): projecting the
+body centroid (~1 m off the ground) through the homography lands it far past the
+net.
 
-Quick use (from project root):
     python utils/player_analysis.py
-
-Full use:
     python utils/player_analysis.py \\
         --players outputs/player_coordinates/players_Input_video2.csv \\
         --court   outputs/court_coordinates/Input_video2_court.csv \\
@@ -46,45 +37,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_converter import CourtConverter
 
 # ── ITF singles court dimensions ───────────────────────────────────────────────
-# Shared with court_converter / shot_analysis via utils/court_geometry. Imported
-# (not redefined) here; live_view.py reads these as player_analysis.<name>, so the
-# import keeps them as module attributes.
+# Shared via utils/court_geometry; imported (not redefined) so live_view.py can
+# read them as player_analysis.<name> module attributes.
 from utils.court_geometry import W_m, L_m, SVC_T, SVC_B, NET, CL_X
 
-# Player color convention — kept CONSISTENT across every figure (minimap,
-# zones, single heatmaps, combined heatmap legend) so a reader can always map
-# colour -> player reliably:  P1 = warm (red),  P2 = cool (blue).
-# The solid colours below are paired with the warm/cool colormaps used for the
-# heatmaps (_HEAT_CMAPS) and the matching legend patches (_HEAT_LEGEND).
+# Player colour convention, kept identical across every figure so colour -> player
+# is unambiguous: P1 = warm (red), P2 = cool (blue). Paired with the heatmap
+# colormaps (_HEAT_CMAPS) and legend patches (_HEAT_LEGEND).
 _COLORS = {1: "red",       2: "deepskyblue"}
 _LABELS = {1: "P1 (red)",  2: "P2 (blue)"}
 
-# Heatmap colormaps. The old maps (`hot` + `Blues_r`) made the COMBINED map
-# unreadable: `Blues_r` sends P2's DENSEST zones to white, and both layers
-# painted every bin (even empty ones) at a flat alpha, so the two players fogged
-# into an indistinct haze where they overlapped. These custom maps instead ramp
-# ALPHA from 0 (empty -> fully transparent, background stays clean) to 1 (dense ->
-# vivid, fully opaque), over two well-separated hues (P1 warm red→yellow, P2 cool
-# cyan→blue). Transparent tails mean overlap reads as "both were here", not mud.
+# Heatmap colormaps. Alpha ramps from 0 (empty -> transparent, background stays
+# clean) to 1 (dense -> opaque) over two well-separated hues (P1 warm red→yellow,
+# P2 cool cyan→blue). The old `hot`+`Blues_r` pair fogged into mud where players
+# overlapped and sent P2's densest bins to white; transparent tails make overlap
+# read as "both were here".
 def _alpha_ramp_cmap(name, rgb_lo, rgb_hi):
-    """Colormap going transparent (low density) -> saturated opaque (high)."""
+    """Build a colormap that goes transparent at low density, saturated-opaque at high."""
     r0, g0, b0 = rgb_lo
     r1, g1, b1 = rgb_hi
     cdict = {
         "red":   [(0.0, r0, r0), (1.0, r1, r1)],
         "green": [(0.0, g0, g0), (1.0, g1, g1)],
         "blue":  [(0.0, b0, b0), (1.0, b1, b1)],
-        # alpha 0 at the very bottom (empty bins stay invisible), then climb
-        # FAST: faint traffic reaches a readable opacity early (0.20 -> 0.55,
-        # 0.40 -> 0.90) so a low-density zone is never lost in the background.
+        # Empty bins invisible (alpha 0), then climb fast so faint traffic hits a
+        # readable opacity early (0.20 -> 0.55, 0.40 -> 0.90).
         "alpha": [(0.0, 0.0, 0.0), (0.05, 0.0, 0.0), (0.20, 0.55, 0.55),
                   (0.40, 0.90, 0.90), (1.0, 1.0, 1.0)],
     }
     return LinearSegmentedColormap(name, cdict, N=256)
 
-# P1: bright orange-red -> yellow (warm). P2: sky-blue -> cyan (cool). The LOW end
-# is deliberately luminous (not a dark red/blue) so the faintest traffic still
-# separates clearly from the near-black background instead of blending into it.
+# Low end is deliberately luminous (not dark red/blue) so the faintest traffic
+# still separates from the near-black background.
 _HEAT_CMAPS  = {
     1: _alpha_ramp_cmap("p1_warm", (1.0, 0.45, 0.10), (1.0, 0.95, 0.25)),
     2: _alpha_ramp_cmap("p2_cool", (0.20, 0.65, 1.0), (0.35, 0.97, 1.0)),
@@ -93,9 +77,9 @@ _HEAT_CMAPS  = {
 _HEAT_LEGEND = {1: "#ff5a1f",     2: "#19c3ff"}
 
 # ── court zones ────────────────────────────────────────────────────────────────
-# The analysis covers the whole walkable area, not just the playing rectangle:
-# _BEHIND = typical run-off behind each baseline, _SIDE = lateral run-off
-# (ITF recommendation ~3.66 m) beyond each sideline.
+# Analysis covers the whole walkable area, not just the playing rectangle.
+# _BEHIND = run-off behind each baseline (m), _SIDE = lateral run-off beyond each
+# sideline (m; ITF recommends ~3.66 m).
 _BEHIND = 6.5
 _SIDE   = 3.7
 _ZONE_BANDS = [
@@ -110,15 +94,15 @@ _SIDES = [("OL", "outer left"), ("L", "left"), ("R", "right"), ("OR", "outer rig
 _SIDE_X = {"OL": (-_SIDE, 0.0), "L": (0.0, CL_X),
            "R": (CL_X, W_m), "OR": (W_m, W_m + _SIDE)}
 
-# Shared y-axis limits for every court figure: far baseline (y=0) at top, near
-# baseline + run-off at bottom (y inverted to match the camera view).
+# Shared y-limits for every court figure; y inverted (far baseline y=0 at top) to
+# match the camera view.
 _COURT_YLIM = (L_m + _BEHIND + 0.4, -_BEHIND - 0.4)
 
 
 # ── court drawing ──────────────────────────────────────────────────────────────
 
 def _draw_court(ax: plt.Axes) -> None:
-    """Draw the ITF singles court on ax (coordinates in meters)."""
+    """Draw the ITF singles court (meters) onto ax."""
     ax.set_facecolor("#2d6a4f")
     kw = dict(color="white", linewidth=1.4, solid_capstyle="round")
 
@@ -134,8 +118,7 @@ def _draw_court(ax: plt.Axes) -> None:
     # net
     ax.plot([0, W_m], [NET, NET], color="#f4d03f", linewidth=2.8)
 
-    # limits extended to the whole walkable area (lateral and baseline run-off);
-    # y inverted: far baseline (y=0) at top, as in the camera view
+    # extend to the whole walkable area; y inverted (far baseline y=0 at top)
     ax.set_xlim(-_SIDE - 0.4, W_m + _SIDE + 0.4)
     ax.set_ylim(*_COURT_YLIM)
     ax.set_aspect("equal")
@@ -143,9 +126,11 @@ def _draw_court(ax: plt.Axes) -> None:
 
 
 def _save_fig(fig, path) -> None:
-    """Write a figure PNG (dark facecolor preserved), close it and log the path.
-    Shared by the zone and heatmap exports (the animated minimap saves via its
-    own writer, so it is not routed through here)."""
+    """Save the figure PNG keeping its dark facecolor, then close and log.
+
+    Shared by the zone and heatmap exports; the animated minimap uses its own
+    writer and bypasses this.
+    """
     fig.savefig(path, dpi=120, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
@@ -157,21 +142,19 @@ def _save_fig(fig, path) -> None:
 def _load_and_convert(players_csv: str, court_csv: str, min_area: int,
                       anchor: str = "feet") -> dict[int, pd.DataFrame]:
     """
-    Load the players CSV, filter out detections with area < min_area and
-    add the columns x_m, y_m with the real-world coordinates in meters.
+    Load the players CSV, drop detections with area < min_area, and append
+    x_m/y_m court coordinates per player.
 
-    anchor = "feet"     → projects the feet point (cx, y + h)  [default]
-    anchor = "centroid" → projects the blob centroid (cx, cy)
-    Returns {player_id: DataFrame}.
+    anchor "feet" projects (cx, y + h); "centroid" projects (cx, cy).
+    Returns {player_id: DataFrame}. Raises ValueError on an unknown anchor.
     """
     df = pd.read_csv(players_csv)
     df = df[df["area"] >= min_area].copy()
 
     if anchor == "feet":
-        # Sanity check (non-fatal): the feet anchor assumes "y" is the bbox TOP,
-        # so the bbox vertical centre cy should sit ~ y + h/2. If a large share
-        # of rows violate that, "y" is probably not the top edge and the feet
-        # projection (y + h) would be wrong — warn but keep running.
+        # Non-fatal sanity check: feet anchor assumes "y" is the bbox top, so
+        # cy ≈ y + h/2. If most rows violate that, "y" isn't the top edge and the
+        # y + h projection is misplaced — warn but continue.
         if len(df) and {"y", "h", "cy"}.issubset(df.columns):
             mismatch = np.abs((df["y"] + df["h"] / 2.0) - df["cy"]) > df["h"] * 0.25
             frac_bad = float(mismatch.mean())
@@ -203,10 +186,11 @@ def _load_and_convert(players_csv: str, court_csv: str, min_area: int,
 def _compute_speeds(sub: pd.DataFrame, fps: float,
                     max_speed_kmh: float = 45.0) -> tuple[dict, np.ndarray]:
     """
-    Compute per-frame speed (km/h) and aggregate statistics.
-    Speed = NaN for non-consecutive frames (player not detected).
-    Displacements above max_speed_kmh are tracking glitches (blob jumps,
-    ID swaps): they are excluded from both speed and distance.
+    Per-frame speed (km/h) and aggregate stats.
+
+    Speed is NaN across non-consecutive frames (missed detection). Displacements
+    over max_speed_kmh are treated as tracking glitches (blob jumps, ID swaps)
+    and excluded from both speed and total distance.
     """
     frames = sub["frame"].values
     pos    = sub[["x_m", "y_m"]].values
@@ -220,13 +204,12 @@ def _compute_speeds(sub: pd.DataFrame, fps: float,
         speed_kmh = np.where(gaps == 1, dist / dt * 3.6, np.nan)
     speed_kmh = np.where(speed_kmh > max_speed_kmh, np.nan, speed_kmh)
 
-    # series aligned with sub (first value always NaN)
+    # align with sub (leading NaN)
     speed_full = np.concatenate([[np.nan], speed_kmh])
 
     valid_dist = dist[~np.isnan(speed_kmh)]
-    # If there is no valid speed sample at all, every aggregate (avg/median as
-    # well as max/p95) must fall back to 0.0 instead of letting the np.nan*
-    # reductions emit a RuntimeWarning and return NaN.
+    # With no valid sample, fall back to 0.0 so the np.nan* reductions don't warn
+    # and return NaN.
     has_speed = not np.all(np.isnan(speed_kmh))
     stats = {
         "total_distance_m": round(float(valid_dist.sum()), 2),
@@ -239,8 +222,7 @@ def _compute_speeds(sub: pd.DataFrame, fps: float,
         "p95_speed_kmh":    round(float(np.nanpercentile(speed_kmh, 95)), 2)
                             if has_speed else 0.0,
         "frames_detected":  len(sub),
-        # Count the actual number of dropped frames, not the number of gap
-        # events: a gap of g consecutive missing frames contributes (g - 1).
+        # count dropped frames, not gap events: a gap of g contributes (g - 1)
         "frames_missing":   int(np.sum(gaps[gaps > 1] - 1)),
     }
     return stats, speed_full
@@ -249,15 +231,12 @@ def _compute_speeds(sub: pd.DataFrame, fps: float,
 # ── court zones ────────────────────────────────────────────────────────────────
 
 def _zone_of(x_m: float, y_m: float) -> str | None:
-    """Return the zone id ("FB-L", "NB-out-OR", …) or None if out of range."""
+    """Map a court point to its zone id ("FB-L", "NB-out-OR", …), or None if out of range."""
     if x_m < -_SIDE - 1.0 or x_m > W_m + _SIDE + 1.0:
         return None
-    # Boundary convention: every band is half-open [low, high) on BOTH axes, so
-    # a point exactly on a dividing line always falls to the band on its higher
-    # side (e.g. x == CL_X -> "R", x == W_m -> "OR"). This matches the y-band
-    # test below (y0 <= y_m < y1) and removes the previous L/R vs R/OR
-    # asymmetry where the centre line was exclusive but the right sideline
-    # inclusive.
+    # Both axes are half-open [low, high), so a point on a dividing line falls to
+    # the higher band (x == CL_X -> "R", x == W_m -> "OR"), consistent with the
+    # y-band test below.
     if x_m < 0:
         side = "OL"
     elif x_m < CL_X:
@@ -274,8 +253,7 @@ def _zone_of(x_m: float, y_m: float) -> str | None:
 
 def _compute_zone_stats(player_data: dict, fps: float) -> pd.DataFrame:
     """
-    Time spent by each player in each zone of the court.
-    One row per (player_id, zone): frames, seconds and percentage.
+    Time spent per zone, one row per (player_id, zone): frames, seconds, percent.
     """
     cols = ["player_id", "zone", "description", "frames", "seconds", "percent"]
     rows = []
@@ -296,14 +274,12 @@ def _compute_zone_stats(player_data: dict, fps: float) -> pd.DataFrame:
                 "description": f"{band_labels[band]} {side_label}",
                 "frames":     int(n),
                 "seconds":    round(n / fps, 2),
-                # n_tot is guaranteed > 0 here (the continue above skips
-                # players with no in-range samples), so this division is safe.
+                # n_tot > 0 here (the earlier continue skips empty players)
                 "percent":    round(100.0 * n / n_tot, 2),
             })
     if not rows:
-        # No in-range samples for any player: return an empty frame that still
-        # carries the expected columns so downstream .sort_values / filtering /
-        # to_csv keep working instead of raising on a column-less frame.
+        # Keep the expected columns even when empty, so downstream sort/filter/
+        # to_csv don't raise on a column-less frame.
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows).sort_values(
         ["player_id", "percent"], ascending=[True, False]
@@ -312,7 +288,7 @@ def _compute_zone_stats(player_data: dict, fps: float) -> pd.DataFrame:
 
 def _save_zone_outputs(player_data: dict, zone_df: pd.DataFrame,
                        out_dir: Path) -> None:
-    """Save zone_stats.csv and the figure zones.png (percentages on the court)."""
+    """Write zone_stats.csv and zones.png (per-zone percentages drawn on the court)."""
     csv_path = out_dir / "zone_stats.csv"
     zone_df.to_csv(csv_path, index=False)
     print(f"  Saved: {csv_path}")
@@ -369,27 +345,24 @@ def _make_heat_array(x_m: np.ndarray, y_m: np.ndarray,
                              range=[_HEAT_X, _HEAT_Y])
     H = gaussian_filter(H.T.astype(float), sigma=sigma)
     H /= H.max() + 1e-10
-    # MASK the empty court: bins below a small floor become transparent (NaN ->
-    # not drawn), so the dark background stays clean and only real traffic is
-    # painted. Without this, every bin gets the colormap's base colour and the
-    # two players' faint tails fog the whole figure.
+    # Mask bins below a small floor (-> transparent) so only real traffic paints
+    # and faint tails don't fog the figure.
     return np.ma.masked_less(H, 0.04)
 
 
-# Background for the heatmap figures — a touch darker than the other figures so
-# the vivid, alpha-ramped heat colours stand out with maximum contrast.
+# Slightly darker than the other figures for maximum contrast against the
+# alpha-ramped heat colours.
 _HEAT_BG = "#10101c"
 
 
 def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
-    # same warm/cool convention as _COLORS (P1 warm, P2 cool)
+    # warm/cool per _COLORS (P1 warm, P2 cool)
     for pid, sub in player_data.items():
         fig, ax = plt.subplots(figsize=(4, 9))
         fig.patch.set_facecolor(_HEAT_BG)
         _draw_court(ax)
         H = _make_heat_array(sub["x_m"].values, sub["y_m"].values)
-        # alpha is baked into the colormap (transparent -> opaque with density),
-        # so no flat `alpha=` here: dense zones render fully vivid.
+        # alpha is baked into the colormap, so no flat alpha= here
         ax.imshow(H, origin="lower", extent=_HEAT_EXTENT, vmin=0.0, vmax=1.0,
                   cmap=_HEAT_CMAPS.get(pid, "hot"), aspect="auto",
                   interpolation="bilinear")
@@ -398,10 +371,8 @@ def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
         path = out_dir / f"heatmap_p{pid}.png"
         _save_fig(fig, path)
 
-    # combined heatmap — the SAME alpha-ramped maps as the single ones, so each
-    # player keeps an identical, recognisable colour. Transparent empty bins let
-    # the two layers coexist: red where only P1 was, cyan where only P2 was, and a
-    # clearly blended zone only where they genuinely overlapped.
+    # combined: reuse the same per-player maps; transparent empty bins let the two
+    # layers coexist (red-only P1, cyan-only P2, blend only on real overlap)
     fig, ax = plt.subplots(figsize=(4, 9))
     fig.patch.set_facecolor(_HEAT_BG)
     _draw_court(ax)
@@ -427,7 +398,7 @@ def _save_heatmaps(player_data: dict, out_dir: Path) -> None:
 
 def _save_minimap(player_data: dict, all_frames: np.ndarray,
                   fps: float, stride: int, out_dir: Path) -> None:
-    # fast per-frame indexing
+    # index by frame for O(1) per-frame lookup
     indexed = {pid: sub.set_index("frame") for pid, sub in player_data.items()}
 
     sampled  = all_frames[::stride]
@@ -455,7 +426,7 @@ def _save_minimap(player_data: dict, all_frames: np.ndarray,
             if fid in indexed[pid].index:
                 row = indexed[pid].loc[fid]
                 xm, ym = float(row["x_m"]), float(row["y_m"])
-                # also show positions outside the court (walkable area)
+                # keep positions out to the walkable run-off, not just the court
                 if (-_SIDE - 1 <= xm <= W_m + _SIDE + 1
                         and -_BEHIND - 1 <= ym <= L_m + _BEHIND + 1):
                     dot.set_data([xm], [ym])
@@ -552,11 +523,9 @@ def main() -> None:
                         help="Skip GIF generation (faster)")
     args = parser.parse_args()
 
-    # Derive the input CSV paths from the video name when not given explicitly,
-    # so analysing a different --video reads that video's tracking output
-    # instead of always loading the clip2 / Input_video2 files. Matches the
-    # naming used by playerTracking.py (players_<stem>.csv) and
-    # court_tracking.py (<stem>_court.csv).
+    # Derive CSV paths from the video stem when not given, matching the naming of
+    # playerTracking.py (players_<stem>.csv) and court_tracking.py
+    # (<stem>_court.csv), so a different --video reads its own tracking output.
     video_stem = os.path.splitext(os.path.basename(args.video))[0]
     if args.players is None:
         args.players = os.path.join("outputs", "player_coordinates",
@@ -579,7 +548,7 @@ def main() -> None:
     total_frames = len(all_frames)
     print(f"  {total_frames} total frames, {len(player_data)} players")
 
-    # speed
+    # per-player speed + aggregates
     stats_map: dict = {}
     speed_map: dict = {}
     for pid, sub in player_data.items():

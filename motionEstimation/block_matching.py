@@ -1,21 +1,15 @@
 """
-motionEstimation/block_matching.py
+From-scratch block-matching motion estimation (no cv2 motion functions).
 
-Classical block-matching motion estimation, implemented from scratch (no
-cv2 motion functions), as covered in the course labs.
+SAD-based search, two strategies:
+  - full : exhaustive over a (2R+1)x(2R+1) window
+  - tss  : three-step (logarithmic) search, ~25 SAD evals per block
 
-Two search strategies over a SAD (sum of absolute differences) criterion:
-  - full  : exhaustive full search over a (2R+1) x (2R+1) window
-  - tss   : three-step search (logarithmic, ~25 SAD evaluations per block)
+Per frame pair: estimate a block motion-vector field, build the
+motion-compensated prediction and report its PSNR vs the plain-previous-frame
+("no motion") baseline, and save a visualization of the moving-block vectors.
 
-For every processed frame pair the script:
-  - estimates a motion-vector field on non-overlapping blocks,
-  - builds the motion-compensated prediction of the current frame and
-    reports its PSNR vs the "no motion" prediction (plain previous frame),
-  - saves a visualization (vectors of moving blocks drawn on the frame).
-
-Motion-vector convention: (u, v) maps the previous frame to the current
-one, i.e.  cur(x, y) ~ prev(x - u, y - v).
+MV convention: (u, v) maps prev -> cur, i.e. cur(x, y) ~ prev(x - u, y - v).
 
 Usage (from project root):
     python motionEstimation/block_matching.py
@@ -36,9 +30,8 @@ import numpy as np
 # ── SAD helpers ────────────────────────────────────────────────────────────────
 
 def _block_sad_field(prev_pad, cur, dx, dy, block, search):
-    """
-    SAD between every non-overlapping block of `cur` and the block of the
-    (padded) previous frame displaced by (dx, dy).
+    """SAD per non-overlapping block of `cur` vs `prev_pad` shifted by (dx, dy).
+
     Returns an (n_blocks_y, n_blocks_x) float32 array.
     """
     H, W = cur.shape
@@ -51,12 +44,10 @@ def _block_sad_field(prev_pad, cur, dx, dy, block, search):
 
 
 def full_search(prev, cur, block=16, search=8):
-    """
-    Exhaustive full-search block matching.
+    """Exhaustive full-search block matching.
 
-    Vectorized over blocks: for each of the (2R+1)^2 candidate displacements
-    one whole-frame absolute difference + per-block reduction is computed,
-    and the per-block argmin over displacements is tracked.
+    Vectorized over blocks: each of the (2R+1)^2 displacements costs one
+    whole-frame abs-diff + per-block reduction; per-block argmin is tracked.
 
     Returns (u, v): two (n_blocks_y, n_blocks_x) int arrays, motion in pixels.
     """
@@ -74,14 +65,14 @@ def full_search(prev, cur, block=16, search=8):
             sad = _block_sad_field(prev_pad, cur, dx, dy, block, search)
             better = sad < best_sad
             best_sad[better] = sad[better]
-            # cur(x) ~ prev(x + d)  →  the content moved by -d
+            # cur(x) ~ prev(x + d): content moved by -d
             u[better] = -dx
             v[better] = -dy
     return u, v
 
 
 def _sad_one(prev_pad, cur_block, bx, by, dx, dy, block, search):
-    """SAD of a single block of `cur` vs prev displaced by (dx, dy)."""
+    """SAD of one `cur` block vs prev displaced by (dx, dy)."""
     y0 = by * block + search + dy
     x0 = bx * block + search + dx
     ref = prev_pad[y0: y0 + block, x0: x0 + block]
@@ -90,10 +81,10 @@ def _sad_one(prev_pad, cur_block, bx, by, dx, dy, block, search):
 
 
 def three_step_search(prev, cur, block=16, search=8):
-    """
-    Three-step (logarithmic) search: starts with step = ceil(R/2), evaluates
-    the 8 neighbours + centre, recentres on the best and halves the step.
-    ~25 SAD evaluations per block instead of (2R+1)^2.
+    """Three-step (logarithmic) search.
+
+    Step starts at ceil(R/2): evaluate the 8 neighbours, recentre on the best,
+    halve the step. ~25 SAD evals per block instead of (2R+1)^2.
 
     Returns (u, v) like full_search.
     """
@@ -113,7 +104,7 @@ def three_step_search(prev, cur, block=16, search=8):
         for bx in range(nbx):
             cur_block = cur[by * block: (by + 1) * block,
                             bx * block: (bx + 1) * block]
-            cx = cy = 0                      # current search centre
+            cx = cy = 0                      # search centre, refined per step
             best = _sad_one(prev_pad, cur_block, bx, by, 0, 0, block, search)
             step = max(1, int(np.ceil(search / 2)))
             while step >= 1:
@@ -138,14 +129,14 @@ def three_step_search(prev, cur, block=16, search=8):
 # ── motion compensation & PSNR ─────────────────────────────────────────────────
 
 def motion_compensate(prev, u, v, block):
-    """Predict the current frame moving each block of `prev` by its MV."""
+    """Predict cur by copying each `prev` block displaced by its MV."""
     H, W = prev.shape
     pred = prev.copy()
     nby, nbx = u.shape
     for by in range(nby):
         for bx in range(nbx):
             y0, x0 = by * block, bx * block
-            # cur(x) ~ prev(x - u): source block sits at destination - (u, v)
+            # cur(x) ~ prev(x - u): source sits at destination - (u, v), clamped
             sy = np.clip(y0 - v[by, bx], 0, H - block)
             sx = np.clip(x0 - u[by, bx], 0, W - block)
             pred[y0: y0 + block, x0: x0 + block] = \
@@ -154,6 +145,7 @@ def motion_compensate(prev, u, v, block):
 
 
 def psnr(a, b):
+    """PSNR in dB for 8-bit images; inf when identical."""
     mse = np.mean((a.astype(np.float64) - b.astype(np.float64)) ** 2)
     if mse == 0:
         return float("inf")
@@ -163,7 +155,7 @@ def psnr(a, b):
 # ── visualization ──────────────────────────────────────────────────────────────
 
 def draw_motion_field(frame, u, v, block, min_mag=1.0):
-    """Draw MV arrows (green) on moving blocks; static blocks are skipped."""
+    """Draw green MV arrows on blocks with magnitude >= `min_mag`px."""
     vis = frame.copy()
     nby, nbx = u.shape
     for by in range(nby):
@@ -222,22 +214,20 @@ def main():
     print(header)
     print("-" * len(header))
 
-    # Sequential reading: seek ONCE to --start, then decode frames in order
-    # keeping the previous frame so each consecutive (prev, curr) pair is
-    # exact. Seeking per-pair with CAP_PROP_POS_FRAMES lands on the nearest
-    # keyframe for non-keyframe targets, which can yield the wrong frame pair
-    # and corrupt PSNR. The --start/--frames/--step semantics are preserved:
-    # pair k starts at frame (start + k*step) and is the pair (i, i+1), for
-    # k = 0 .. frames-1.
+    # Seek ONCE to --start, then decode in order keeping the previous frame so
+    # each (prev, curr) pair is exact. Per-pair CAP_PROP_POS_FRAMES seeks snap
+    # to the nearest keyframe for non-keyframe targets, giving wrong pairs and
+    # corrupting PSNR. Semantics preserved: pair k (k=0..frames-1) starts at
+    # frame (start + k*step) and is (i, i+1).
     try:
         cap.set(cv2.CAP_PROP_POS_FRAMES, args.start)
-        # frame indices we want a pair to START at (each pair is i, i+1)
+        # frame indices a pair may start at (each pair is i, i+1)
         wanted = {args.start + k * args.step for k in range(args.frames)}
         last_wanted = args.start + (args.frames - 1) * args.step
 
         prev_frame = None
         prev_idx = -1
-        idx = args.start            # index of the frame returned by the next read
+        idx = args.start            # index of the next frame to be read
         processed = 0
 
         while processed < args.frames:
@@ -246,8 +236,7 @@ def main():
                 print(f"  frame {idx}: out of video, stopping.")
                 break
 
-            # A pair (i, i+1) is ready when the current frame is i+1 and its
-            # predecessor i (consecutively decoded) is a wanted pair start.
+            # Pair ready when the prev frame is a wanted start and idx == prev+1.
             if prev_frame is not None and prev_idx in wanted \
                     and idx == prev_idx + 1:
                 i = prev_idx
@@ -286,7 +275,7 @@ def main():
             prev_frame = frame
             prev_idx = idx
             idx += 1
-            # nothing left to match once we are past the last wanted pair
+            # past the last wanted pair: nothing left to match
             if prev_idx > last_wanted:
                 break
     finally:

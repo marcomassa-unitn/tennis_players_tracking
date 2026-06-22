@@ -5,9 +5,8 @@ import os
 import cv2
 import numpy as np
 
-# Shared fps guard. Dual import so it resolves both standalone
-# (`python tracking/court_tracking.py`, tracking/ on sys.path) and orchestrated
-# (imported as tracking.court_tracking, project root on sys.path via pipeline.py).
+# Dual import: works both standalone (tracking/ on sys.path) and as a package
+# (tracking.court_tracking, when run via pipeline.py).
 try:
     from tracking._fps_utils import safe_fps
 except ImportError:
@@ -35,31 +34,26 @@ ROI_LEFT_FRACTION   = 0.02
 ROI_RIGHT_FRACTION  = 0.98
 
 # ── Corner selection ──────────────────────────────────────────────────────────
-# 0 = absolute extreme corner (correct when only singles lines are detected).
-# 1 = second-from-extreme (use when doubles-alley lines produce their own
-#     corner dots that are more extreme than the singles corners).
+# Rank within the extreme-score ordering: 0 = absolute extreme; 1 = second-most
+# extreme (use when doubles-alley dots sit further out than the singles corners).
 SINGLES_CORNER_RANK = 0
 
 # ── Singles-court proportional filter ────────────────────────────────────────
-# ITF court dimensions (Rules of Tennis):
-#   doubles width = 10.97 m,  singles width = 8.23 m
-#   each alley    = (10.97 - 8.23) / 2 = 1.37 m
-# The alley as a fraction of the total doubles width:
+# ITF widths: doubles 10.97 m, singles 8.23 m, so each alley is 1.37 m.
+# Alley as a fraction of the full doubles width:
 ALLEY_RATIO = 1.37 / 10.97   # ≈ 0.1249
 
-# Two dots belong to the same horizontal court-line row when their y-values
-# differ by less than this many pixels.
+# Max y-gap (px) for two dots to count as the same horizontal court-line row.
 Y_GROUP_TOLERANCE = 50
 
 # ── Net-zone filter ───────────────────────────────────────────────────────────
-# Due to perspective, the net appears at roughly 35–45 % of the court's image
-# height below the top baseline (not 50 %, which is real-world).
-# Dots within ±NET_Y_BAND of that position are discarded from display.
-NET_Y_FRACTION = 0.40   # approximate net position as fraction of court height
-NET_Y_BAND     = 0.22   # half-width of the exclusion band (fraction of court height)
+# Perspective puts the net at ~35–45 % of court image height below the top
+# baseline (not the real-world 50 %). Dots within ±NET_Y_BAND are dropped.
+NET_Y_FRACTION = 0.40   # net position as fraction of court height
+NET_Y_BAND     = 0.22   # half-width of the exclusion band (fraction of height)
 
 # ── Playback ──────────────────────────────────────────────────────────────────
-# Base numerator for the per-frame playback delay (ms): delay = base / fps.
+# Per-frame waitKey delay is base / fps (ms).
 PLAYBACK_DELAY_BASE_MS = 500
 
 
@@ -90,13 +84,11 @@ def angle_between(seg1, seg2):
 
 
 def cluster_points(points, radius):
-    """Merge points within `radius` of each other; return cluster centroids.
+    """Merge points within `radius`; return per-cluster centroids.
 
-    Deterministic: the input is sorted by (y, x) first so the result does not
-    depend on input ordering. Each cluster tracks the running sum and count of
-    its members, and its center is the true mean (centroid) of ALL members.
+    Input is pre-sorted by (y, x) so the result is order-independent. Each
+    cluster's center is the running mean of all its members.
     """
-    # Sort by (y, x) so clustering is order-independent and reproducible.
     sorted_points = sorted(points, key=lambda p: (p[1], p[0]))
 
     clusters = []   # each entry: [center_x, center_y, sum_x, sum_y, count]
@@ -107,7 +99,7 @@ def cluster_points(points, radius):
                 c[2] += pt[0]
                 c[3] += pt[1]
                 c[4] += 1
-                # Recompute center as the mean of all members in the cluster.
+                # Re-mean over all members so far.
                 c[0] = c[2] / c[4]
                 c[1] = c[3] / c[4]
                 merged = True
@@ -118,19 +110,13 @@ def cluster_points(points, radius):
 
 
 def filter_singles_by_proportion(dots, y_tol, alley_ratio):
-    """
-    Discard doubles-alley corner dots using ITF court proportions.
+    """Drop doubles-alley corner dots using ITF court proportions.
 
-    For each horizontal row of dots (grouped by similar y):
-      - Rows with <= 2 dots have no alley corners to strip — kept as-is.
-      - Rows with >= 3 dots: the leftmost and rightmost are treated as the
-        doubles-court corners.  The expected singles-corner x-positions are
-        computed as:
-            x_singles_left  = x_doubles_left  + span * alley_ratio
-            x_singles_right = x_doubles_right - span * alley_ratio
-        where span = x_doubles_right - x_doubles_left.
-        From the remaining inner dots the one closest to each predicted
-        singles position is kept; the rest are discarded.
+    Per horizontal row (dots grouped by similar y):
+      - <= 2 dots: no alley corners present, kept verbatim.
+      - >= 3 dots: outermost two are the doubles corners; predict each singles
+        corner x at `span * alley_ratio` inward and keep the inner dot nearest
+        each prediction, discarding the rest.
     """
     if not dots:
         return dots
@@ -159,7 +145,7 @@ def filter_singles_by_proportion(dots, y_tol, alley_ratio):
         x_sl_pred = x_dl + span * alley_ratio
         x_sr_pred = x_dr - span * alley_ratio
 
-        inner = by_x[1:-1]   # everything between the two doubles corners
+        inner = by_x[1:-1]   # candidates between the doubles corners
 
         sl = min(inner, key=lambda p: abs(p[0] - x_sl_pred))
         sr = min(inner, key=lambda p: abs(p[0] - x_sr_pred))
@@ -172,9 +158,8 @@ def filter_singles_by_proportion(dots, y_tol, alley_ratio):
     return filtered
 
 
-# Real-world ITF positions of the 8 keypoints in feet, origin at BL:
-#   court length = 78 ft, singles width = 27 ft,
-#   service lines = 18 ft from each baseline (21 ft from the net).
+# ITF keypoint positions in feet, origin at BL (length 78 ft, singles width
+# 27 ft, service lines 18 ft from each baseline).
 REAL_FT = {
     "BL":  (0.0,  0.0),  "BR":  (27.0, 0.0),
     "TL":  (0.0, 78.0),  "TR":  (27.0, 78.0),
@@ -184,11 +169,12 @@ REAL_FT = {
 
 
 def project_all_corners(known):
-    """
-    Given >= 4 measured keypoints {label: (x, y) pixels}, build a homography
-    from their real-world ITF positions and project the remaining keypoints
-    into image space. Measured points are kept exactly as given.
-    Returns a dict with all 8 labels.
+    """Fit a real-world-to-image homography from >= 4 measured keypoints
+    {label: (x, y) px} and project the remaining ITF keypoints into the image.
+
+    Measured points are returned unchanged. Result has all 8 labels.
+
+    Raises RuntimeError if the homography fit fails or is degenerate.
     """
     labels = list(known)
     src = np.array([REAL_FT[k] for k in labels], dtype=np.float32)
@@ -201,7 +187,7 @@ def project_all_corners(known):
     out = {}
     for label, (rx, ry) in REAL_FT.items():
         p = H @ np.array([rx, ry, 1.0])
-        # Guard the homogeneous divisor; a near-zero w yields inf/NaN pixels.
+        # Near-zero w would produce inf/NaN pixels.
         if abs(p[2]) < 1e-9:
             raise RuntimeError(
                 f"Degenerate homography: zero homogeneous divisor for {label}.")
@@ -212,10 +198,10 @@ def project_all_corners(known):
 
 
 def fit_sideline(segments, corner, max_dist=12.0, min_len=100.0):
-    """
-    Least-squares fit x = a*y + b of the sideline passing through `corner`,
-    using all steep Hough segments whose extended line passes within
-    `max_dist` px of the corner. Returns (a, b) or None.
+    """Least-squares fit x = a*y + b for the sideline through `corner`.
+
+    Uses steep Hough segments (>= `min_len`) whose extended line passes within
+    `max_dist` px of the corner. Returns (a, b), or None if < 2 points qualify.
     """
     cx, cy = corner
     pts = []
@@ -236,12 +222,12 @@ def fit_sideline(segments, corner, max_dist=12.0, min_len=100.0):
 
 def find_ground_line_bands(hsv_img, xl_fit, xr_fit, y_min, y_max,
                            cov_thr=0.5, max_thickness=14):
-    """
-    1-D coverage profile: for every image row, the fraction of "white-ish"
-    pixels (relaxed mask, the far lines are dimmer than the near ones) along
-    the chord between the two fitted sidelines. Horizontal ground lines show
-    up as THIN runs of near-full coverage; the elevated net band is a thick
-    run and is discarded here. Returns the centre y of each thin band.
+    """Find horizontal ground lines via a per-row white-coverage profile.
+
+    For each row, measures the fraction of white-ish pixels (relaxed mask,
+    since far lines are dimmer) along the chord between the two fitted
+    sidelines. Ground lines are THIN high-coverage runs; the elevated net is a
+    thick run and is rejected. Returns the center y of each thin band.
     """
     relaxed = cv2.inRange(hsv_img,
                           np.array([0, 0, 195], dtype=np.uint8),
@@ -263,18 +249,17 @@ def find_ground_line_bands(hsv_img, xl_fit, xr_fit, y_min, y_max,
 
 
 def select_far_lines(bands, bl, br, xl_fit, xr_fit, tol=12.0):
-    """
-    Pick which detected horizontal bands are the far BASELINE and the far
-    SERVICE line by projective consistency: for every candidate pair, build
-    the homography from (TL, TR, BL, BR) and require that the projected far
-    and near service lines land on detected bands within `tol` px.
-    This automatically rejects banner/fence lines and the (elevated) net.
-    Returns (y_baseline, y_service, residuals) or None.
+    """Identify the far baseline and service-line bands by projective fit.
+
+    For each candidate (baseline, service) pair, builds the homography from
+    (TL, TR, BL, BR) and requires the projected far/near service lines to land
+    on detected bands within `tol` px. Rejects banner/fence lines and the
+    elevated net. Returns (y_baseline, y_service, residuals), or None.
     """
     best = None
     for yb in bands:
         for ys in bands:
-            if ys <= yb:        # service line is below the baseline in image
+            if ys <= yb:        # service line sits below the baseline in image y
                 continue
             tl = (xl_fit[0] * yb + xl_fit[1], yb)
             tr = (xr_fit[0] * yb + xr_fit[1], yb)
@@ -299,14 +284,15 @@ def select_far_lines(bands, bl, br, xl_fit, xr_fit, tol=12.0):
 
 
 def find_court_corners(dots, frame_shape, rank=0):
-    """
-    Select the 4 court boundary corners using normalised coordinate scoring.
-      TL → min(norm_x + norm_y)   topmost  + leftmost
-      TR → min(norm_y - norm_x)   topmost  + rightmost
-      BL → min(norm_x - norm_y)   bottommost + leftmost
-      BR → max(norm_x + norm_y)   bottommost + rightmost
+    """Pick the 4 boundary corners by scoring normalised (x, y) coordinates.
 
-    `rank` selects the n-th position in the sorted score; 0 = most extreme.
+      TL -> min(nx + ny)   top-left
+      TR -> min(ny - nx)   top-right
+      BL -> min(nx - ny)   bottom-left
+      BR -> max(nx + ny)   bottom-right
+
+    `rank` selects the n-th in each score order (0 = most extreme).
+    Raises ValueError if fewer than 4 dots are given.
     """
     pts = np.array(dots, dtype=np.float32)
     if len(pts) < 4:
@@ -332,10 +318,8 @@ def find_court_corners(dots, frame_shape, rank=0):
 # ── Court tracker ─────────────────────────────────────────────────────────────
 
 class CourtTracker:
-    """
-    Court keypoint detection: white mask + Hough lines + intersection
-    clustering + ITF-proportion filtering.
-    """
+    """Detect court keypoints: white mask + Hough lines + intersection
+    clustering + ITF-proportion filtering."""
 
     def __init__(self, video_path, no_display=False, roi_top=0.15,
                  far_line="baseline", output_dir="outputs"):
@@ -346,10 +330,8 @@ class CourtTracker:
         self.output_dir = output_dir
 
     def run(self):
-        """
-        Detect the 8 court keypoints, save them to CSV and (unless disabled)
-        play back the annotated video. Returns the dict of 8 keypoints.
-        """
+        """Detect the 8 keypoints, write them to CSV, and (unless no_display)
+        play back the annotated video. Returns the 8-keypoint dict."""
         video_stem = os.path.splitext(os.path.basename(self.video_path))[0]
         csv_path = os.path.join(self.output_dir, "court_coordinates",
                                 f"{video_stem}_court.csv")
@@ -361,8 +343,7 @@ class CourtTracker:
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {self.video_path}")
 
-        # Ensure the capture (and any window) is released on every exit path,
-        # including early returns and raised exceptions.
+        # finally releases the capture/window on every exit path.
         try:
             ret, frame = cap.read()
             if not ret:
@@ -439,11 +420,10 @@ class CourtTracker:
             # 7. Select the 4 extreme corners of the detected dots
             tl, tr, bl, br = find_court_corners(dots, frame.shape, rank=SINGLES_CORNER_RANK)
 
-            # 7b. Refine the far side. Hough intersections are unreliable up there (the
-            # far ground lines are thin and dim, while banner edges and the ELEVATED net
-            # band are bright); instead, scan a 1-D white-coverage profile between the
-            # fitted sidelines and pick the (baseline, service-line) row pair that is
-            # projectively consistent with the ITF court model.
+            # 7b. Refine the far side. Hough intersections are unreliable there (far
+            # ground lines are thin/dim while banner edges and the elevated net are
+            # bright), so instead scan a white-coverage profile between the fitted
+            # sidelines and pick the (baseline, service) pair consistent with the ITF model.
             far_sel = None
             xl_fit = fit_sideline(segments, bl)
             xr_fit = fit_sideline(segments, br)
@@ -479,10 +459,10 @@ class CourtTracker:
             print(f"\nCourt corners  TL:{tl}  TR:{tr}  BL:{bl}  BR:{br}")
             print(f"Service corners  STL:{service['STL']}  STR:{service['STR']}  SBL:{service['SBL']}  SBR:{service['SBR']}")
 
-            # 7c. Discard net-zone dots from display (corners are already saved above).
+            # 7c. Drop net-zone dots from the display only (corners already saved).
             court_span = bl[1] - tl[1]
-            # Guard degenerate geometry: a non-positive span (corners collapsed or
-            # inverted) would make the net band meaningless, so skip net filtering.
+            # A non-positive span (collapsed/inverted corners) makes the net band
+            # meaningless, so skip the filter.
             if court_span > 0:
                 net_y = tl[1] + court_span * NET_Y_FRACTION
                 net_band = court_span * NET_Y_BAND
@@ -499,7 +479,7 @@ class CourtTracker:
                     writer.writerow([label, pt[0], pt[1]])
             print(f"Saved all corners to '{csv_path}'.")
 
-            # 9. Play video — all dots in red, 4 corners highlighted with magenta ring
+            # 9. Play back: dots in red, the 4 corners ringed magenta
             if self.no_display:
                 return keypoints
 
@@ -510,16 +490,13 @@ class CourtTracker:
             cv2.destroyAllWindows()
 
     def _play_back(self, cap, corners, service, dots, tl, tr, bl, br):
-        """Annotated video playback: rewind and draw, per frame, the court fill +
-        outline, all detected dots, and the corner/service-line markers. Display
-        only — writes nothing. The caller owns cap.release()/destroyAllWindows()
-        and the no_display early-return."""
+        """Rewind and draw, per frame, the court fill + outline, all dots, and
+        the corner/service markers. Display only; writes nothing. Caller owns
+        cap.release()/destroyAllWindows() and the no_display early-return."""
         fps = safe_fps(cap.get(cv2.CAP_PROP_FPS))
         delay = max(1, int(PLAYBACK_DELAY_BASE_MS / fps))
 
-        # Rewind to the first frame. Note: seeking by frame index can be
-        # unreliable on some codecs/containers (it may land on a nearby
-        # keyframe rather than frame 0).
+        # Seek to frame 0; on some codecs this lands on a nearby keyframe, not exactly 0.
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         quad_pts = np.array([tl, tr, br, bl], dtype=np.int32)
 
@@ -528,26 +505,25 @@ class CourtTracker:
             if not ret:
                 break
 
-            # Semi-transparent green fill over the court area
+            # Translucent green court fill
             overlay = current_frame.copy()
             cv2.fillPoly(overlay, [quad_pts], (0, 180, 0))
             cv2.addWeighted(overlay, 0.20, current_frame, 0.80, 0, current_frame)
 
-            # Court boundary outline
             cv2.polylines(current_frame, [quad_pts], isClosed=True, color=(0, 255, 0), thickness=2)
 
-            # All detected dots — red filled circles
+            # Detected dots: filled red
             for (x, y) in dots:
                 cv2.circle(current_frame, (x, y), DOT_RADIUS, (0, 0, 255), -1)
 
-            # Court corners — magenta ring + label
+            # Court corners: magenta ring + label
             for label, corner in corners.items():
                 cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 0, 255), 2)
                 cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 0, 255), 2)
 
-            # Service-line corners — cyan ring + label; STL gets a red fill too because
-            # it is computed geometrically (not from Hough), so it has no red dot yet.
+            # Service corners: cyan ring + label. STL also gets a red fill since it is
+            # geometric (not from Hough) and thus has no red dot of its own.
             for label, corner in service.items():
                 if label == "STL":
                     cv2.circle(current_frame, corner, DOT_RADIUS, (0, 0, 255), -1)

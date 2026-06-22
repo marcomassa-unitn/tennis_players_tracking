@@ -1,22 +1,16 @@
 """
-motionEstimation/optical_flow.py
+Optical-flow motion estimation on tracked players.
 
-Optical-flow motion estimation applied to the tracked players, as covered
-in the course labs:
-
-  - Farneback dense optical flow: the mean flow inside each tracked player
-    bounding box gives a per-frame velocity estimate that is converted to
-    km/h through the court homography and compared against the positional
-    speed (frame-to-frame displacement of the projected feet point).
-  - Lucas-Kanade pyramidal sparse flow on Shi-Tomasi corners: a short demo
-    that tracks feature points and saves their trails.
+Two methods:
+  - Farneback dense flow: mean flow inside each player box is a per-frame
+    velocity, projected through the court homography to km/h and compared
+    against positional speed (displacement of the projected feet point).
+  - Lucas-Kanade pyramidal sparse flow on Shi-Tomasi corners (trail demo).
 
 Outputs (default outputs/motion_estimation/):
-  - flow_speeds.csv        frame, player, flow vector, speed from flow vs
-                           positional speed
-  - flow_hsv_*.png         dense-flow colour coding (hue = direction,
-                           value = magnitude)
-  - flow_arrows_*.png      flow arrows on a sparse grid over the frame
+  - flow_speeds.csv        frame, player, flow vector, flow vs positional speed
+  - flow_hsv_*.png         dense flow (hue = direction, value = magnitude)
+  - flow_arrows_*.png      flow arrows on a sparse grid
   - lk_trails.png          Lucas-Kanade feature trails
 
 Usage (from project root):
@@ -60,17 +54,17 @@ def load_player_boxes(players_csv):
 
 def mean_box_flow(flow, box, scale, noise_thr=0.3):
     """
-    Mean flow vector (in ORIGINAL-resolution pixels) inside a player box.
-    Only pixels that actually move (|flow| > noise_thr, in scaled px) are
-    averaged, so the static background inside the box does not dilute the
-    player's motion. Returns None if the box is empty.
+    Mean flow vector in ORIGINAL-resolution pixels inside a player box.
+
+    Only moving pixels (|flow| > noise_thr, in scaled px) are averaged so the
+    static background inside the box does not dilute the player's motion.
+    None if the box doesn't overlap the frame.
     """
     x, y, w, h = box
     fh, fw = flow.shape[:2]
     xs, ys = int(x * scale), int(y * scale)
     ws, hs = max(1, int(w * scale)), max(1, int(h * scale))
-    # Clip the box to the scaled-frame bounds so an out-of-frame box samples
-    # the valid overlap only (instead of silently indexing wrong/empty rows).
+    # Clip to scaled-frame bounds so an off-frame box samples only the overlap.
     x0, y0 = max(0, xs), max(0, ys)
     x1, y1 = min(fw, xs + ws), min(fh, ys + hs)
     region = flow[y0: y1, x0: x1]
@@ -83,7 +77,7 @@ def mean_box_flow(flow, box, scale, noise_thr=0.3):
 
 
 def flow_to_hsv(flow):
-    """Standard HSV colour coding: hue = direction, value = magnitude."""
+    """Color-code flow as BGR: hue = direction, value = magnitude."""
     mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
     hsv = np.zeros((*flow.shape[:2], 3), dtype=np.uint8)
     hsv[..., 0] = ang * 180 / np.pi / 2
@@ -93,7 +87,7 @@ def flow_to_hsv(flow):
 
 
 def draw_flow_arrows(frame, flow, scale, grid=24, min_mag=0.6):
-    """Flow arrows on a sparse grid (frame at original resolution)."""
+    """Overlay flow arrows on a sparse grid; frame is original resolution."""
     vis = frame.copy()
     h, w = flow.shape[:2]
     for ys in range(grid // 2, h, grid):
@@ -124,9 +118,7 @@ def lucas_kanade_demo(video, start, n_frames, out_path, display=False):
         pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=300,
                                       qualityLevel=0.01, minDistance=12,
                                       blockSize=7)
-        # goodFeaturesToTrack returns None on a textureless start frame; in
-        # that case there is nothing to track, so skip the demo gracefully
-        # instead of crashing at len(pts).
+        # goodFeaturesToTrack returns None on a textureless start frame.
         if pts is None or len(pts) == 0:
             print("  LK demo skipped: no corners found on the start frame.")
             return
@@ -201,8 +193,8 @@ def main():
     print(f"Farneback dense flow on {args.video} (scale {args.scale})")
     rows = []
     prev_gray = None
-    prev_feet_m = {}          # player_id -> last projected feet point (m)
-    prev_frame_idx = {}       # player_id -> frame of that point
+    prev_feet_m = {}          # pid -> last projected feet point (m)
+    prev_frame_idx = {}       # pid -> frame of that point
     frame_idx = 0
 
     try:
@@ -267,11 +259,9 @@ def main():
         wr.writerows(rows)
     print(f"  Saved: {csv_path}  ({len(rows)} rows)")
 
-    # summary: flow speed vs positional speed (tracking glitches above a
-    # physiological 45 km/h are excluded from both, as in player_analysis).
-    # Methodological note: this 45 km/h cap is a blunt outlier filter -- it
-    # discards tracking glitches but will also clip any legitimately-noisy but
-    # high flow-speed sample, so the reported means are slightly conservative.
+    # Flow vs positional speed; >45 km/h (physiologically impossible) dropped
+    # from both, as in player_analysis. The cap is blunt: it also clips
+    # legitimately-noisy high samples, so reported means run slightly low.
     data = np.array([[r[1], r[4], r[5] if r[5] != "" else np.nan]
                      for r in rows], dtype=np.float64)
     data[:, 1][data[:, 1] > 45.0] = np.nan

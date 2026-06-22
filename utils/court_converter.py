@@ -3,20 +3,16 @@ import csv
 import cv2
 import numpy as np
 
-# ITF singles court — real-world positions in metres for each labelled corner.
-# Origin = TL (top-left corner of the far baseline).
-#   x : 0 (left sideline)  →  8.2296 m (right sideline)
-#   y : 0 (far baseline)   →  23.7744 m (near baseline)
-# Defined once in utils/court_geometry; re-imported here (and re-exported, since
-# evaluation/evaluate_tracking.py imports _REAL_WORLD from this module).
+# ITF singles court corner positions in metres. Origin = far-baseline TL corner;
+# x spans 0..8.2296 (left→right sideline), y spans 0..23.7744 (far→near baseline).
+# Re-exported: evaluation/evaluate_tracking.py imports _REAL_WORLD from here.
 from utils.court_geometry import _REAL_WORLD
 
 
 class CourtConverter:
     """
-    Converts pixel coordinates inside a tennis court video to real-world
-    metres using a perspective homography computed from the 8 labelled
-    court corners produced by court_tracking.py.
+    Map court-video pixels to real-world metres via a perspective homography
+    fit to the 8 labelled court corners from court_tracking.py.
 
     Usage
     -----
@@ -34,18 +30,16 @@ class CourtConverter:
 
     # ── public ────────────────────────────────────────────────────────────────
 
-    # Smallest homogeneous divisor magnitude we trust. Points whose projective
-    # w-coordinate is ~0 lie on (or beyond) the horizon line of the court plane:
-    # the perspective division would explode to ±inf there, so we clip the
-    # divisor magnitude to this epsilon to keep the result finite/bounded.
+    # Floor on the homogeneous divisor |w|. w~0 means the point sits on the
+    # court plane's horizon line, where perspective division blows up to ±inf;
+    # clipping to this epsilon keeps the result bounded.
     _W_EPS = 1e-9
 
     def to_meters(self, x_px: float, y_px: float) -> tuple[float, float]:
-        """Convert a single pixel position to court metres."""
+        """Project one pixel position to court metres."""
         p = self._H @ np.array([x_px, y_px, 1.0], dtype=np.float64)
-        # Guard the homogeneous divisor against ~0 (point near the horizon line)
-        # to avoid ±inf; preserve the original sign so the projection direction
-        # is kept.
+        # Clamp |w| away from 0 (near-horizon point); keep its sign to preserve
+        # projection direction.
         w = p[2]
         if abs(w) < self._W_EPS:
             w = self._W_EPS if w >= 0 else -self._W_EPS
@@ -53,17 +47,15 @@ class CourtConverter:
 
     def to_meters_batch(self, points: np.ndarray) -> np.ndarray:
         """
-        Convert an (N, 2) array of pixel positions to court metres.
-        Returns an (N, 2) float64 array. Rows whose homogeneous divisor is ~0
-        (points on/near the horizon line of the court plane) are returned as
-        NaN instead of ±inf.
+        Project an (N, 2) pixel array to (N, 2) float64 court metres.
+
+        Near-horizon rows (|w| ~ 0) come back as NaN rather than ±inf.
         """
         pts = np.asarray(points, dtype=np.float64)
         hom = np.column_stack([pts, np.ones(len(pts))])  # (N, 3)
         res = (self._H @ hom.T).T                         # (N, 3)
         w = res[:, 2:3]
-        # Mark near-horizon rows (|w| ~ 0) and divide safely; those rows become
-        # NaN rather than ±inf.
+        # Flag near-horizon rows so their division yields NaN, not ±inf.
         bad = np.abs(w) < self._W_EPS                   # (N, 1)
         safe_w = np.where(bad, np.nan, w)
         out = res[:, :2] / safe_w
@@ -74,7 +66,7 @@ class CourtConverter:
 
     @staticmethod
     def _load(path: str):
-        """Read the court CSV and return aligned pixel and real-world arrays."""
+        """Return aligned (pixel, real-world) arrays for the CSV's known labels."""
         pixel_pts, real_pts = [], []
         with open(path, newline="") as f:
             for row in csv.DictReader(f):
@@ -91,10 +83,8 @@ class CourtConverter:
 
     @staticmethod
     def _compute_homography(pixel_pts, real_pts) -> np.ndarray:
-        # RANSAC (instead of a plain least-squares fit, method=0) makes the
-        # solve robust to a single mislabelled / noisy keypoint: with the 8
-        # court corners available, an outlier corner is rejected rather than
-        # biasing the whole homography.
+        # RANSAC (not plain least-squares) lets the 8-corner fit reject one
+        # mislabelled/noisy corner instead of letting it bias the homography.
         H, _ = cv2.findHomography(
             pixel_pts, real_pts,
             method=cv2.RANSAC, ransacReprojThreshold=3.0,

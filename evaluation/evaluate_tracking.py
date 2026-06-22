@@ -1,23 +1,16 @@
 """
 evaluation/evaluate_tracking.py
 
-Quantitative evaluation of the tracking pipeline against manual ground
-truth created with evaluation/annotate.py.
+Quantitative tracking metrics against manual ground truth from
+evaluation/annotate.py.
 
-Player tracking (when --gt is given):
-  - GT boxes and predicted boxes are matched per frame by best IoU
-    (all assignments are enumerated — at most 2 players per side).
-  - mean / median IoU over matched pairs
-  - precision and recall at the chosen IoU threshold (default 0.5)
-  - centre error in pixels and feet-point error in metres (if a court
-    CSV is given the homography converts both feet points)
-  - ID switches: how often the predicted id assigned to the same GT
-    player changes between consecutive annotated frames
-  - per-frame detail saved to outputs/evaluation/player_eval.csv
+Player tracking (--gt): per-frame best-IoU matching of GT vs predicted
+boxes, mean/median IoU, precision/recall at the IoU threshold, centre
+error (px) and feet-point error (m, via the court homography), and an
+ID-switch count. Per-frame detail goes to outputs/evaluation/player_eval.csv.
 
-Court keypoints (when --court-gt is given):
-  - per-label pixel error between detected and annotated keypoints
-  - error in metres through the GT homography
+Court keypoints (--court-gt): per-label pixel error and metric error
+through the GT homography.
 
 Usage (from project root):
     python evaluation/evaluate_tracking.py \\
@@ -46,11 +39,10 @@ from utils.court_converter import CourtConverter, _REAL_WORLD
 
 def load_boxes(path, valid_ids=None):
     """
-    CSV with frame,player_id,x,y,w,h[,...] → {frame: {pid: (x,y,w,h)}}.
+    Read frame,player_id,x,y,w,h CSV into {frame: {pid: (x,y,w,h)}}.
 
-    If `valid_ids` is given (e.g. {1, 2} for GT), rows whose player_id is not
-    in that set are warned about and skipped, so a typo cannot silently create
-    a spurious third identity.
+    `valid_ids` (e.g. {1, 2} for GT) gates player_id: out-of-set rows are
+    warned and skipped so a typo can't introduce a spurious third identity.
     """
     boxes = defaultdict(dict)
     skipped = 0
@@ -75,6 +67,7 @@ def load_boxes(path, valid_ids=None):
 
 
 def iou(a, b):
+    """Intersection-over-union of two (x, y, w, h) boxes."""
     ax, ay, aw, ah = a
     bx, by, bw, bh = b
     x1, y1 = max(ax, bx), max(ay, by)
@@ -85,19 +78,23 @@ def iou(a, b):
 
 
 def center(box):
+    """Box centroid as a 2-vector."""
     x, y, w, h = box
     return np.array([x + w / 2.0, y + h / 2.0])
 
 
 def feet(box):
+    """Bottom-centre (feet) point of the box, not its centroid."""
     x, y, w, h = box
     return (x + w / 2.0, y + h)
 
 
 def match_boxes(gt, pred):
     """
-    Best assignment GT→pred by total IoU (≤2 boxes per side: enumerate).
-    Returns list of (gt_id, pred_id, iou).
+    Brute-force the GT→pred assignment maximising summed IoU.
+
+    Exhaustive permutation search is fine since each side has ≤2 boxes.
+    Returns (gt_id, pred_id, iou) triples for the winning assignment.
     """
     gt_ids, pred_ids = list(gt), list(pred)
     if not gt_ids or not pred_ids:
@@ -117,16 +114,14 @@ def match_boxes(gt, pred):
 
 def evaluate_players(gt_path, pred_path, court_path, iou_thr, out_dir):
     """
-    Evaluate predicted player boxes against GT boxes per annotated frame.
+    Score predicted player boxes against GT, per annotated frame.
 
-    Note on the "ID switch" metric: predicted ids come from area-ordered
-    connected components, not from a re-identification ground truth. This
-    metric therefore measures match-ASSIGNMENT instability -- how often the
-    predicted id matched to a given GT player flips between consecutive
-    annotated frames -- rather than true identity-preservation errors.
+    Caveat on "ID switches": predicted ids are area-ordered connected
+    components, not a re-id ground truth, so this counts assignment
+    instability (the pred id matched to a GT player flipping between
+    consecutive annotated frames), not true identity-swap errors.
     """
-    # GT is authored by annotate.py with P1=NEAR, P2=FAR, so only ids {1,2}
-    # are valid; reject anything else rather than inventing a third identity.
+    # annotate.py labels P1=NEAR, P2=FAR, so only ids {1,2} are legitimate.
     gt_all = load_boxes(gt_path, valid_ids={1, 2})
     pred_all = load_boxes(pred_path)
     conv = CourtConverter(court_path) if court_path else None
@@ -135,9 +130,7 @@ def evaluate_players(gt_path, pred_path, court_path, iou_thr, out_dir):
     n_gt = n_pred = n_tp = 0
     ious, errs_px, errs_m = [], [], []
     last_assign = {}          # gt_id -> pred_id on the previous annotated frame
-    # counts how often the pred id assigned to the same GT player changes
-    # between consecutive annotated frames (assignment instability, not re-id)
-    id_switches = 0
+    id_switches = 0           # assignment flips, not re-id errors (see docstring)
 
     for frame in sorted(gt_all):
         gt = gt_all[frame]
@@ -155,11 +148,10 @@ def evaluate_players(gt_path, pred_path, court_path, iou_thr, out_dir):
                 err_m_val = float(np.linalg.norm(fm_gt - fm_pr))
                 err_m = round(err_m_val, 3)
             ious.append(ov)
-            # Only aggregate the position-error metrics for valid matches
-            # (IoU >= thr). match_boxes returns the best assignment even when
-            # the best is a poor overlap (or IoU 0); including those "best of
-            # bad" pairs would pollute the center/feet error means. TP/FP/FN
-            # (precision/recall) still use the same iou_thr gate below.
+            # Gate position-error aggregation on IoU>=thr: match_boxes returns
+            # a best assignment even for poor/zero overlaps, which would
+            # otherwise pollute the centre/feet error means. precision/recall
+            # use the same gate.
             if ov >= iou_thr:
                 n_tp += 1
                 errs_px.append(err_px)
@@ -188,7 +180,6 @@ def evaluate_players(gt_path, pred_path, court_path, iou_thr, out_dir):
         print(f"  median IoU            : {np.median(ious):.3f}")
         print(f"  recall  @IoU>={iou_thr}   : {n_tp / n_gt:.3f}")
         print(f"  precision @IoU>={iou_thr} : {n_tp / max(1, n_pred):.3f}")
-        # error means reflect only valid (IoU>=thr) matches
         if errs_px:
             print(f"  centre error (px)     : mean {np.mean(errs_px):.1f}, "
                   f"median {np.median(errs_px):.1f}  (IoU>={iou_thr} only)")
@@ -206,6 +197,7 @@ def evaluate_players(gt_path, pred_path, court_path, iou_thr, out_dir):
 # ── court evaluation ───────────────────────────────────────────────────────────
 
 def load_court(path):
+    """Read a court keypoints CSV into {label: (x, y)}."""
     pts = {}
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
@@ -214,9 +206,10 @@ def load_court(path):
 
 
 def evaluate_court(gt_path, pred_path, out_dir):
+    """Report per-keypoint pixel and metric error of detected vs GT court."""
     gt = load_court(gt_path)
     pred = load_court(pred_path)
-    conv = CourtConverter(gt_path)   # homography from the GT keypoints
+    conv = CourtConverter(gt_path)   # homography built from the GT keypoints
 
     print("\n" + "=" * 56)
     print("  COURT KEYPOINT EVALUATION")
@@ -230,8 +223,8 @@ def evaluate_court(gt_path, pred_path, out_dir):
             continue
         e_px = float(np.hypot(gt[label][0] - pred[label][0],
                               gt[label][1] - pred[label][1]))
-        # project the detected point with the GT homography and compare with
-        # the real-world ITF position of that keypoint
+        # metric error: detected point under the GT homography vs the
+        # keypoint's real-world ITF position
         pm = np.array(conv.to_meters(*pred[label]))
         e_m = float(np.linalg.norm(pm - np.array(_REAL_WORLD[label])))
         errs_px.append(e_px)
@@ -254,6 +247,7 @@ def evaluate_court(gt_path, pred_path, out_dir):
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main():
+    """Parse args and run player and/or court evaluation."""
     parser = argparse.ArgumentParser(
         description="Evaluate player tracking and court detection vs GT")
     parser.add_argument("--gt",

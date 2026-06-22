@@ -1,55 +1,39 @@
 """
-utils/shot_analysis.py
+Shot detection + forehand/backhand/type classification from the ball CSV
+(tracking/BallTracking.py: frame,x,y,w,h,cx,cy,area) and the players CSV.
 
-Detects the moment of the shots and classifies forehand/backhand starting from
-the ball CSV produced by tracking/BallTracking.py (frame,x,y,w,h,cx,cy,area)
-and from the players CSV.
+Detection (ball track smoothed with Savitzky-Golay):
+  1. candidates = persistent vy sign reversal (image: vy<0 toward the far
+     player, vy>0 toward the near; a shot flips it) AND/OR an acceleration-
+     magnitude peak (abrupt velocity change);
+  2. a candidate is a SHOT only if the ball is near a player box — bounces also
+     reverse vy but happen far from the players;
+  3. enforce a minimum gap (default 0.5 s), keeping the stronger acceleration.
 
-Shot detection (on the ball track smoothed with Savitzky-Golay):
-  1. candidates = persistent sign reversal of the vertical velocity vy
-     (in image: a ball traveling toward the far player has vy<0, toward the
-     near player vy>0; a shot reverses the direction) COMBINED with peaks of
-     the acceleration magnitude |dv| (abrupt change of velocity);
-  2. a candidate is a SHOT only if the ball is close to a player's bounding
-     box (bounces also reverse vy but happen far from the players);
-  3. minimum gap between consecutive shots (default 0.5 s), keeping the
-     candidate with the larger acceleration.
+Forehand / backhand at contact:
+  - court side from the feet point in meters: near = seen from behind, his
+    right is image-right; far = seen from the front, his right is image-LEFT;
+  - forehand if the ball is on the dominant-hand side; inverted for left-handers
+    (--p1-hand/--p2-hand left); "unknown" if the ball sits on the body axis.
 
-Forehand / backhand at the shot frame:
-  - the player's court side (near/far) from his feet point projected in
-    meters: near = we see him from behind, his right is the image right;
-    far = we see him from the front, his right is the image LEFT;
-  - forehand if the ball is on the dominant-hand side, backhand otherwise;
-    for left-handers (--p1-hand/--p2-hand left) the reasoning is inverted;
-  - if the ball is almost on the body axis the shot is marked "unknown".
+Shot TYPE (flat/slice/dropshot/lob), orthogonal to fore/back, from the OUTGOING
+trajectory shape. The angled camera makes near-player pixel speed ~3x the far
+for the same shot, so raw pixel speed is never compared across sides;
+perspective is handled by (a) scale-free pace = pixel speed / ball bbox-height,
+(b) court-meters speed via the homography (far split only), and (c)
+dimensionless shape features (diefrac, reach, bowback). dropshot = far ball dies
+fast (low diefrac + low late speed); lob = near ball arcs up and returns;
+slice = floated/decelerating ball; else flat.
+CAVEAT: the homography is a GROUND plane but the ball is airborne at contact, so
+meters speeds are approximate — every meters threshold is a CLI flag (see
+--type-self-test) and may need per-camera retuning; the scale-free ones do not.
 
-Shot TYPE (flat / slice / dropshot / lob), orthogonal to forehand/backhand,
-from the OUTGOING ball trajectory shape (the frames right after contact):
-  - the angled camera makes a NEAR-player pixel speed ~3x a FAR-player one for
-    the same physical shot, so raw pixel speed is never compared across sides.
-    Perspective is handled by (a) a scale-free "pace" = pixel speed / ball
-    bbox-height, (b) court-meters speed via the homography for the far split,
-    and (c) dimensionless trajectory-SHAPE features (diefrac = how fast the ball
-    stops travelling, reach, and bowback = how much the ball arcs back);
-  - dropshot = the far ball dies quickly (low diefrac + low late speed); lob =
-    a near ball that arcs up and returns (tiny diefrac, slow, short reach);
-    slice = a floated/decelerating ball (bowback, low pace); else flat;
-  - CAVEAT: the court homography is a GROUND plane while the ball is airborne at
-    contact, so the meters-based speeds are approximate — every shot-type
-    threshold is a CLI flag (see --type-self-test) and may need per-camera
-    retuning; the scale-free features (pace/diefrac/reach/bowback) do not.
-
-Use (from project root, after generating the ball CSV with BallTracking):
+Use (from project root, after the ball CSV exists):
     python utils/shot_analysis.py --ball outputs/ball_coordinates/ball_Input_video2.csv
     python utils/shot_analysis.py --ball outputs/ball_coordinates/ball_Input_video2.csv \\
         --p1-hand right --p2-hand left
-
-Validation of the logic without the YOLO model (synthetic trajectory):
-    python utils/shot_analysis.py --self-test
-
-Validation of the shot-type classifier against the labelled ground truth
-(needs the real ball_Input_video2.csv + shots.csv):
-    python utils/shot_analysis.py --type-self-test
+    python utils/shot_analysis.py --self-test        # synthetic, no YOLO
+    python utils/shot_analysis.py --type-self-test   # vs labelled ground truth
 """
 
 import argparse
@@ -74,29 +58,25 @@ from utils.court_geometry import _FT, W_m, L_m, NET
 
 def load_ball_track(ball_csv: str) -> pd.DataFrame:
     """
-    Load the ball CSV, realign it over all frames and smooth cx/cy.
-    Return a DataFrame indexed by frame with columns cx, cy (smoothed) and a
-    boolean `interp` column, NaN cx/cy where the ball was never seen.
+    Realign the ball CSV over every frame and Savitzky-Golay smooth cx/cy.
 
-    `interp` marks frames that are interpolated straight-line FILLS rather than
-    real ball detections, so detect_hits can ignore the frozen-BB seam where a
-    long fill meets real motion (which otherwise looks like a contact). It comes
-    from the producer's `interpolated` column (BallTracking) when present; on an
-    older CSV that lacks the column it is all-False (the seam guard is then a
-    no-op — a geometric reconstruction is unreliable after the smoothing below,
-    so we deliberately do not attempt it).
+    Returns a frame-indexed DataFrame with smoothed cx, cy (NaN where the ball
+    was never seen) and a boolean `interp` column. `interp` flags interpolated
+    straight-line fills (not real detections) so detect_hits can skip the
+    frozen-BB seam where a long fill meets real motion (it mimics a contact).
+    Sourced from the producer's `interpolated` column; absent on legacy CSVs
+    -> all-False (seam guard becomes a no-op; we don't reconstruct it, as that
+    is unreliable after the smoothing below).
     """
     df = pd.read_csv(ball_csv)
     if df.empty:
         raise ValueError(f"Empty ball CSV: {ball_csv}")
     idx = range(int(df["frame"].min()), int(df["frame"].max()) + 1)
-    # `h` (ball bbox height) is carried alongside cx/cy as the SCALE proxy used by
-    # the shot-type classifier: the ball looks bigger near the camera, so dividing
-    # a pixel speed by the local median(h) yields a perspective-robust ("scale-free")
-    # pace. h is interpolated the same way as cx/cy but is NOT Savitzky-Golay
-    # smoothed below (only a local median of it is ever used). Older CSVs without an
-    # `h` column degrade gracefully: the column is all-NaN and the meters/shape
-    # features (which don't need h) still work; pace/reach become NaN -> unknown.
+    # `h` (ball bbox height) is the SCALE proxy for the shot-type classifier:
+    # the ball looks bigger near the camera, so px-speed / local median(h) is a
+    # perspective-robust ("scale-free") pace. Interpolated like cx/cy but NOT
+    # smoothed (only its local median is used). Legacy CSVs lack it -> all-NaN
+    # column; meters/shape features still work, pace/reach become NaN -> unknown.
     cols = ["cx", "cy"] + (["h"] if "h" in df.columns else [])
     full = df.set_index("frame")[cols].reindex(idx)
     full = full.interpolate(limit=8, limit_area="inside")
@@ -138,11 +118,10 @@ def load_player_boxes(players_csv: str) -> dict:
 
 def _nearest_box(boxes, frame, pid, radius=3):
     """
-    Box of player ``pid`` in the temporally nearest frame within ±radius, or
-    None. Distance grows outward from ``frame`` (d = 0, 1, 2, …). Tie-break at
-    equal distance |d|: prefer the LATER frame (frame + d) over the earlier one
-    (frame - d) — a small, documented, deterministic rule so the result no
-    longer silently depends on the probe order.
+    Box of player ``pid`` in the nearest frame within ±radius, or None.
+
+    Probes outward (d = 0, 1, 2, …); on a tie in |d| prefers the later frame
+    (deterministic, so the result doesn't depend on probe order).
     """
     for d in range(radius + 1):
         for f in (frame + d, frame - d):   # later frame first on ties
@@ -161,14 +140,11 @@ def _ball_near_player(ball_xy, box, expand_w=0.9, expand_h=0.55):
 
 def _gradient_runs(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
     """
-    np.gradient applied independently over each contiguous run where ``valid``
-    is True, leaving every invalid (NaN) sample as NaN.
+    np.gradient per contiguous valid run, leaving NaN samples NaN.
 
-    Running np.gradient over a NaN-holed array contaminates the two neighbours
-    of every gap (a single 1-frame ball dropout would poison the velocity on
-    both sides and can hide a real shot next to it). By splitting the track
-    into maximal valid runs and differentiating each run on its own, gaps stay
-    isolated and the samples around them keep clean derivatives.
+    Differentiating across a NaN gap contaminates both neighbours (a 1-frame
+    dropout would poison the velocity on each side and could hide an adjacent
+    shot); splitting into maximal valid runs keeps gaps isolated.
     """
     out = np.full(len(values), np.nan, dtype=float)
     i = 0
@@ -180,11 +156,11 @@ def _gradient_runs(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
         j = i
         while j < n and valid[j]:
             j += 1
-        # contiguous valid run [i, j)
+        # valid run [i, j)
         if j - i >= 2:
             out[i:j] = np.gradient(values[i:j].astype(float))
         else:
-            # a lone valid sample has no defined gradient -> leave NaN
+            # lone sample has no gradient
             out[i:j] = np.nan
         i = j
     return out
@@ -196,49 +172,37 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
                 reversal_look: int = 6,
                 reversal_vy_frac: float = 0.5) -> list:
     """
-    Return [(frame, player_id, acc_strength), ...] of the detected shots.
+    Detected shots as [(frame, player_id, acc_strength), ...].
 
-    vy_min  : minimum magnitude (px/frame) of the mean velocity before/after for
-              a sign reversal to count as a candidate
-    acc_thr : threshold (px/frame^2) on the peaks of the acceleration magnitude
-    win     : half-window (frames) used for the before/after velocity means and
-              the local acceleration-peak test
-    reversal_look    : forward/backward half-window (frames) used ONLY to confirm
-              an acceleration-only candidate (acc_peak True, flip False): the
-              outgoing vy must keep the opposite sign to the incoming vy over this
-              window. Tolerates a short ball dropout right after contact via
-              nanmean + a minimum valid-sample count. NOT applied to candidates
-              that already pass `flip`. Longer than `win` so it checks the
-              sustained outgoing direction.
-    reversal_vy_frac : relaxed magnitude floor for that confirmation, as a
-              fraction of vy_min (effective floor = reversal_vy_frac * vy_min),
-              applied to the OUTGOING (forward) mean only. Kept below vy_min so
-              the confirmation is genuinely looser than `flip` and does not
-              collapse the acceptance rule back to `flip`.
+    vy_min  : min |mean vy| (px/frame) before/after for a sign flip to count.
+    acc_thr : threshold (px/frame^2) on acceleration-magnitude peaks.
+    win     : half-window (frames) for the before/after vy means and the local
+              acceleration-peak test.
+    reversal_look    : half-window (frames) used ONLY to confirm an acc-only
+              candidate (acc_peak True, flip False): outgoing vy must hold the
+              opposite sign over it. nanmean-tolerant of a short post-contact
+              dropout; longer than `win` to check a sustained direction.
+    reversal_vy_frac : relaxed outgoing |mean vy| floor for that confirmation
+              (= reversal_vy_frac * vy_min). Kept below vy_min so confirmation
+              stays genuinely looser than `flip`.
     """
     frames = track.index.values
     cx = track["cx"].values
     cy = track["cy"].values
     valid = ~(np.isnan(cx) | np.isnan(cy))
 
-    # Differentiate over contiguous valid runs only, so a 1-frame ball dropout
-    # does not contaminate the velocity/acceleration of its neighbours and hide
-    # a shot next to the gap (see _gradient_runs).
+    # Per-run differentiation so a 1-frame dropout can't hide an adjacent shot.
     vx = _gradient_runs(cx, valid)
     vy = _gradient_runs(cy, valid)
     valid_v = ~(np.isnan(vx) | np.isnan(vy))
     acc = np.hypot(_gradient_runs(vx, valid_v), _gradient_runs(vy, valid_v))
 
-    # Independent post-contact reversal confirmation, used ONLY to gate
-    # acceleration-only candidates (acc_peak True, flip False). Deliberately
-    # LOOSER than `flip`: a relaxed magnitude floor (reversal_vy_frac * vy_min)
-    # applied to the outgoing mean only, over a longer look-ahead than `win`,
-    # and tolerant of a short ball dropout right after contact (nanmean over the
-    # window, requiring at least `min_valid` real samples on each side). If this
-    # were identical to `flip`, `flip or (acc_peak and reversal)` would collapse
-    # to `flip` and silently drop every acc-only candidate.
+    # Post-contact reversal confirmation, gating acc-only candidates only.
+    # Deliberately looser than `flip` (relaxed floor on the outgoing mean,
+    # longer look-ahead, dropout-tolerant) — if it equalled `flip`,
+    # `flip or (acc_peak and reversal)` would collapse to `flip`.
     rev_floor = reversal_vy_frac * vy_min
-    min_valid = 2   # minimum real vy samples required in each window
+    min_valid = 2   # real vy samples required per window
 
     def _persistent_reversal(i):
         lo = max(0, i - reversal_look)
@@ -247,11 +211,11 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
             return False
         if np.count_nonzero(valid_v[i + 1:hi]) < min_valid:
             return False
-        b = np.nanmean(vy[lo:i])          # incoming, excludes contact frame i
-        a = np.nanmean(vy[i + 1:hi])      # outgoing, excludes contact frame i
+        b = np.nanmean(vy[lo:i])          # incoming (excludes contact frame i)
+        a = np.nanmean(vy[i + 1:hi])      # outgoing (excludes contact frame i)
         if np.isnan(b) or np.isnan(a):
             return False
-        # genuine, sustained sign flip; magnitude floor on the OUTGOING side only
+        # sustained flip; floor on the outgoing side only
         return (b * a < 0) and (abs(a) >= rev_floor)
 
     candidates = {}   # idx -> strength
@@ -264,8 +228,7 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
                 and min(abs(before), abs(after)) >= vy_min)
         acc_peak = (acc[i] >= acc_thr
                     and acc[i] == np.nanmax(acc[i - win:i + win + 1]))
-        # acc-only candidates (acc_peak but not flip) now require an independent,
-        # relaxed post-contact reversal confirmation. flip candidates unchanged.
+        # acc-only candidates need the relaxed reversal confirmation; flip ones don't.
         if flip or (acc_peak and _persistent_reversal(i)):
             candidates[i] = max(candidates.get(i, 0.0), float(acc[i]))
 
@@ -286,30 +249,25 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
         if best is not None:
             near_player[i] = (best[0], strength)
 
-    # Same-player WIDE-gap clustering: one shot per physical contact.
-    #
-    # A single contact produces TWO reversals a few frames apart (an early
-    # approach-side reversal as the ball nears the player, plus the true contact
-    # reversal), and the old narrow min_gap (~15 frames) let those survive as TWO
-    # shots whenever they were 10-29 frames apart (the observed double spacing).
-    # Distinct same-player rally shots are >= ~64 frames apart on real footage, so
-    # a wider merge_gap collapses each double into one while never merging two
-    # genuine shots. Opposite-player candidates are NEVER merged (the rally
-    # alternates), so the player id is part of the cluster key.
+    # Same-player wide-gap clustering: one shot per physical contact.
+    # A contact often yields TWO reversals 10-29 frames apart (approach-side +
+    # true contact). Distinct same-player rally shots are >= ~64 frames apart, so
+    # a wide merge_gap collapses each double without merging genuine shots.
+    # Opposite-player candidates are never merged (rally alternates) -> pid in key.
     merge_gap = max(int(min_gap_s * fps), 30)
     interp = (track["interp"].to_numpy().astype(bool)
               if "interp" in track.columns else np.zeros(len(frames), bool))
 
     def _fill_run(i, step):
-        # Length of the consecutive interpolated-fill run adjacent to index i.
+        # Length of the interpolated-fill run adjacent to index i in direction step.
         c, k = 0, i + step
         while 0 <= k < len(interp) and interp[k]:
             c += 1
             k += step
         return c
 
-    # Build same-player clusters (frame order), then keep the STRONGEST member of
-    # each (peak acceleration = the most physical contact).
+    # Cluster same-player candidates (frame order); the strongest member of each
+    # cluster (peak acceleration) is the real contact.
     clusters = []   # each: list of array-indices i
     for i in sorted(near_player):
         pid = near_player[i][0]
@@ -324,11 +282,9 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
     hits = []
     for cl in clusters:
         best = max(cl, key=lambda j: near_player[j][1])   # strongest member
-        # Frozen-BB seam guard: a candidate sitting at the end of a long
-        # interpolated straight fill (incoming fill >= 10 frames) with no real
-        # ball arriving after it (outgoing fill == 0) is the interpolation kink,
-        # not a contact (the frame-49 false positive). No-op when `interp` is
-        # all-False (legacy CSV without the producer `interpolated` column).
+        # Frozen-BB seam guard: a candidate at the end of a long fill (incoming
+        # >= 10 frames) with no real ball after it (outgoing == 0) is the
+        # interpolation kink, not a contact. No-op on legacy all-False `interp`.
         if _fill_run(best, -1) >= 10 and _fill_run(best, +1) == 0:
             continue
         f = int(frames[best])
@@ -342,42 +298,37 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
 def classify_stroke(ball_cx, player_box, player_side, hand,
                     deadband_frac=0.12):
     """
-    player_side : "near" | "far" (relative to the camera)
-    hand        : "right" | "left"
-    Return "forehand", "backhand" or "unknown" (ball on the body axis).
+    "forehand" / "backhand" / "unknown" (ball on the body axis).
+
+    player_side : "near" | "far" relative to the camera.
+    hand        : "right" | "left".
     """
     x, y, w, h = player_box
     player_cx = x + w / 2.0
     db = ball_cx - player_cx
     if abs(db) < deadband_frac * w:
         return "unknown"
-    # the dominant hand is toward image-right if (near and right) or (far and left-handed)
+    # dominant hand points image-right iff (near and right) or (far and left)
     dominant_is_image_right = (player_side == "near") == (hand == "right")
     return "forehand" if (db > 0) == dominant_is_image_right else "backhand"
 
 
 # ── shot-type (flat / slice / dropshot / lob) classification ────────────────────
 #
-# Orthogonal to forehand/backhand: classifies HOW the ball was struck from the
-# shape of its OUTGOING trajectory (the frames right after contact).
+# Orthogonal to fore/back: HOW the ball was struck, from its OUTGOING trajectory
+# shape. The angled camera makes near-player px speed ~3x the far for the same
+# shot, so px speed is never compared across sides; perspective is handled by:
+#   * scale-free `pace`   = 100 * mean(px step speed) / median(ball bbox h);
+#                           apparent size and speed shrink with distance alike.
+#   * meters `peak_m`/`tail_m` via the homography (× fps), FAR flat/slice split
+#     only. CAVEAT: ground homography, airborne ball -> m/s approximate, so every
+#     meters threshold is a CLI flag for per-camera re-derivation.
+#   * dimensionless SHAPE: `diefrac` (2nd-/1st-half outgoing path length = how
+#     fast the ball stops), `reach` (path length / h), `bb` (bowback: vertical-
+#     range fraction travelled back after an interior extreme; ~0 flat, high arc).
 #
-# The footage is shot from an angled camera, so a raw pixel speed is ~3x larger
-# for the NEAR player than the FAR player for the same physical shot. We therefore
-# never compare a raw pixel speed across sides; perspective is handled three ways:
-#   * scale-free `pace`   = 100 * mean(px step speed) / median(ball bbox h); the
-#                           ball's apparent size h shrinks with distance exactly as
-#                           its apparent speed does, so the ratio is scale-free.
-#   * meters `peak_m`/`tail_m` via the court homography (× fps) — physical units,
-#     used only for the FAR flat/slice split. CAVEAT: the homography is a GROUND
-#     plane but the ball is airborne at contact, so these m/s are approximate —
-#     hence every threshold is exposed as a CLI flag for per-camera re-derivation.
-#   * dimensionless SHAPE: `diefrac` (2nd-half / 1st-half outgoing path length — how
-#     fast the ball stops travelling), `reach` (path length / h), and `bb`
-#     (bowback: fraction of the vertical range the ball travels back after an
-#     interior vertical extreme — ~0 for a flat drive, high for a lofted arc).
-#
-# Thresholds were fit against a 23-shot ground truth and sit on wide plateaus
-# (see --type-self-test, which reproduces 23/23 and is stable for K in 22..30).
+# Thresholds fit against a 23-shot ground truth, on wide plateaus (see
+# --type-self-test: reproduces 23/23, stable for K in 22..30).
 
 # Default thresholds (also the CLI-flag defaults in main()). Plateau centers.
 SHOT_TYPE_PARAMS = {
@@ -402,21 +353,20 @@ def _pathlen(cx: np.ndarray, cy: np.ndarray) -> float:
 
 def _bowback(cy: np.ndarray) -> float:
     """
-    Bowback: after the ball's first INTERIOR vertical extreme in the outgoing
-    window, the fraction of the total vertical range it travels back. ~0 for a
-    monotone drive (the ball keeps going one way); -> 1 for a lofted/floated arc
-    (it rises to an apex then comes back down, or vice-versa). Scale-free.
+    Scale-free bowback: fraction of the vertical range the ball travels back
+    after its first interior vertical extreme. ~0 for a monotone drive, -> 1 for
+    a lofted/floated arc (rises to an apex then returns, or vice-versa).
     """
     n = len(cy)
     if n < 6:
         return 0.0
     rng = float(np.nanmax(cy) - np.nanmin(cy))
-    if rng < 20:          # essentially flat in y: no meaningful arc
+    if rng < 20:          # essentially flat in y
         return 0.0
     imin = int(np.nanargmin(cy))
     imax = int(np.nanargmax(cy))
-    # interior extreme only (1 <= idx <= n-3): an extreme at the very edge is the
-    # window boundary, not a real turn-around of the trajectory.
+    # interior extreme only (1 <= idx <= n-3): an edge extreme is the window
+    # boundary, not a real turn-around.
     up_down = (np.nanmax(cy[imin:]) - cy[imin]) / rng if 1 <= imin <= n - 3 else 0.0
     down_up = (cy[imax] - np.nanmin(cy[imax:])) / rng if 1 <= imax <= n - 3 else 0.0
     return float(max(up_down, down_up))
@@ -425,9 +375,10 @@ def _bowback(cy: np.ndarray) -> float:
 def _shot_type_features(track, conv, i: int, fps: float,
                         k: int, w30: int) -> dict:
     """
-    Outgoing-trajectory features for the contact at integer array-index ``i`` into
-    the (already-smoothed) ball track. Returns a dict of pace, peak_m, tail_m,
-    apex, rise, bb, diefrac, reach (any may be NaN on a missing window).
+    Outgoing-trajectory features for the contact at array-index ``i``.
+
+    Returns pace, peak_m, tail_m, apex, rise, bb, diefrac, reach (any may be NaN
+    on a missing window).
     """
     cx = track["cx"].values
     cy = track["cy"].values
@@ -445,7 +396,7 @@ def _shot_type_features(track, conv, i: int, fps: float,
     spx = np.hypot(np.diff(cxo), np.diff(cyo))
     pace = 100.0 * _mean(spx) / hc if hc and not np.isnan(hc) else np.nan
 
-    # perspective-corrected speed in m/s (ground-plane homography; approximate)
+    # speed in m/s via the ground homography (airborne ball -> approximate)
     pm = conv.to_meters_batch(np.column_stack([cxo, cyo]))
     dm = np.diff(pm, axis=0)
     spm = np.hypot(dm[:, 0], dm[:, 1]) * fps
@@ -453,10 +404,10 @@ def _shot_type_features(track, conv, i: int, fps: float,
     tail_m = _mean(spm[18:26])                   # late-window speed
 
     apex = float(cyo[0] - np.nanmin(cyo)) if np.any(~np.isnan(cyo)) else np.nan
-    rise = _mean(np.diff(cyo[:6]))               # initial vertical velocity sign
+    rise = _mean(np.diff(cyo[:6]))               # initial vertical step (sign = direction)
     bb = _bowback(cyo)
 
-    # half-vs-half path-length ratio over the (slightly longer) W30 window
+    # half-vs-half path-length ratio over the longer W30 window
     cyo30 = cy[i:i + w30 + 1]
     cxo30 = cx[i:i + w30 + 1]
     half = w30 // 2
@@ -471,23 +422,21 @@ def _shot_type_features(track, conv, i: int, fps: float,
 
 def classify_shot_type(feats: dict, side: str, params: dict = None) -> str:
     """
-    flat | slice | dropshot | lob | unknown, from the outgoing-trajectory features
-    and the striking player's court side. First matching rule wins. Returns
-    "unknown" when the discriminating features could not be computed (missing
-    outgoing window) so a bad shot never silently masquerades as a confident type.
+    flat | slice | dropshot | lob | unknown, from the outgoing features and the
+    striker's court side. First matching rule wins; "unknown" when the
+    discriminating features are missing, so a bad shot never poses as a type.
     """
     p = params or SHOT_TYPE_PARAMS
     df = feats.get("diefrac")
     peak_m = feats.get("peak_m")
 
-    # The shape signals (diefrac for dropshot/lob, peak_m for the far split) are
-    # the load-bearing discriminators; if they're NaN we can't classify safely.
+    # diefrac (and peak_m for the far split) are load-bearing; NaN -> can't classify.
     if df is None or np.isnan(df):
         return "unknown"
 
-    # R1 DROPSHOT (far): the ball's path collapses in the 2nd half AND the late
-    # speed is low. diefrac is scale-free and immune to where the apex falls; the
-    # tail_m AND-gate protects a fast far-flat whose diefrac happens to be middling.
+    # R1 DROPSHOT (far): path collapses in the 2nd half AND late speed is low.
+    # diefrac is scale-free; the tail_m AND-gate protects a fast far-flat with a
+    # middling diefrac.
     tail_m = feats.get("tail_m")
     if (side == "far" and df < p["drop_diefrac"]
             and tail_m is not None and not np.isnan(tail_m)
@@ -495,8 +444,8 @@ def classify_shot_type(feats: dict, side: str, params: dict = None) -> str:
         return "dropshot"
 
     if side == "near":
-        # R2a LOB: arcs up then returns -> tiny diefrac; triple-confirmed by a slow
-        # pace and a short reach (lob is rare, so it is gated three independent ways).
+        # R2a LOB: arcs up then returns -> tiny diefrac; triple-gated (slow pace,
+        # short reach) since lobs are rare and false positives costly.
         pace = feats.get("pace")
         reach = feats.get("reach")
         if (df < p["lob_diefrac"]
@@ -513,7 +462,7 @@ def classify_shot_type(feats: dict, side: str, params: dict = None) -> str:
         # R2c default
         return "flat"
 
-    # R3 FAR branch: a fast drive is flat, a floated ball is a slice.
+    # R3 FAR: fast drive -> flat, floated -> slice.
     if peak_m is None or np.isnan(peak_m):
         return "unknown"
     return "flat" if peak_m >= p["far_peak_m"] else "slice"
@@ -521,20 +470,18 @@ def classify_shot_type(feats: dict, side: str, params: dict = None) -> str:
 
 # ── overhead (serve / smash) detection ──────────────────────────────────────────
 #
-# ORTHOGONAL and ADDITIVE to shot_type: serve/smash go in a SEPARATE `overhead`
-# column and NEVER overwrite shot_type (flat/slice/dropshot/lob/unknown). The
-# classifier is deliberately CONSERVATIVE — its first priority is ZERO false
-# positives on groundstrokes/lobs, so when anything is uncertain it returns "".
+# ADDITIVE to shot_type: serve/smash live in a separate `overhead` column and
+# never overwrite it. Deliberately CONSERVATIVE — zero false positives on
+# groundstrokes/lobs is the priority, so anything uncertain returns "".
 #
-# Geometry recap (image y grows DOWNWARD; court meters via the ground homography):
-#   * an overhead contact has the ball clearly ABOVE the player's head
-#     (ball_cy < box_top - margin*h) and roughly over the body (x-aligned). This
-#     gate is geometrically rare for groundstrokes (ball ~ waist/shoulder, off to
-#     the side), so it is what protects the existing shot types.
-#   * a SERVE is the first shot of the clip, the server stationary behind his own
-#     baseline, the ball tossed up locally (slow, near-side incoming).
-#   * a SMASH is hit off an opponent's ball that came fast from across the net and
-#     is then DRIVEN downward (outgoing arcs down/fast, unlike a lob which arcs up).
+# Geometry (image y grows DOWN; meters via the ground homography):
+#   * overhead gate: ball clearly ABOVE the head (ball_cy < box_top - margin*h)
+#     and roughly over the body. Rare for groundstrokes (ball ~ waist, off to the
+#     side), which is what protects the existing shot types.
+#   * SERVE: first shot; server stationary behind his own baseline; ball tossed
+#     up locally (slow, near-side incoming).
+#   * SMASH: off an opponent ball that arrives fast from across the net, then
+#     DRIVEN downward (vs a lob, which arcs up).
 
 OVERHEAD_PARAMS = {
     # Common overhead gate
@@ -577,11 +524,10 @@ def _box_feet(box):
 
 def _player_speed_mps(boxes, conv, f, pid, fps, dt=3):
     """
-    Player feet speed in m/s around frame ``f`` for player ``pid``: take the feet
-    point at f-dt and f+dt (via _nearest_box, robust to a few absent frames),
-    project both through the court homography to meters and divide the travelled
-    distance by the elapsed time. Returns None if either box is missing or the
-    projection is not finite.
+    Player feet speed (m/s) around frame ``f``.
+
+    Feet at f-dt and f+dt (via _nearest_box), projected to meters; distance /
+    elapsed time. None if a box is missing or a projection is non-finite.
     """
     b0 = _nearest_box(boxes, f - dt, pid)
     b1 = _nearest_box(boxes, f + dt, pid)
@@ -604,19 +550,14 @@ def _player_speed_mps(boxes, conv, f, pid, fps, dt=3):
 
 def _incoming_ball_features(track, conv, i, fps, win=10):
     """
-    Features of the ball BEFORE contact at array-index ``i`` (the window
-    [i-win:i]) — the incoming mirror of the OUTGOING _shot_type_features. Used to
-    tell a serve (slow, locally-tossed ball) from a smash (fast ball arriving from
-    across the net).
+    Incoming-ball features over [i-win:i] — the mirror of _shot_type_features,
+    used to tell a serve (slow, local toss) from a smash (fast, across-net).
 
-    Returns a dict:
-      in_speed_m : incoming ball speed in m/s (median of per-step homography
-                   speeds over the window), NaN if the pre-contact track is too
-                   short/holey.
-      in_y_m     : the ball's court y (meters) ~win frames before contact, used to
-                   place the ball's origin (own side vs across the net). NaN if
-                   unavailable.
-      in_x_m     : the ball's court x (meters) ~win frames before contact. NaN if
+    Returns:
+      in_speed_m : incoming speed (m/s, median of per-step homography speeds),
+                   NaN if the pre-contact track is too short/holey.
+      in_y_m, in_x_m : ball court position (meters) ~win frames pre-contact,
+                   placing the ball's origin (own side vs across net). NaN if
                    unavailable.
     """
     out = dict(in_speed_m=np.nan, in_y_m=np.nan, in_x_m=np.nan, in_vy_px=np.nan)
@@ -631,15 +572,14 @@ def _incoming_ball_features(track, conv, i, fps, win=10):
     spm = spm[~np.isnan(spm)]
     if len(spm):
         out["in_speed_m"] = float(np.nanmedian(spm))
-    # Vertical direction of the incoming ball, in PIXELS (scale-free, robust to
-    # the ground homography distorting an airborne ball near the baseline). Image
-    # y grows downward, so median per-step dcy < 0 means the ball is RISING (a
-    # serve toss) and > 0 means it is DESCENDING (a ball coming down for a smash).
+    # Incoming vertical direction in PIXELS (robust to homography distortion of
+    # the airborne ball near the baseline). y grows down, so median dcy < 0 =
+    # RISING (serve toss), > 0 = DESCENDING (ball falling for a smash).
     dcy = np.diff(cy)
     dcy = dcy[~np.isnan(dcy)]
     if len(dcy):
         out["in_vy_px"] = float(np.median(dcy))
-    # earliest valid pre-contact ball court position (origin of the incoming ball)
+    # earliest valid pre-contact court position (the incoming ball's origin)
     for k in range(len(pm)):
         if np.all(np.isfinite(pm[k])):
             out["in_x_m"] = float(pm[k, 0])
@@ -652,19 +592,18 @@ def classify_overhead(box, ball_cx, ball_cy, player_x_m, player_y_m, side,
                       stroke, in_feats, out_feats, player_speed,
                       is_first_shot, params=None):
     """
-    Classify an overhead shot as "serve", "smash" or "" (none). CONSERVATIVE:
-    returns "" the moment any required signal is missing or out of range, so a
-    groundstroke/lob is never mislabelled. serve and smash are mutually exclusive.
+    "serve" | "smash" | "" (none). CONSERVATIVE: returns "" the moment any
+    required signal is missing or out of range; serve and smash are exclusive.
 
-    box                : player bbox (x, y, w, h) px at contact
-    ball_cx, ball_cy   : ball pixel position at contact (image y grows downward)
-    player_x_m,_y_m    : player feet court position (meters)
-    side               : "near" | "far"
-    stroke             : forehand/backhand/unknown (corroborates a serve, not required)
-    in_feats           : dict from _incoming_ball_features
-    out_feats          : dict from _shot_type_features (outgoing shape)
-    player_speed       : player feet speed (m/s) from _player_speed_mps, or None
-    is_first_shot      : True iff this is the first detected shot of the clip
+    box                : player bbox (x, y, w, h) px at contact.
+    ball_cx, ball_cy   : ball px at contact (image y grows downward).
+    player_x_m,_y_m    : player feet court position (meters).
+    side               : "near" | "far".
+    stroke             : corroborates a serve, not required.
+    in_feats           : from _incoming_ball_features.
+    out_feats          : from _shot_type_features (outgoing shape).
+    player_speed       : feet speed (m/s) from _player_speed_mps, or None.
+    is_first_shot      : True iff the first detected shot of the clip.
     """
     p = params or OVERHEAD_PARAMS
     if box is None:
@@ -675,8 +614,8 @@ def classify_overhead(box, ball_cx, ball_cy, player_x_m, player_y_m, side,
     player_cx = x + w / 2.0
     box_top = y
 
-    # ── Common overhead gate: ball clearly above head AND horizontally aligned ──
-    # (image y grows downward, so "above" means a SMALLER y than box_top).
+    # ── Overhead gate: ball clearly above head AND x-aligned over the body ──
+    # (y grows down, so "above" = smaller y than box_top).
     if not (ball_cy < box_top - p["above_head_frac"] * h):
         return ""
     if not (abs(ball_cx - player_cx) < p["x_align_frac"] * w):
@@ -685,27 +624,25 @@ def classify_overhead(box, ball_cx, ball_cy, player_x_m, player_y_m, side,
     in_speed = in_feats.get("in_speed_m") if in_feats else None
     in_y = in_feats.get("in_y_m") if in_feats else None
 
-    # ── SERVE: first shot, stationary, behind own baseline, slow local toss ──
+    # ── SERVE: first shot, stationary, behind own baseline, local toss ──
     if is_first_shot:
-        # behind own baseline: near baseline at y_m = L_m, far baseline at y_m = 0
+        # behind own baseline: near baseline y_m = L_m, far baseline y_m = 0
         if side == "near":
             behind = player_y_m >= L_m - p["behind_baseline_m"]
         else:
             behind = player_y_m <= 0.0 + p["behind_baseline_m"]
         stationary = (player_speed is not None
                       and player_speed < p["stationary_mps"])
-        # the toss RISES (or sits near its apex) just before contact and originates
-        # on the server's OWN side of the net (a smash's incoming ball descends and
-        # comes from across the net). Direction is used instead of an m/s "slow"
-        # test, which is unreliable: the ground homography hugely inflates the
-        # speed of the airborne toss near the baseline.
+        # toss RISES (or near apex) pre-contact and originates on the server's OWN
+        # half (a smash's ball descends from across the net). Direction beats an
+        # m/s "slow" test: the homography inflates the airborne toss near the baseline.
         in_vy = in_feats.get("in_vy_px") if in_feats else None
         tossing = (in_vy is not None and not np.isnan(in_vy)
                    and in_vy <= p["serve_toss_vy_px"])
         if in_y is not None and not np.isnan(in_y):
-            if side == "near":   # near half is y_m > NET
+            if side == "near":   # near half: y_m > NET
                 local = in_y > NET - p["serve_toss_local_m"]
-            else:                # far half is y_m < NET
+            else:                # far half: y_m < NET
                 local = in_y < NET + p["serve_toss_local_m"]
         else:
             local = False
@@ -713,21 +650,19 @@ def classify_overhead(box, ball_cx, ball_cy, player_x_m, player_y_m, side,
             return "serve"
 
     # ── SMASH: opponent ball arrives fast, driven DOWNWARD on the way out ──
-    # (Must NOT be a serve case: a smash is generally not the first shot and/or
-    # the player is not parked behind his own baseline.)
+    # (Excludes the serve setup: not first shot and/or not behind own baseline.)
     behind_own = False
     if side == "near":
         behind_own = player_y_m >= L_m - p["behind_baseline_m"]
     else:
         behind_own = player_y_m <= 0.0 + p["behind_baseline_m"]
     if is_first_shot and behind_own:
-        return ""   # looks like a serve setup, not a smash — stay conservative
+        return ""   # serve setup, not a smash
 
     rise = out_feats.get("rise") if out_feats else None     # +ve = ball goes DOWN
     apex = out_feats.get("apex") if out_feats else None      # px the ball rose above contact
     in_vy = in_feats.get("in_vy_px") if in_feats else None
-    # a smash is struck off an opponent ball that ARRIVES DESCENDING (cy increasing
-    # -> in_vy_px clearly positive), unlike a serve toss that rises.
+    # smash ball arrives DESCENDING (in_vy_px > 0); a serve toss rises.
     descending_in = (in_vy is not None and not np.isnan(in_vy)
                      and in_vy >= p["smash_incoming_down_px"])
     downward = (rise is not None and not np.isnan(rise)
@@ -744,12 +679,10 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                   vy_min=0.5, acc_thr=1.5, win=4,
                   reversal_look=6, reversal_vy_frac=0.5,
                   type_params=None):
-    """Full pipeline: detect shots and classify them. Return a DataFrame."""
+    """Detect and classify every shot; return a DataFrame."""
     tp = type_params or SHOT_TYPE_PARAMS
-    # Diagnose a frame-numbering mismatch between the ball CSV and the players
-    # CSV: if the two frame ranges don't overlap, _nearest_box can never match,
-    # detect_hits yields nothing and the user only sees "No shots detected"
-    # with no explanation. Warn explicitly instead.
+    # Warn on a ball/player frame-range mismatch: non-overlapping ranges mean
+    # _nearest_box never matches and the user would just see "No shots detected".
     if len(track.index) and boxes:
         b0, b1 = int(track.index.min()), int(track.index.max())
         p0, p1 = min(boxes), max(boxes)
@@ -769,11 +702,10 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         box = _nearest_box(boxes, f, pid)
         if box is None:
             continue
-        # median of the ball position over ±2 frames (reduces noise)
+        # ±2-frame median ball position (denoise)
         sel = track.loc[max(track.index.min(), f - 2): f + 2]
-        # Guard against an all-NaN window (the ball was never seen around this
-        # frame): np.nanmedian would return NaN and contaminate
-        # classify_stroke / to_meters. Skip (and count) such shots instead.
+        # An all-NaN window (ball never seen here) would give nanmedian = NaN and
+        # poison classify_stroke / to_meters; skip and count instead.
         cx_win = sel["cx"].values
         cy_win = sel["cy"].values
         if np.all(np.isnan(cx_win)) or np.all(np.isnan(cy_win)):
@@ -783,21 +715,19 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         ball_cy = float(np.nanmedian(cy_win))
 
         feet = _box_feet(box)
-        # Player court position (feet) in meters — used by the shot hitmap to
-        # place the marker where the PLAYER hit the ball (not where the ball was).
+        # Player feet in meters — the hitmap marks where the PLAYER struck, not the ball.
         player_x_m, player_y_m = conv.to_meters(*feet)
         side = "near" if player_y_m > NET else "far"
         stroke = classify_stroke(ball_cx, box, side, hands[pid])
 
-        # Shot TYPE (flat/slice/dropshot/lob) from the OUTGOING trajectory shape.
-        # The contact frame `f` maps to the integer array-index `i` into the
-        # smoothed track via the (contiguous) frame index.
+        # Shot type from outgoing shape; contact frame `f` -> array-index `i`
+        # (the frame index is contiguous).
         i = int(f - track.index.min())
         feats = _shot_type_features(track, conv, i, fps, tp["k"], tp["w30"])
         shot_type = classify_shot_type(feats, side, tp)
 
-        # Overhead (serve/smash) — ADDITIVE, separate column, never overwrites
-        # shot_type. Wrapped so missing/short data yields "" and never raises.
+        # Overhead (serve/smash): separate column; wrapped so short/missing data
+        # yields "" rather than raising.
         try:
             in_feats = _incoming_ball_features(track, conv, i, fps)
             player_speed = _player_speed_mps(boxes, conv, f, pid, fps)
@@ -808,10 +738,8 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         except Exception:
             overhead = ""
 
-        # NOTE: to_meters uses the ground-plane (court) homography, but at the
-        # moment of contact the ball is airborne (~ racket height). Projecting
-        # an above-ground point through a ground homography is only approximate
-        # — treat ball_x_m / ball_y_m as indicative, not exact, court coords.
+        # CAVEAT: to_meters uses the ground homography but the ball is airborne at
+        # contact, so ball_x_m/ball_y_m are indicative, not exact.
         bx_m, by_m = conv.to_meters(ball_cx, ball_cy)
         rows.append({
             "frame": f, "time_s": round(f / fps, 2), "player_id": pid,
@@ -852,7 +780,7 @@ def save_shot_frames(shots: pd.DataFrame, video_path: str, boxes: dict,
             x, y, w, h = (int(v) for v in box)
             cv2.rectangle(fr, (x, y), (x + w, y + h), (0, 255, 0), 2)
         cv2.circle(fr, (int(r.ball_cx), int(r.ball_cy)), 9, (0, 255, 255), 2)
-        # shot_type may be absent on a legacy DataFrame; guard with getattr.
+        # shot_type absent on a legacy DataFrame
         shot_type = getattr(r, "shot_type", "")
         label = (f"P{r.player_id} {r.stroke} {shot_type} (frame {r.frame})"
                  if shot_type else f"P{r.player_id} {r.stroke} (frame {r.frame})")
@@ -902,11 +830,9 @@ def print_summary(shots: pd.DataFrame, hands: dict) -> None:
 
 # ── shot hitmap (player positions on the minimap, coloured by shot type) ────────
 #
-# "Combined category": one colour-label per shot. A special shot_type
-# (slice/dropshot/lob/serve) wins; otherwise we fall back to the forehand/backhand
-# stroke. `serve` is not produced by the classifier yet but is already in the
-# palette so it is coloured correctly as soon as it is added. The marker SHAPE
-# encodes the player (P1 = circle, P2 = triangle).
+# Combined category = one colour per shot: a special shot_type
+# (slice/dropshot/lob/serve) wins, else the forehand/backhand stroke. Marker
+# SHAPE encodes the player (P1 = circle, P2 = triangle).
 SHOT_CATEGORY_COLORS = {
     "forehand": "#2ca02c",   # green
     "backhand": "#ff7f0e",   # orange
@@ -924,9 +850,8 @@ _PLAYER_MARKER_FALLBACK = "s"
 
 
 def shot_category(stroke, shot_type, overhead=""):
-    """Single colour-category for a shot. A non-empty `overhead` (serve/smash)
-    WINS over everything; else a special shot_type (slice/dropshot/lob/serve)
-    wins; otherwise the forehand/backhand stroke."""
+    """Colour category for a shot: overhead (serve/smash) wins, else a special
+    shot_type (slice/dropshot/lob/serve), else the forehand/backhand stroke."""
     ov = (str(overhead) if overhead is not None else "").strip().lower()
     if ov in ("serve", "smash"):
         return ov
@@ -939,10 +864,9 @@ def shot_category(stroke, shot_type, overhead=""):
 
 def save_shot_hitmap(shots: pd.DataFrame, out_dir,
                      title: str = "Shot hitmap (player position)") -> None:
-    """Plot every shot at the PLAYER's court position (feet, in meters) on the
-    minimap, coloured by combined shot category, with the marker shape encoding
-    the player. Reuses the court drawing from player_analysis to avoid
-    duplicating the court geometry."""
+    """Plot each shot at the PLAYER's feet (meters) on the minimap, coloured by
+    combined category, marker shape per player. Reuses player_analysis's court
+    drawing."""
     out_dir = Path(out_dir)
     if shots is None or shots.empty:
         print("  Hitmap skipped: no shots.")
@@ -959,11 +883,9 @@ def save_shot_hitmap(shots: pd.DataFrame, out_dir,
     from utils.player_analysis import _draw_court
 
     fig, ax = plt.subplots(figsize=(5.2, 9.0))
-    # Same look as heatmap_combined.png: dark background so the white court
-    # lines and the yellow net stand out clearly. _draw_court() sets a green
-    # facecolor and turns the axis OFF (which hides the patch, leaving white
-    # lines invisible on a white page); we re-enable a dark patch so the field
-    # reads as the dark court used by the heatmap figures.
+    # Dark background to match heatmap_combined.png. _draw_court() turns the axis
+    # OFF (hiding the patch -> white lines invisible on white), so re-enable a
+    # dark patch below.
     fig.patch.set_facecolor("#1a1a2e")
     _draw_court(ax)
     ax.set_facecolor("#1a1a2e")
@@ -1032,7 +954,7 @@ def save_shot_hitmap(shots: pd.DataFrame, out_dir,
 # ── self-test with synthetic trajectory ────────────────────────────────────────
 
 def _synthetic_court_csv(path: str) -> None:
-    """Synthetic court: homography from 4 arbitrary px corners + ITF proportions."""
+    """Write a synthetic court CSV: homography from 4 px corners + ITF proportions."""
     corners_m = np.array([[0, 0], [W_m, 0], [0, L_m], [W_m, L_m]],
                          dtype=np.float32)                 # TL TR BL BR
     corners_px = np.array([[700, 300], [1200, 300], [400, 860], [1500, 860]],
@@ -1056,15 +978,14 @@ def _synthetic_court_csv(path: str) -> None:
 
 def self_test() -> None:
     """
-    Synthetic rally: 4 shots with known ball side + mid-court bounces that
-    must NOT be detected as shots. Checks frame, player and classification,
-    including the left-handed case.
+    Synthetic 4-shot rally with mid-court bounces that must NOT be detected.
+    Checks frame, player and stroke, including the left-handed case.
     """
     rng = np.random.default_rng(3)
     p1 = (900, 700, 100, 190)     # near, feet y=890, cx=950
     p2 = (920, 200, 60, 120)      # far,  feet y=320, cx=950
 
-    # (shot_frame, player, ball offset relative to center, expected for right-hander)
+    # (shot_frame, player, ball offset from center, expected stroke for a right-hander)
     plan = [(20, 1, +70, "forehand"),
             (60, 2, -45, "forehand"),
             (100, 1, -70, "backhand"),
@@ -1077,7 +998,7 @@ def self_test() -> None:
         cy_c = box[1] + box[3] * (0.45 if pid == 1 else 0.5)
         contact[f] = (cx_c, cy_c)
 
-    # trajectory: linear segments between contacts + bounce (cusp) at mid-court
+    # linear segments between contacts, with a bounce cusp at mid-court
     frames = np.arange(0, 171)
     cx = np.full(len(frames), np.nan)
     cy = np.full(len(frames), np.nan)
@@ -1089,7 +1010,7 @@ def self_test() -> None:
     for f0, (x0, y0), f1, (x1, y1) in segs:
         for f in range(f0, f1 + 1):
             s = (f - f0) / max(1, f1 - f0)
-            # bounce cusp at s=0.65 (deviation toward image bottom)
+            # bounce cusp at s=0.65 (dips toward image bottom)
             bounce = 35.0 * max(0.0, 1.0 - abs(s - 0.65) / 0.18)
             cx[f] = x0 + s * (x1 - x0)
             cy[f] = y0 + s * (y1 - y0) + bounce
@@ -1157,9 +1078,8 @@ def self_test() -> None:
 
 # ── labelled shot-type validation (real Input_video2 ground truth) ──────────────
 
-# Ground truth for the 23 detected shots of Input_video2, provided by the user.
-# A "dropshot/slice" label is genuinely ambiguous (slow but not dropshot-slow) and
-# counts as correct for EITHER dropshot or slice.
+# User-provided ground truth for the 23 detected shots of Input_video2. A
+# "dropshot/slice" label is ambiguous and counts correct for EITHER.
 _TYPE_GROUND_TRUTH = {
     84: "flat", 109: "flat", 152: "flat", 188: "flat", 225: "flat",
     252: "dropshot", 322: "flat", 349: "slice", 386: "lob", 432: "flat",
@@ -1173,12 +1093,11 @@ _TYPE_TARGET_ACC = 0.90
 def type_self_test(ball_csv: str = None, players_csv: str = None,
                    court_csv: str = None, fps: float = 30.0) -> None:
     """
-    Validate the shot-TYPE classifier against the labelled Input_video2 ground
-    truth, end-to-end through the real analyze_shots pipeline (not a re-impl).
+    Validate the shot-TYPE classifier against the Input_video2 ground truth,
+    end-to-end through the real analyze_shots pipeline.
 
-    Each ground-truth frame is matched to the nearest detected shot within ±3
-    frames; extra detections (e.g. a trailing shot the user did not label) are
-    ignored. Fails with a non-zero exit if accuracy < 90 %.
+    Each GT frame is matched to the nearest detection within ±3 frames; extra
+    detections are ignored. Exits non-zero if accuracy < 90 %.
     """
     base = Path(__file__).resolve().parent.parent / "outputs"
     ball_csv = ball_csv or str(base / "ball_coordinates" / "ball_Input_video2.csv")
@@ -1198,7 +1117,7 @@ def type_self_test(ball_csv: str = None, players_csv: str = None,
     track = load_ball_track(ball_csv)
     boxes = load_player_boxes(players_csv)
     conv = CourtConverter(court_csv)
-    # default hands (the ground truth was labelled on the default right/right run)
+    # GT was labelled on the default right/right run
     shots = analyze_shots(track, boxes, conv, fps, {1: "right", 2: "right"})
 
     if shots.empty or "shot_type" not in shots.columns:
@@ -1255,18 +1174,15 @@ def type_self_test(ball_csv: str = None, players_csv: str = None,
 
 def overhead_self_test() -> None:
     """
-    Validate classify_overhead on four SYNTHETIC scenarios built on the same
-    synthetic court as self_test():
-      (a) SERVE  — near player stationary behind his baseline, ball tossed above
-          the head, slow & local incoming  -> expect "serve".
-      (b) SMASH  — near player mid-court, fast ball descending from across the
-          net, low-apex downward outgoing  -> expect "smash".
-      (c) GROUNDSTROKE — ball at waist height beside the body -> expect "".
-      (d) LOB    — ball struck low and lofted up on the way out -> expect "".
-    Drives the real helpers (_incoming_ball_features, _player_speed_mps) and
-    classify_overhead end-to-end; asserts all four.
+    Validate classify_overhead on four synthetic scenarios (same court as
+    self_test):
+      (a) SERVE — stationary behind baseline, ball tossed above head -> "serve".
+      (b) SMASH — mid-court, fast descending ball, low-apex downward -> "smash".
+      (c) GROUNDSTROKE — ball at waist beside the body -> "".
+      (d) LOB — struck low and lofted up -> "".
+    Drives the real helpers end-to-end.
     """
-    # Same synthetic homography as _synthetic_court_csv: meters -> pixels.
+    # Same homography as _synthetic_court_csv: meters -> pixels.
     corners_m = np.array([[0, 0], [W_m, 0], [0, L_m], [W_m, L_m]],
                          dtype=np.float32)
     corners_px = np.array([[700, 300], [1200, 300], [400, 860], [1500, 860]],
@@ -1278,7 +1194,7 @@ def overhead_self_test() -> None:
         return p[0] / p[2], p[1] / p[2]
 
     def build_track(seg, frames=80, hpx=12.0):
-        """seg: list of (frame, cx, cy); linearly interpolated track DataFrame."""
+        """Linearly interpolate seg [(frame, cx, cy), ...] into a track DataFrame."""
         idx = np.arange(frames)
         cx = np.full(frames, np.nan)
         cy = np.full(frames, np.nan)
@@ -1297,21 +1213,18 @@ def overhead_self_test() -> None:
         failures = []
 
         # ── (a) SERVE ──────────────────────────────────────────────────────────
-        # Near player parked just behind his own baseline (y ~ L_m). Box drawn so
-        # the head (box_top) is well below the tossed ball.
+        # Near player just behind his own baseline (y ~ L_m); head below the toss.
         sx_m, sy_m = W_m / 2.0, L_m - 0.3       # behind near baseline
         feet_px = m2px(sx_m, sy_m)
         bw, bh = 90.0, 200.0
         box = (feet_px[0] - bw / 2.0, feet_px[1] - bh, bw, bh)
         head_y = box[1]
-        ball_cx = box[0] + bw / 2.0             # aligned over the body
-        ball_cy = head_y - 0.6 * bh             # well above the head (toss apex)
-        # Stationary boxes around the contact (identical -> ~0 m/s).
+        ball_cx = box[0] + bw / 2.0             # over the body
+        ball_cy = head_y - 0.6 * bh             # well above head (toss apex)
+        # identical boxes -> ~0 m/s
         boxes = {f: {1: box} for f in range(40)}
         i = 20
-        # Toss: a slow, local up-then-down ball arc, all near the server side.
-        # The ball drifts only slightly over the pre-contact window (a real toss
-        # is slow), staying just above the head, so incoming speed is small/local.
+        # slow, local up-then-down toss near the server side
         toss = [(i - 10, ball_cx, ball_cy + 18),
                 (i, ball_cx, ball_cy),
                 (i + 10, ball_cx + 2, ball_cy + 18)]
@@ -1330,8 +1243,7 @@ def overhead_self_test() -> None:
                             f"(speed={spd}, in_speed={in_feats['in_speed_m']:.2f})")
 
         # ── (b) SMASH ──────────────────────────────────────────────────────────
-        # Near player mid-court; ball arrives FAST from the far side and is driven
-        # steeply DOWN with a small apex.
+        # Near player mid-court; ball arrives FAST and is driven steeply DOWN, low apex.
         mx_m, my_m = W_m / 2.0, NET + 2.0       # near side, mid-court
         feet_px = m2px(mx_m, my_m)
         box = (feet_px[0] - bw / 2.0, feet_px[1] - bh, bw, bh)
@@ -1340,9 +1252,7 @@ def overhead_self_test() -> None:
         ball_cy = head_y - 0.5 * bh             # above the head at contact
         boxes = {f: {1: box} for f in range(80)}
         i = 30
-        # Incoming: a lobbed ball DESCENDING into the contact from above the
-        # head (cy increasing toward contact -> in_vy_px > 0), then driven DOWN
-        # on the way out (cy increases) with a low apex.
+        # incoming DESCENDING (in_vy_px > 0), outgoing driven DOWN with low apex
         seg = [(i - 12, ball_cx - 30, ball_cy - 140),
                (i, ball_cx, ball_cy),
                (i + 26, ball_cx + 40, ball_cy + 260)]
@@ -1363,10 +1273,10 @@ def overhead_self_test() -> None:
                 f"rise={out_feats['rise']:.2f}, apex={out_feats['apex']:.2f})")
 
         # ── (c) GROUNDSTROKE ────────────────────────────────────────────────────
-        # Ball at ~waist height, off to the side -> overhead gate fails -> "".
+        # Ball at waist, off to the side -> overhead gate fails -> "".
         feet_px = m2px(W_m / 2.0, NET + 4.0)
         box = (feet_px[0] - bw / 2.0, feet_px[1] - bh, bw, bh)
-        ball_cx = box[0] + bw + 30              # well off to the side
+        ball_cx = box[0] + bw + 30              # off to the side
         ball_cy = box[1] + 0.6 * bh             # waist height (inside the box)
         boxes = {f: {1: box} for f in range(80)}
         i = 30
@@ -1387,15 +1297,15 @@ def overhead_self_test() -> None:
             failures.append(f"(c) GROUNDSTROKE: got {ov!r}, expected '' (no overhead)")
 
         # ── (d) LOB ─────────────────────────────────────────────────────────────
-        # Ball struck low (waist) and lofted UP on the way out -> gate fails on
-        # height AND the smash 'downward' test would fail anyway -> "".
+        # Struck low and lofted UP -> gate fails on height (and smash 'downward'
+        # would fail too) -> "".
         feet_px = m2px(W_m / 2.0, NET + 4.0)
         box = (feet_px[0] - bw / 2.0, feet_px[1] - bh, bw, bh)
         ball_cx = box[0] + bw / 2.0
         ball_cy = box[1] + 0.5 * bh             # waist height, NOT above head
         boxes = {f: {1: box} for f in range(80)}
         i = 30
-        # Outgoing arcs UP then down (lofted) — apex large, rise negative.
+        # outgoing arcs UP then down -> large apex, negative rise
         seg = [(i - 12, ball_cx - 60, ball_cy + 30),
                (i, ball_cx, ball_cy),
                (i + 13, ball_cx + 120, ball_cy - 220),
@@ -1449,9 +1359,7 @@ def main() -> None:
                         help="dominant hand of player 2 (default right)")
     parser.add_argument("--min-gap", type=float, default=0.5, dest="min_gap",
                         help="minimum distance in seconds between two shots")
-    # Detection thresholds (previously hardcoded in detect_hits). Defaults are
-    # identical to the old hardcoded values, so behaviour is unchanged unless
-    # the user overrides them.
+    # Detection thresholds; defaults match the old hardcoded values.
     parser.add_argument("--vy-min", type=float, default=0.5, dest="vy_min",
                         help="min |mean vy| (px/frame) before/after for a "
                              "vy sign reversal to count as a candidate "
@@ -1475,11 +1383,9 @@ def main() -> None:
                              "confirmation, as a fraction of --vy-min "
                              "(default 0.5); pass 0 to require only a sign "
                              "change (closest to the pre-gate behaviour)")
-    # Shot-TYPE (flat/slice/dropshot/lob) thresholds. Defaults are SHOT_TYPE_PARAMS,
-    # fit against a 23-shot ground truth (see --type-self-test) and sitting on wide
-    # plateaus. The meters-based cuts (--drop-tail-m, --*-peak-m) assume the video
-    # fps and an accurate court homography, so they may need per-camera retuning;
-    # the scale-free cuts (diefrac, pace, reach, bb) do not.
+    # Shot-TYPE thresholds (defaults = SHOT_TYPE_PARAMS). The meters-based cuts
+    # (--drop-tail-m, --*-peak-m) assume the video fps and an accurate homography
+    # and may need per-camera retuning; the scale-free cuts do not.
     parser.add_argument("--k-window", type=int, default=SHOT_TYPE_PARAMS["k"],
                         dest="k", help="outgoing kinematics window in frames "
                         "(default %(default)s)")
@@ -1560,9 +1466,7 @@ def main() -> None:
         "far_peak_m": args.far_peak_m,
     }
 
-    # Derive the input CSV paths from the video name when not given explicitly,
-    # matching the producers' defaults (players_<stem>.csv in player_coordinates/,
-    # ball_<stem>.csv in ball_coordinates/, <stem>_court.csv in court_coordinates/).
+    # Derive missing CSV paths from the video stem, matching the producers' defaults.
     video_stem = os.path.splitext(os.path.basename(args.video))[0]
     if args.ball is None:
         args.ball = os.path.join("outputs", "ball_coordinates",
