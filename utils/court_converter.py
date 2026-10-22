@@ -19,7 +19,7 @@ class CourtConverter:
         converter = CourtConverter("outputs/court_coordinates/match1_court.csv")
         x_m, y_m = converter.to_meters(850, 600)
 
-        # batch — e.g. all ball positions from BallTracking
+        # batch — e.g. all ball positions from ball_tracking
         positions_px = np.array([[850, 600], [920, 650], ...])   # shape (N, 2)
         positions_m  = converter.to_meters_batch(positions_px)   # shape (N, 2)
     """
@@ -90,5 +90,5 @@ class CourtConverter:
             method=cv2.RANSAC, ransacReprojThreshold=3.0,
         )
         if H is None:
-            raise RuntimeError("Homography computation failed — check the court CSV.")
+            raise RuntimeError("Homography computation failed - check the court CSV.")
         return H.astype(np.float64)

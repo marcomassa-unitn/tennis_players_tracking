@@ -10,8 +10,7 @@ All intermediate paths derive from --video and --output, so a typical run is
 just `python pipeline.py --video data/Input_video2.mp4`.
 
 Headless by default (no OpenCV windows). --display enables interactive
-windows; --no-display is kept for backward compatibility and also forces
-headless. Every step runs in its own try/except so one failure (missing
+windows; --no-display explicitly forces headless. Every step runs in its own try/except so one failure (missing
 model, bad path) is reported and skipped, never aborting the run; the end
 summary lists succeeded/skipped/failed steps.
 
@@ -34,7 +33,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "ball_tracker.pt")
+DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "models", "ball_tracker.pt")
 
 
 @contextlib.contextmanager
@@ -141,7 +140,7 @@ def step_tracking(p, args, produced):
               "Downstream steps that need it may fail.")
         return
 
-    from tracking.playerTracking import PlayerTracker
+    from tracking.player_tracking import PlayerTracker
     _ensure_parent(p["players_csv"])
     PlayerTracker(p["video"], p["players_csv"], display=not args.no_display).run()
     print(f"Player tracks -> {p['players_csv']}")
@@ -157,7 +156,7 @@ def step_analysis(p, args, produced):
         print(f"Skipped: players CSV not found ({p['players_csv']}).")
         return
 
-    from utils import player_analysis
+    from analysis import player_analysis
     os.makedirs(p["analysis_dir"], exist_ok=True)
     argv = [
         "player_analysis",
@@ -190,7 +189,7 @@ def step_motion(p, args, produced):
     # --- Optical flow ---
     # Dense flow is expensive; --flow-frames caps the frame count (0 = whole
     # video) so a long clip doesn't dominate the run.
-    from motionEstimation import optical_flow
+    from motion_estimation import optical_flow
     of_argv = [
         "optical_flow",
         "--video", p["video"],
@@ -205,7 +204,7 @@ def step_motion(p, args, produced):
     print(f"Optical flow -> {p['motion_dir']}")
 
     # --- Block matching ---
-    from motionEstimation import block_matching
+    from motion_estimation import block_matching
     bm_argv = [
         "block_matching",
         "--video", p["video"],
@@ -229,7 +228,7 @@ def step_ball(p, args, produced):
         return
 
     try:
-        from tracking.BallTracking import BallTracker
+        from tracking.ball_tracking import BallTracker
     except ImportError as exc:
         print(f"Skipped: ball tracking dependencies unavailable ({exc}). "
               "Install ultralytics to enable this step.")
@@ -268,7 +267,7 @@ def step_shots(p, args, produced):
         print("Skipped: ball CSV not found (run ball tracking first).")
         return
 
-    from utils import shot_analysis
+    from analysis import shot_analysis
     os.makedirs(p["shots_dir"], exist_ok=True)
     argv = [
         "shot_analysis",
@@ -334,12 +333,11 @@ def build_parser():
                         help="video frame rate (default: auto-read from the "
                              "input video, falling back to 30)")
     # Headless by default. --display turns windows on; --no-display forces
-    # headless (kept for backward compatibility -- see main()).
+    # headless (see main()).
     parser.add_argument("--display", action="store_true", dest="display",
                         help="enable interactive OpenCV windows (default: headless)")
     parser.add_argument("--no-display", action="store_true", dest="no_display",
-                        help="force headless / batch mode (default; kept for "
-                             "backward compatibility)")
+                        help="force headless / batch mode (the default)")
 
     # Step skips.
     parser.add_argument("--skip-court", action="store_true", dest="skip_court",

@@ -14,8 +14,8 @@ Outputs (default outputs/motion_estimation/):
   - lk_trails.png          Lucas-Kanade feature trails
 
 Usage (from project root):
-    python motionEstimation/optical_flow.py
-    python motionEstimation/optical_flow.py --video data/Input_video2.mp4 \\
+    python motion_estimation/optical_flow.py
+    python motion_estimation/optical_flow.py --video data/Input_video2.mp4 \\
         --players outputs/player_coordinates/players_Input_video2.csv \\
         --court outputs/court_coordinates/Input_video2_court.csv \\
         --frames 200 --output outputs/motion_estimation

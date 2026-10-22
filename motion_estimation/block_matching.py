@@ -12,9 +12,9 @@ motion-compensated prediction and report its PSNR vs the plain-previous-frame
 MV convention: (u, v) maps prev -> cur, i.e. cur(x, y) ~ prev(x - u, y - v).
 
 Usage (from project root):
-    python motionEstimation/block_matching.py
-    python motionEstimation/block_matching.py --method full --frames 3
-    python motionEstimation/block_matching.py --video data/Input_video2.mp4 \\
+    python motion_estimation/block_matching.py
+    python motion_estimation/block_matching.py --method full --frames 3
+    python motion_estimation/block_matching.py --video data/Input_video2.mp4 \\
         --method tss --block 16 --range 12 --scale 0.5 --start 40 \\
         --frames 5 --step 2 --output outputs/motion_estimation
 """
@@ -25,7 +25,6 @@ import time
 
 import cv2
 import numpy as np
-
 
 # ── SAD helpers ────────────────────────────────────────────────────────────────
 
@@ -207,7 +206,7 @@ def main():
     runner = {"tss": three_step_search, "full": full_search}
 
     print(f"Block matching  ({args.video})")
-    print(f"  block={args.block}px  range=±{args.search}px  "
+    print(f"  block={args.block}px  range=+/-{args.search}px  "
           f"scale={args.scale}  pairs={args.frames}")
     header = f"{'pair':>11s} | {'method':>6s} | {'time':>7s} | " \
              f"{'PSNR comp.':>10s} | {'PSNR no-MC':>10s} | {'moving blocks':>13s}"

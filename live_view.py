@@ -7,8 +7,8 @@ right (moving in lockstep) and a stats panel below it. Nothing is saved.
 Reads only CSVs the pipeline already produced — never re-runs a tracker or YOLO
 — so it is fast and every overlay stays frame-synced:
 
-    player boxes  <- outputs/player_coordinates/players_<stem>.csv  (playerTracking)
-    ball box      <- outputs/ball_coordinates/ball_<stem>.csv        (BallTracking; OPTIONAL)
+    player boxes  <- outputs/player_coordinates/players_<stem>.csv  (player_tracking)
+    ball box      <- outputs/ball_coordinates/ball_<stem>.csv        (ball_tracking; OPTIONAL)
     minimap       <- players CSV projected to metres through the court CSV
     court CSV     <- outputs/court_coordinates/<stem>_court.csv
 
@@ -39,18 +39,18 @@ if PROJECT_ROOT not in sys.path:
 # and the ITF court constants; the minimap is drawn natively with OpenCV.
 # Side effect: importing it pins matplotlib to the headless "Agg" backend (no-op
 # here — no figures are created).
-from utils import player_analysis
-from utils.shot_analysis import (
+from analysis import player_analysis
+from analysis.shot_analysis import (
+    SHOT_CATEGORY_COLORS,  # hex per category — identical palette to shot_hitmap.png
     load_player_boxes,
-    SHOT_CATEGORY_COLORS,   # hex per category — identical palette to shot_hitmap.png
-    shot_category,          # (stroke, shot_type, overhead) -> single category string
+    shot_category,  # (stroke, shot_type, overhead) -> single category string
 )
 
 # ── layout constants ────────────────────────────────────────────────────────────
 # RENDER and WINDOW size are decoupled: the canvas is composed at RENDER_WIDTH so
 # all text rasterises large and crisp, then area-downscaled ONCE to WINDOW_WIDTH
 # for display. A smaller window thus costs no text quality (it shrinks already-
-# crisp pixels) — unlike the old single --max-width that drove both.
+# crisp pixels).
 RENDER_WIDTH = 1600      # px width the canvas is COMPOSED at (quality; not the window)
 WINDOW_WIDTH = 1100      # px width the window is SHOWN at (display size; <= RENDER_WIDTH)
 PANEL_W   = 380          # width (px) of the right column (minimap + stats)
@@ -93,7 +93,7 @@ _LEG_GAP   = 6              # gap between a symbol and its label (px)
 _LEG_ORDER = ["forehand", "backhand", "slice", "dropshot",
               "lob", "serve", "smash", "unknown"]
 
-# On-VIDEO player box colours, matching playerTracking._draw_players (P1 green,
+# On-VIDEO player box colours, matching player_tracking._draw_players (P1 green,
 # P2 red). Minimap dots reuse these via _DOT_BGR; the "P1"/"P2" labels carry id.
 _BOX_COLORS = {1: (0, 255, 0), 2: (0, 0, 255)}
 
@@ -573,8 +573,9 @@ def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
     (the figures are required for the end-of-clip summary).
     """
     from pathlib import Path
-    from utils import player_analysis as pa
-    from utils import shot_analysis as sa
+
+    from analysis import player_analysis as pa
+    from analysis import shot_analysis as sa
     from utils.court_converter import CourtConverter
 
     fps = fps or 30.0
@@ -594,7 +595,7 @@ def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
     if not (ball_csv and os.path.exists(ball_csv)):
         raise RuntimeError(
             f"ball CSV not found ({ball_csv}); the shot hitmap can't be built.\n"
-            "Run 'python tracking/BallTracking.py' first, or launch without the "
+            "Run 'python tracking/ball_tracking.py' first, or launch without the "
             "summary by removing this requirement.")
     sa_dir = Path(output_dir) / "shot_analysis"
     sa_dir.mkdir(parents=True, exist_ok=True)
@@ -704,7 +705,7 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
         raise SystemExit(
             f"Analysis generation failed: {e}\n"
             "Fix the inputs above and relaunch (the end-of-clip summary needs "
-            "the combined heatmap, zones and shot hitmap).")
+            "the combined heatmap, zones and shot hitmap).") from e
     print("  Analysis figures ready.")
 
     # --- per-frame overlays, indexed by absolute frame number ---
@@ -717,7 +718,7 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     else:
         ball_boxes = {}
         print(f"  Ball boxes  : none (no ball CSV at {ball_csv}); ball overlay "
-              "disabled.\n               Run 'python tracking/BallTracking.py' "
+              "disabled.\n               Run 'python tracking/ball_tracking.py' "
               "to enable it.")
 
     # --- minimap: project players to metres, indexed by frame for O(1) lookup ---
@@ -745,7 +746,7 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             shot_markers = []
     else:
         print(f"  Shot markers: none (no shots CSV at {shots_csv}); shot overlay "
-              "disabled.\n               Run 'python utils/shot_analysis.py' to "
+              "disabled.\n               Run 'python analysis/shot_analysis.py' to "
               "enable it.")
 
     # FIXED legend: all categories in shots.csv, computed once so the full key
@@ -785,9 +786,9 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
         win_h = int(round(disp_h * window_width / canvas_w))
         cv2.resizeWindow(win, window_width, win_h)
         _center_window(win, window_width, win_h)
-    print(f"  Render @ {render_width}px wide → window @ {window_width}px "
+    print(f"  Render @ {render_width}px wide -> window @ {window_width}px "
           f"(text rendered high, shown small).")
-    print(f"  Playing at {fps:.0f} fps — press 'q' in the window to quit.")
+    print(f"  Playing at {fps:.0f} fps - press 'q' in the window to quit.")
     idx = 0
     # shot_markers is frame-sorted, so one advancing pointer (next_shot) reveals
     # each marker as its frame is reached and keeps it shown to clip end
@@ -869,7 +870,7 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             if _show_summary_window(output_dir, summary_win):
                 print(f"  Summary window: combined heatmap + zones + shot hitmap "
                       f"(from {output_dir}).")
-            print("  Clip finished — frozen on last frame; press 'q' to quit.")
+            print("  Clip finished - frozen on last frame; press 'q' to quit.")
             while True:
                 if cv2.waitKey(50) & 0xFF == ord("q"):
                     break
@@ -899,7 +900,7 @@ def main() -> None:
                              "(default: outputs/court_coordinates/<stem>_court.csv)")
     parser.add_argument("--shots", default=None,
                         help="shot analysis CSV (default: "
-                             "outputs/shot_analysis/shots.csv; optional — when "
+                             "outputs/shot_analysis/shots.csv; optional - when "
                              "present, shots accumulate on the minimap)")
     parser.add_argument("--max-shot-markers", type=int, default=0,
                         dest="max_shot_markers",
@@ -923,7 +924,7 @@ def main() -> None:
     parser.add_argument("--render-width", "--max-width", type=int,
                         default=RENDER_WIDTH, dest="render_width",
                         help="internal RENDER width (px) the canvas is composed at "
-                             "— the text-quality knob; higher = crisper text, more "
+                             "- the text-quality knob; higher = crisper text, more "
                              "CPU. Independent of the window size "
                              f"(default: {RENDER_WIDTH}). --max-width is a legacy alias.")
     parser.add_argument("--fps", type=float, default=None,
@@ -942,7 +943,7 @@ def main() -> None:
     if not os.path.exists(players_csv):
         raise SystemExit(
             f"Players CSV not found: {players_csv}\n"
-            "Run: python tracking/playerTracking.py --video "
+            "Run: python tracking/player_tracking.py --video "
             f"{args.video} --csv {players_csv} --no-display")
     if not os.path.exists(court_csv):
         raise SystemExit(

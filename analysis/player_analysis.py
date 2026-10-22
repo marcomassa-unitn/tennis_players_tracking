@@ -9,8 +9,8 @@ Ground anchor defaults to the feet point (bbox bottom-center): projecting the
 body centroid (~1 m off the ground) through the homography lands it far past the
 net.
 
-    python utils/player_analysis.py
-    python utils/player_analysis.py \\
+    python analysis/player_analysis.py
+    python analysis/player_analysis.py \\
         --players outputs/player_coordinates/players_Input_video2.csv \\
         --court   outputs/court_coordinates/Input_video2_court.csv \\
         --fps     30 \\
@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")  # headless backend, does not open windows
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -39,7 +40,7 @@ from utils.court_converter import CourtConverter
 # ── ITF singles court dimensions ───────────────────────────────────────────────
 # Shared via utils/court_geometry; imported (not redefined) so live_view.py can
 # read them as player_analysis.<name> module attributes.
-from utils.court_geometry import W_m, L_m, SVC_T, SVC_B, NET, CL_X
+from utils.court_geometry import CL_X, NET, SVC_B, SVC_T, L_m, W_m
 
 # Player colour convention, kept identical across every figure so colour -> player
 # is unambiguous: P1 = warm (red), P2 = cool (blue). Paired with the heatmap
@@ -49,9 +50,8 @@ _LABELS = {1: "P1 (red)",  2: "P2 (blue)"}
 
 # Heatmap colormaps. Alpha ramps from 0 (empty -> transparent, background stays
 # clean) to 1 (dense -> opaque) over two well-separated hues (P1 warm red→yellow,
-# P2 cool cyan→blue). The old `hot`+`Blues_r` pair fogged into mud where players
-# overlapped and sent P2's densest bins to white; transparent tails make overlap
-# read as "both were here".
+# P2 cool cyan→blue). Opaque sequential maps turn muddy where the players
+# overlap; transparent tails make overlap read as "both were here".
 def _alpha_ramp_cmap(name, rgb_lo, rgb_hi):
     """Build a colormap that goes transparent at low density, saturated-opaque at high."""
     r0, g0, b0 = rgb_lo
@@ -160,7 +160,7 @@ def _load_and_convert(players_csv: str, court_csv: str, min_area: int,
             frac_bad = float(mismatch.mean())
             if frac_bad > 0.5:
                 print(f"  Warning: cy != y + h/2 for {frac_bad:.0%} of rows; "
-                      f"'y' may not be the bbox top — feet anchor (y + h) "
+                      f"'y' may not be the bbox top - feet anchor (y + h) "
                       f"could be misplaced.")
         df["ax"] = df["cx"]
         df["ay"] = df["y"] + df["h"]
@@ -437,7 +437,7 @@ def _save_minimap(player_data: dict, all_frames: np.ndarray,
     ani = FuncAnimation(fig, _update, frames=sampled, blit=True,
                         interval=1000 // gif_fps)
     path = out_dir / "minimap.gif"
-    print(f"  Generating GIF ({len(sampled)} frames, {gif_fps} fps) …")
+    print(f"  Generating GIF ({len(sampled)} frames, {gif_fps} fps) ...")
     ani.save(str(path), writer=PillowWriter(fps=gif_fps), dpi=90)
     plt.close(fig)
     print(f"  Saved: {path}")
@@ -463,7 +463,7 @@ def _save_speed_csv(player_data: dict, speed_map: dict, out_dir: Path) -> None:
 def _print_summary(stats_map: dict, zone_df: pd.DataFrame,
                    total_frames: int) -> None:
     print("\n" + "=" * 52)
-    print("  PLAYER ANALYSIS  –  SUMMARY")
+    print("  PLAYER ANALYSIS  -  SUMMARY")
     print("=" * 52)
     for pid, s in stats_map.items():
         print(f"\nPlayer {pid} ({_COLORS[pid]}):")
@@ -518,13 +518,13 @@ def main() -> None:
                         help="Speed (km/h) above which a displacement is "
                              "considered a tracking glitch (default: 45)")
     parser.add_argument("--stride",   type=int, default=3,
-                        help="Sample 1 frame every N for the GIF (default: 3 → ~10 fps)")
+                        help="Sample 1 frame every N for the GIF (default: 3 -> ~10 fps)")
     parser.add_argument("--no-animation", action="store_true",
                         help="Skip GIF generation (faster)")
     args = parser.parse_args()
 
     # Derive CSV paths from the video stem when not given, matching the naming of
-    # playerTracking.py (players_<stem>.csv) and court_tracking.py
+    # player_tracking.py (players_<stem>.csv) and court_tracking.py
     # (<stem>_court.csv), so a different --video reads its own tracking output.
     video_stem = os.path.splitext(os.path.basename(args.video))[0]
     if args.players is None:
@@ -558,7 +558,7 @@ def main() -> None:
 
     zone_df = _compute_zone_stats(player_data, args.fps)
 
-    print("\nGenerating output …")
+    print("\nGenerating output ...")
     _save_heatmaps(player_data, out_dir)
     _save_speed_csv(player_data, speed_map, out_dir)
     _save_zone_outputs(player_data, zone_df, out_dir)

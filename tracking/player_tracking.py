@@ -1,20 +1,17 @@
 import argparse
 import csv
 import os
+import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-# Dual import so safe_fps resolves both standalone (tracking/ on sys.path) and
-# orchestrated as tracking.playerTracking (project root on sys.path via pipeline.py).
-try:
-    from tracking._fps_utils import safe_fps
-except ImportError:
-    from _fps_utils import safe_fps
+# Make the project root importable when this file is run as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.video import safe_fps
 
-
-# Foreground intensity-difference threshold (0-255), fps-independent. 15
-# reproduces the old 30fps behaviour (0.5 * 30).
+# Foreground intensity-difference threshold (0-255), fps-independent.
 DIFF_THRESH = 15
 
 # Min connected-component area (px) to count as a player candidate; rejects noise.
@@ -278,17 +275,17 @@ class PlayerTracker:
             had = slot < len(self.prev_centroids)
             has = comps[slot] is not None
             if had and not has:
-                print(f"[playerTracking] Identity lost for player {slot + 1} "
+                print(f"[player_tracking] Identity lost for player {slot + 1} "
                       f"(no candidate within MAX_MOVE)")
             elif not had and has:
-                print(f"[playerTracking] Identity re-acquired for player {slot + 1}")
+                print(f"[player_tracking] Identity re-acquired for player {slot + 1}")
 
         # Drop unmatched slots; order preserved to keep player_id stable.
         return [c for c in comps if c is not None]
 
     def _draw_players(self, frame, components):
         new_prev = []
-        for player_id, (area, x, y, w, h, cx, cy) in enumerate(components, start=1):
+        for player_id, (_area, x, y, w, h, cx, cy) in enumerate(components, start=1):
             color = (0, 255, 0) if player_id == 1 else (0, 0, 255)
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
             cv2.circle(frame, (int(cx), int(cy)), 4, (255, 0, 0), -1)
