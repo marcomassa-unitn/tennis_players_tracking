@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install dependencies
+        # Headless OpenCV build: the CI runner has no display / libGL.
+        run: |
+          python -m pip install --upgrade pip
+          grep -v '^opencv-python' requirements.txt > requirements-ci.txt
+          pip install -r requirements-ci.txt opencv-python-headless pytest ruff
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: pytest

@@ -1,0 +1,30 @@
+[project]
+name = "tennis-players-tracking"
+version = "1.0.0"
+description = "Single-camera tennis match analysis: court geometry, player and ball tracking, movement statistics and shot classification."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E402",  # scripts put the project root on sys.path before importing local packages
+    "E221",  # aligned assignments in constant tables are intentional
+    "E241",
+    "E501",  # long lines are allowed in docstrings and argparse help text
+    "B905",  # zip() over equal-length sequences by construction
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["analysis", "evaluation", "motion_estimation", "tracking", "utils"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
