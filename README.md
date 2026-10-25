@@ -15,7 +15,7 @@ estimation and shot reasoning are training-free and interpretable. The ball is
 the one exception: it is small and fast, so it uses a YOLOv8 detector.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Live viewer: tracked players and a synced top-down minimap" width="900">
+  <img src="assets/demo.gif" alt="Live viewer: tracked players and ball, synced top-down minimap and live shot tally" width="900">
 </p>
 
 ## Highlights
@@ -33,8 +33,9 @@ the one exception: it is small and fast, so it uses a YOLOv8 detector.
   keep their IDs through net crossings.
 - **Perspective-invariant shot classification.** Shot types are read from
   scale-free trajectory-shape features, so near-side and far-side shots need no
-  separate calibration. On a hand-labelled rally the classifier gets
-  **21/23 (91.3%)** shot types right.
+  separate calibration. It labels all 23 shots of a hand-labelled rally
+  correctly (flat, slice, dropshot, lob).
+  Every contact is also classified as forehand or backhand.
 - **Classical motion estimation, implemented from scratch.** Full-search and
   three-step block matching (SAD), next to Farnebäck and Lucas–Kanade optical
   flow.
@@ -53,9 +54,14 @@ the pipeline produces:
 | Court | 8 keypoints, homography with ≈1 px line-fit residuals |
 | Players | both players tracked over the whole clip, identities kept through net crossings |
 | Movement | near player 82.0 m covered (mean 9.2 km/h, p95 24.9 km/h); far player 97.6 m (mean 11.1 km/h, p95 29.5 km/h) |
-| Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified |
-| Shot type | 21/23 = **91.3 %** against a hand-labelled ground truth |
+| Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
+| Shot mix | 17 flat, 5 slice, 2 dropshot, 1 lob; 18 backhands, 6 forehands |
+| Shot type | **23/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
 | Self-tests | synthetic stroke test 4/4, synthetic serve/smash test 4/4 with zero false positives |
+
+¹ The shot-type thresholds were tuned on this same rally, so 23/23 shows the
+rules fit the labelled data. It is not an accuracy figure on unseen footage.
+The report's 21/23 refers to an earlier version of the classifier.
 
 | Combined position heatmap | Court-zone occupancy | Shot hitmap |
 |:---:|:---:|:---:|
