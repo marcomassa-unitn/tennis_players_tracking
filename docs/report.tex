@@ -127,7 +127,7 @@ The eight labelled keypoints (court corners \texttt{TL,TR,BL,BR}; service-box co
 RANSAC keeps the fit stable when one keypoint is mislabelled, and a point near the horizon (a small homogeneous divisor $w$) is guarded and returned as Not-a-Number (NaN) rather than $\pm\infty$. This homography is the backbone of the project: every metric quantity downstream is produced through it.
 
 \subsection{Player tracking}
-Players are segmented by background subtraction with identity-stable association (\texttt{playerTracking.py}). A running-average background is maintained with learning rate $\alpha = 0.15$. That model takes time to converge, so a static reference background is built once, as the temporal median of the first second of frames. During the warm-up window the tracker subtracts against this median while the running-average model converges alongside it and takes over once warm-up ends, which means a poor warm-up seed can never corrupt the reliable model.
+Players are segmented by background subtraction with identity-stable association (\texttt{player\_tracking.py}). A running-average background is maintained with learning rate $\alpha = 0.15$. That model takes time to converge, so a static reference background is built once, as the temporal median of the first second of frames. During the warm-up window the tracker subtracts against this median while the running-average model converges alongside it and takes over once warm-up ends, which means a poor warm-up seed can never corrupt the reliable model.
 
 Each frame's foreground mask is the thresholded absolute difference against the background, $|I_t - B_t| > \tau$ with $\tau = 15$ (kept independent of frame rate), followed by Gaussian smoothing, a morphological open with a small kernel, and a close with a large one. Connected components below $300$~px$^2$ are gated out as noise.
 
@@ -145,7 +145,7 @@ v = \frac{\lVert \mathbf{x}_m(t{+}1) - \mathbf{x}_m(t)\rVert}{\Delta t}\times 3.
 and any displacement implying more than $45$~km/h is discarded as a tracking glitch. From these the stage produces per-player speed statistics (mean, median, 95th percentile, maximum) and total distance, court-zone occupancy over a $6\times4$ grid that covers the walkable run-off, Gaussian-smoothed position heatmaps per player and combined, and an animated top-down minimap.
 
 \subsection{Ball tracking}
-The ball is tiny, fast, and often motion-blurred, the one place where a learned detector earns its keep (\texttt{BallTracking.py}). A YOLOv8 detector runs per frame at confidence $0.65$. Each candidate, taken in descending confidence order, must pass a frame-difference motion gate: at least $5\%$ of the pixels inside the candidate box must change by more than an intensity of $15$ between consecutive grayscale frames. The first candidate that passes is accepted, which rejects static false positives such as line markings and logos. Short detection gaps are filled by linear interpolation, and an \texttt{interpolated} flag is written to the CSV so later stages can tell real detections from synthetic fills. That flag matters: a long straight-line fill meeting real motion otherwise mimics a racket contact.
+The ball is tiny, fast, and often motion-blurred, the one place where a learned detector earns its keep (\texttt{ball\_tracking.py}). A YOLOv8 detector runs per frame at confidence $0.65$. Each candidate, taken in descending confidence order, must pass a frame-difference motion gate: at least $5\%$ of the pixels inside the candidate box must change by more than an intensity of $15$ between consecutive grayscale frames. The first candidate that passes is accepted, which rejects static false positives such as line markings and logos. Short detection gaps are filled by linear interpolation, and an \texttt{interpolated} flag is written to the CSV so later stages can tell real detections from synthetic fills. That flag matters: a long straight-line fill meeting real motion otherwise mimics a racket contact.
 
 \subsection{Shot detection and classification}
 \textit{Contact detection.} A shot is a sudden change in the ball's vertical motion right next to a player. On the Savitzky--Golay-smoothed track (window $9$, order $2$), velocities and accelerations are computed per contiguous valid run, so a one-frame dropout does not contaminate its neighbours. A candidate at frame $i$ needs a persistent sign reversal of the vertical velocity $v_y$ (with $\min(|\bar v_y^{\text{bef}}|,|\bar v_y^{\text{aft}}|)\ge 0.5$~px/frame), or a local peak of the acceleration magnitude $|\mathbf{a}|\ge 1.5$~px/frame$^2$ confirmed by an independent post-contact reversal check, together with the ball lying inside the striking player's expanded bounding box. Bounces also reverse $v_y$, but they happen away from the players, so the proximity gate removes them. Candidates from one physical contact are merged by wide-gap clustering, keeping the member with the strongest acceleration.
@@ -161,7 +161,7 @@ The second is a set of approximate metric speeds from the homography, used only 
 \textit{Overhead (serve/smash).} Serve and smash live in a separate, additive overhead column, so they never disturb the flat/slice/dropshot/lob labels, and the classifier is deliberately cautious, returning empty whenever a signal is missing so that a groundstroke is never relabelled. The common geometric gate requires the ball clearly above the box top and horizontally aligned with the player. The two are then told apart by the vertical direction of the incoming ball, a scale-free cue that survives the ground homography distorting an airborne ball. A serve is the first shot, with the player stationary behind their own baseline and the incoming toss rising. A smash is struck off a ball arriving fast and descending, driven downward with a low apex. The overhead label takes precedence in the combined category, so a detected serve is drawn as a serve whatever its (inapplicable) groundstroke side.
 
 \subsection{Motion estimation}
-Two classical techniques cross-check player speed and measure inter-frame motion (\texttt{motionEstimation/}). Optical flow uses dense Farneb\"ack flow (pyramid scale $0.5$, three levels, window $15$), whose mean flow inside each player box, converted to km/h through the homography, is compared with the position-based speed, alongside a sparse Lucas--Kanade demonstration that tracks Shi--Tomasi corners. Block matching is implemented from scratch over a sum-of-absolute-differences (SAD) criterion, with both exhaustive full search and the logarithmic three-step search. For each frame pair it estimates a motion-vector field on $16\times16$ blocks, builds the motion-compensated prediction, and reports its PSNR against the no-motion baseline,
+Two classical techniques cross-check player speed and measure inter-frame motion (\texttt{motion\_estimation/}). Optical flow uses dense Farneb\"ack flow (pyramid scale $0.5$, three levels, window $15$), whose mean flow inside each player box, converted to km/h through the homography, is compared with the position-based speed, alongside a sparse Lucas--Kanade demonstration that tracks Shi--Tomasi corners. Block matching is implemented from scratch over a sum-of-absolute-differences (SAD) criterion, with both exhaustive full search and the logarithmic three-step search. For each frame pair it estimates a motion-vector field on $16\times16$ blocks, builds the motion-compensated prediction, and reports its PSNR against the no-motion baseline,
 \begin{equation}
 \text{PSNR} = 10\log_{10}\frac{255^2}{\text{MSE}}.
 \end{equation}
@@ -174,7 +174,7 @@ Correctness is measured against manual ground truth (\texttt{evaluation/}). A sm
 and reports mean and median IoU, precision and recall at an IoU threshold of $0.5$, centre error in pixels, feet error in metres through the homography, assignment-level ID switches, and per-keypoint court error.
 
 \section{Implementation}
-The system is written in Python~3 and organised as importable packages: \texttt{tracking/} for the court, player, and ball trackers, \texttt{utils/} for the \texttt{CourtConverter} homography utility, player analysis, and shot analysis, \texttt{motionEstimation/} for optical flow and block matching, and \texttt{evaluation/} for annotation and metrics. It uses OpenCV for image and video operations, NumPy for array computation, pandas for CSV handling, SciPy for the Savitzky--Golay filter and Gaussian smoothing, Matplotlib for figures (pinned to the headless \texttt{Agg} backend), and Ultralytics YOLOv8 for ball detection.
+The system is written in Python~3 and organised as importable packages: \texttt{tracking/} for the court, player, and ball trackers, \texttt{utils/} for the \texttt{CourtConverter} homography utility, \texttt{analysis/} for player analysis and shot analysis, \texttt{motion\_estimation/} for optical flow and block matching, and \texttt{evaluation/} for annotation and metrics. It uses OpenCV for image and video operations, NumPy for array computation, pandas for CSV handling, SciPy for the Savitzky--Golay filter and Gaussian smoothing, Matplotlib for figures (pinned to the headless \texttt{Agg} backend), and Ultralytics YOLOv8 for ball detection.
 
 \texttt{pipeline.py} is the single entry point. It reads the frame rate from the video, derives every artefact path from the video stem, and runs all seven stages from one command. It is headless by default, with \texttt{-{}-display} enabling OpenCV windows. Two choices keep it from falling over. Every step sits inside its own error guard, so one failure is reported and skipped rather than aborting the run, and any step can be skipped with a \texttt{-{}-skip-*} flag to reuse an existing CSV. A closing summary lists which steps succeeded, were skipped, or failed.
 
@@ -207,35 +207,35 @@ The qualitative outputs match the expected match structure. The combined heatmap
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.40\textwidth]{outputs/player_analysis/heatmap_combined.png}
+\includegraphics[width=0.40\textwidth]{../assets/heatmap_combined.png}
 \caption{Combined position heatmap (P1 warm, P2 cool). The near player covers the baseline corners; the far player is perspective-compressed. Generated by \texttt{player\_analysis.py}.}
 \label{fig:heat}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.60\textwidth]{outputs/player_analysis/zones.png}
+\includegraphics[width=0.60\textwidth]{../assets/zones.png}
 \caption{Per-player court-zone occupancy over the $6\times4$ grid, overlaid on the court (\texttt{player\_analysis.py}).}
 \label{fig:zones}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.85\textwidth]{outputs/motion_estimation/flow_arrows_00450.png}
+\includegraphics[width=0.85\textwidth]{../assets/flow_arrows.png}
 \caption{Sparse optical-flow field drawn on the source frame: each arrow is the mean Farneb\"ack flow on a grid cell, so the vectors concentrate on the two moving players while the static court stays clear (\texttt{optical\_flow.py}).}
 \label{fig:flowarrows}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.55\textwidth]{outputs/shot_analysis/shot_hitmap.png}
+\includegraphics[width=0.55\textwidth]{../assets/shot_hitmap.png}
 \caption{Shot hitmap: each shot at the player's court position at contact, coloured by category. P1 = circles (near), P2 = triangles (far); the opening serve (cyan) sits behind the near baseline (\texttt{shot\_analysis.py}).}
 \label{fig:hitmap}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.70\textwidth]{outputs/motion_estimation/flow_hsv_00150.png}
+\includegraphics[width=0.70\textwidth]{../assets/flow_hsv.png}
 \caption{Dense Farneb\"ack optical flow: hue encodes direction, brightness encodes magnitude (\texttt{optical\_flow.py}). Moving players and ball stand out against the static court.}
 \label{fig:flow}
 \end{figure}

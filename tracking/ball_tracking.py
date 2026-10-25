@@ -1,19 +1,17 @@
 ﻿import argparse
 import csv
 import os
+import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
 import pandas as pd
 from ultralytics import YOLO
 
-# Dual import: works standalone (tracking/ on sys.path) and orchestrated
-# (imported as tracking.BallTracking via pipeline.py with project root on path).
-try:
-    from tracking._fps_utils import safe_fps
-except ImportError:
-    from _fps_utils import safe_fps
-
+# Make the project root importable when this file is run as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.video import safe_fps
 
 # Min YOLO confidence to accept a ball detection.
 BALL_CONF = 0.65
@@ -199,7 +197,7 @@ class BallTracker:
 
 if __name__ == "__main__":
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "models/ball_tracker.pt")
+    DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "models", "ball_tracker.pt")
 
     parser = argparse.ArgumentParser(
         description="YOLO ball tracking -> annotated video + ball CSV")
@@ -219,7 +217,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Default CSV name from the video stem so distinct --video inputs don't
-    # overwrite each other (mirrors playerTracking.py).
+    # overwrite each other (mirrors player_tracking.py).
     if args.csv is None:
         video_stem = os.path.splitext(os.path.basename(args.video))[0]
         args.csv = os.path.join("outputs", "ball_coordinates",

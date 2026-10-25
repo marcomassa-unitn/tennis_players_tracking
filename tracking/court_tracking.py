@@ -1,16 +1,15 @@
 import argparse
 import csv
 import os
+import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-# Dual import: works both standalone (tracking/ on sys.path) and as a package
-# (tracking.court_tracking, when run via pipeline.py).
-try:
-    from tracking._fps_utils import safe_fps
-except ImportError:
-    from _fps_utils import safe_fps
+# Make the project root importable when this file is run as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.video import safe_fps
 
 # ── White HSV bounds ──────────────────────────────────────────────────────────
 LOWER_WHITE = np.array([0,   0, 180], dtype=np.uint8)
@@ -381,7 +380,7 @@ class CourtTracker:
             )
 
             if raw_lines is None:
-                print("No lines detected — try loosening HOUGH_THRESHOLD or HOUGH_MIN_LENGTH.")
+                print("No lines detected - try loosening HOUGH_THRESHOLD or HOUGH_MIN_LENGTH.")
                 if not self.no_display:
                     cv2.imshow("White Mask",
                                cv2.bitwise_and(frame, frame, mask=mask))
@@ -542,7 +541,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Court keypoint detection: white mask + Hough lines + "
                     "intersection clustering + ITF-proportion filtering")
-    parser.add_argument("--video", default="data/input_video2.mp4")
+    parser.add_argument("--video", default="data/Input_video2.mp4")
     parser.add_argument("--no-display", action="store_true",
                         help="skip the annotated video playback")
     parser.add_argument("--roi-top", type=float, default=0.15, dest="roi_top",

@@ -1,7 +1,6 @@
 """ITF singles-court dimensions in METERS, shared by the analysis utilities.
 
-Single source of truth for court_converter, player_analysis and shot_analysis,
-which previously each redefined these constants byte-for-byte.
+Single source of truth for court_converter, player_analysis and shot_analysis.
 
 Origin: TL = top-left corner of the FAR baseline (matches the labelled court CSV
 from tracking/court_tracking.py, consumed by CourtConverter).
@@ -10,9 +9,6 @@ from tracking/court_tracking.py, consumed by CourtConverter).
 
 tracking/court_tracking.py keeps its own ``REAL_FT`` table in FEET with a
 bottom-left origin -- a separate detection-time-homography convention, not shared.
-
-Expression order is preserved verbatim from each former definition site so the
-float values stay bit-identical.
 """
 
 _FT = 0.3048
@@ -25,7 +21,6 @@ NET = L_m / 2.0           # 11.8872 m net
 CL_X = W_m / 2.0          # 4.1148 m  center service line
 
 # Labelled-corner positions in meters, TL origin (baseline + service-box corners).
-# Bit-identical to the former court_converter._REAL_WORLD literals.
 _REAL_WORLD = {
     "TL":  (0.0,  0.0),
     "TR":  (W_m,  0.0),

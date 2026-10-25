@@ -1,9 +1,6 @@
-numpy
-opencv-python
-pandas
-matplotlib
-scipy
-Pillow
-
-# Only needed for the optional ball-tracking extra (tracking/BallTracking.py):
-ultralytics
+numpy>=1.24
+opencv-python>=4.8
+pandas>=2.0
+matplotlib>=3.7
+scipy>=1.10
+Pillow>=9.0

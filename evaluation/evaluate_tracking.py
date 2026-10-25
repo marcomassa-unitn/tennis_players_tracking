@@ -32,8 +32,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils.court_converter import CourtConverter, _REAL_WORLD
-
+from utils.court_converter import _REAL_WORLD, CourtConverter
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
