@@ -20,11 +20,12 @@ the one exception: it is small and fast, so it uses a YOLOv8 detector.
 
 ## Highlights
 
-- **Court reconstruction without training.** Eight labelled keypoints come from
-  the white line markings (HSV mask, Canny, probabilistic Hough, intersection
-  clustering). The thin, washed-out far baseline is recovered with a
-  *projective-consistency* test against the ITF court model. Line-fit residuals
-  are about 1 px.
+- **Court reconstruction without training.** The full ITF court model,
+  including the doubles alleys, is fitted to the white line markings. Each
+  candidate homography is scored by how much of the *whole* court it puts on
+  line pixels, so banners, net and writing next to the court are rejected. The
+  same settings work on five clips from three tournaments, and the fitted
+  lines land within about 1 px of the painted ones.
 - **One homography, metric everything.** A single RANSAC homography maps pixels
   to court metres, so positions, distances, speeds (km/h) and zone occupancy are
   all physical quantities.
@@ -51,9 +52,9 @@ the pipeline produces:
 
 | Stage | Result |
 |---|---|
-| Court | 8 keypoints, homography with ≈1 px line-fit residuals |
+| Court | 98 % of the court model on detected line pixels; fitted lines within ≈1 px of the painted ones |
 | Players | both players tracked over the whole clip, identities kept through net crossings |
-| Movement | near player 82.0 m covered (mean 9.2 km/h, p95 24.9 km/h); far player 97.6 m (mean 11.1 km/h, p95 29.5 km/h) |
+| Movement | near player 81.7 m covered (mean 9.2 km/h, p95 24.7 km/h); far player 97.7 m (mean 11.1 km/h, p95 29.6 km/h) |
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
 | Shot mix | 17 flat, 5 slice, 2 dropshot, 1 lob; 18 backhands, 6 forehands |
 | Shot type | **23/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
@@ -68,16 +69,16 @@ The report's 21/23 refers to an earlier version of the classifier.
 | <img src="assets/heatmap_combined.png" height="420"> | <img src="assets/zones.png" height="420"> | <img src="assets/shot_hitmap.png" height="420"> |
 
 <p align="center">
-  <img src="assets/court_keypoints.png" alt="Detected court keypoints" width="49%">
+  <img src="assets/court_keypoints.png" alt="Fitted court model and keypoints" width="49%">
   <img src="assets/flow_hsv.png" alt="Dense Farnebäck optical flow" width="49%">
-  <br><em>Left: detected court keypoints. Right: dense optical flow (hue = direction, brightness = magnitude).</em>
+  <br><em>Left: fitted court model (yellow) and the 8 keypoints (red). Right: dense optical flow (hue = direction, brightness = magnitude).</em>
 </p>
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    V[Video] --> C[Court detection<br/><sub>Hough + ITF model</sub>]
+    V[Video] --> C[Court detection<br/><sub>court-model fitting</sub>]
     V --> P[Player tracking<br/><sub>background subtraction</sub>]
     V --> B[Ball tracking<br/><sub>YOLOv8</sub>]
     C --> H((Homography<br/>px → m))
@@ -94,12 +95,16 @@ flowchart LR
 ```
 
 1. **Court detection** ([`tracking/court_tracking.py`](tracking/court_tracking.py)).
-   An HSV white mask, morphology, Canny and probabilistic Hough find the court
-   lines. Pairwise line intersections are clustered, and doubles-alley corners
-   are removed using ITF proportions. The far baseline and service line are
-   found with a 1-D white-coverage profile between the fitted sidelines. The
-   candidate pair is chosen by projective consistency with the court model,
-   which rejects banners and the net band.
+   Line pixels are pixels brighter than their neighbours a few pixels away,
+   which keeps thin, dim lines and drops large bright areas. A Hough transform
+   gives candidate lines. Every pair of horizontal and pair of oblique
+   candidates, matched to the court model's lines, defines a homography. It is
+   scored by projecting the whole model, doubles alleys included, onto the line
+   pixels. The best hypothesis is refined by refitting every line on its own
+   pixels. Several frames are tried, which handles fade-ins and occlusions.
+   The run fails, rather than saving wrong keypoints, if no frame matches the
+   model well enough. An overlay image is saved next to the CSV to check the
+   result.
 2. **Player tracking** ([`tracking/player_tracking.py`](tracking/player_tracking.py)).
    A running-average background model (`cv2.accumulateWeighted`) is thresholded
    and cleaned with morphology, then split into connected components. Players
@@ -206,7 +211,6 @@ Useful `pipeline.py` flags:
 - `--display` shows the OpenCV windows.
 - `--skip-court`, `--skip-tracking`, … reuse CSVs that are already on disk.
 - `--flow-frames N` caps the dense optical flow at N frames.
-- `--roi-top` / `--roi-bottom` crop banners or court-side writing that get mistaken for court lines.
 - `--gt-csv` / `--court-gt-csv` enable the evaluation stage.
 
 Every script supports `--help`.
@@ -262,7 +266,9 @@ ruff check .    # lint
 ## Report and presentation
 
 The [academic report](docs/report.pdf) covers the methodology, related work and
-results in detail. There is also an [HTML presentation](docs/presentation.html)
+results in detail. It describes the original court detector (Hough
+intersections and a coverage profile for the far baseline), which has since been
+replaced by the court-model fitting described above. There is also an [HTML presentation](docs/presentation.html)
 (download it and open it in a browser).
 
 ## Authors

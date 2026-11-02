@@ -19,6 +19,7 @@ SVC_T = 18.0 * _FT        # 5.4864 m  service line far side
 SVC_B = L_m - SVC_T       # 18.288 m  service line near side
 NET = L_m / 2.0           # 11.8872 m net
 CL_X = W_m / 2.0          # 4.1148 m  center service line
+ALLEY = 4.5 * _FT         # 1.3716 m  doubles alley (outside each singles sideline)
 
 # Labelled-corner positions in meters, TL origin (baseline + service-box corners).
 _REAL_WORLD = {

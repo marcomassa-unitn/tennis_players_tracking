@@ -1,3 +1,29 @@
+"""Court keypoint detection by fitting the ITF court model to the white lines.
+
+1. Line pixels: a pixel belongs to a court line if it is bright, unsaturated and
+   brighter than both of its neighbours `tau` px away, horizontally or
+   vertically. This keeps thin lines -- dim far lines included -- and rejects
+   large bright areas such as banners.
+2. Candidate lines: standard Hough transform on the line pixels, split into
+   near-horizontal (baselines, service lines) and oblique (sidelines) lines.
+3. Model fitting: every pair of horizontal and pair of oblique candidates,
+   assigned in order to two horizontal and two vertical lines of the court model
+   (doubles court: 4 horizontal lines, 4 sidelines), defines a homography. Each
+   one is scored by projecting the WHOLE court model and counting how much of it
+   lands on line pixels. A hypothesis built on a banner edge or on writing next
+   to the court projects the rest of the court onto empty ground and scores low.
+4. Refinement: each model line is refitted on the line pixels around its
+   projection, and the homography is re-estimated from all line intersections.
+5. Several frames are tried (the first one may be a black fade-in or occluded),
+   and the best-scoring fit is kept. If no frame matches the model well enough,
+   the run fails instead of saving wrong keypoints.
+
+The 8 labelled singles keypoints (TL, TR, BL, BR, STL, STR, SBL, SBR) are then
+projected from the fitted model and saved to
+outputs/court_coordinates/<video name>_court.csv, together with an overlay image
+(<video name>_court.png) to check the result by eye.
+"""
+
 import argparse
 import csv
 import os
@@ -9,579 +35,398 @@ import numpy as np
 
 # Make the project root importable when this file is run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils.court_overlay import draw_court_overlay
+from utils.court_geometry import _REAL_WORLD, ALLEY, SVC_B, SVC_T, L_m, W_m
+from utils.court_overlay import MODEL_SEGMENTS, draw_court_overlay
 from utils.video import safe_fps
 
-# ── White HSV bounds ──────────────────────────────────────────────────────────
-LOWER_WHITE = np.array([0,   0, 180], dtype=np.uint8)
-UPPER_WHITE = np.array([180, 50, 255], dtype=np.uint8)
+# ── Court model (metres, origin at the far-left singles corner) ───────────────
+H_LINES = np.array([0.0, SVC_T, SVC_B, L_m])        # far baseline ... near baseline
+V_LINES = np.array([-ALLEY, 0.0, W_m, W_m + ALLEY])  # doubles L, singles L/R, doubles R
+MODEL_STEP_M = 0.2                                   # sampling step along model lines
 
-# ── Hough line detection ──────────────────────────────────────────────────────
-HOUGH_RHO        = 1
-HOUGH_THETA      = np.pi / 180
-HOUGH_THRESHOLD  = 150
-HOUGH_MIN_LENGTH = 80
-HOUGH_MAX_GAP    = 30
+# ── Line-pixel detector (values for 1080p, scaled with the frame height) ──────
+LINE_TAU_PX = 8          # max half-width of a line
+LINE_MIN_LUMA = 110      # min brightness of a line pixel
+LINE_MIN_CONTRAST = 18   # min brightness gap to the neighbours at +-tau
+LINE_MAX_SAT = 90        # court lines are white: reject saturated colours
 
-# ── Intersection filtering ────────────────────────────────────────────────────
-MIN_ANGLE_DEG  = 25
-CLUSTER_RADIUS = 50
-DOT_RADIUS     = 10
+# ── Hough candidates ──────────────────────────────────────────────────────────
+HOUGH_VOTES_FRAC = 0.12  # accumulator threshold as a fraction of frame height
+MAX_CANDIDATES = 12      # per orientation (hypotheses grow as n^4)
+HORIZONTAL_DEG = 20      # lines within this angle of horizontal are "horizontal"
 
-# ── Region-of-interest (ROI) ──────────────────────────────────────────────────
-ROI_BOTTOM_FRACTION = 0.95
-ROI_LEFT_FRACTION   = 0.02
-ROI_RIGHT_FRACTION  = 0.98
-
-# ── Corner selection ──────────────────────────────────────────────────────────
-# Rank within the extreme-score ordering: 0 = absolute extreme; 1 = second-most
-# extreme (use when doubles-alley dots sit further out than the singles corners).
-SINGLES_CORNER_RANK = 0
-
-# ── Singles-court proportional filter ────────────────────────────────────────
-# ITF widths: doubles 10.97 m, singles 8.23 m, so each alley is 1.37 m.
-# Alley as a fraction of the full doubles width:
-ALLEY_RATIO = 1.37 / 10.97   # ≈ 0.1249
-
-# Max y-gap (px) for two dots to count as the same horizontal court-line row.
-Y_GROUP_TOLERANCE = 50
-
-# ── Net-zone filter ───────────────────────────────────────────────────────────
-# Perspective puts the net at ~35–45 % of court image height below the top
-# baseline (not the real-world 50 %). Dots within ±NET_Y_BAND are dropped.
-NET_Y_FRACTION = 0.40   # net position as fraction of court height
-NET_Y_BAND     = 0.22   # half-width of the exclusion band (fraction of height)
+# ── Fit acceptance ────────────────────────────────────────────────────────────
+MATCH_RADIUS_PX = 3      # a model point "hits" a line pixel within this distance
+MIN_MATCH_RATIO = 0.6    # min fraction of visible model points on line pixels
+GOOD_MATCH_RATIO = 0.9   # stop trying further frames once this is reached
+MIN_MODEL_POINTS = 200   # min model points inside the frame (court big enough)
+FRAMES_TO_TRY = 6        # frames sampled over the first half of the clip
 
 # ── Playback ──────────────────────────────────────────────────────────────────
-# Per-frame waitKey delay is base / fps (ms).
-PLAYBACK_DELAY_BASE_MS = 500
+PLAYBACK_DELAY_BASE_MS = 500   # per-frame waitKey delay is base / fps (ms)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def line_intersection(seg1, seg2):
-    """Return (x, y) intersection of two infinite lines, or None if parallel."""
-    x1, y1, x2, y2 = seg1
-    x3, y3, x4, y4 = seg2
-    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(denom) < 1e-6:
-        return None
-    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
-    x = x1 + t * (x2 - x1)
-    y = y1 + t * (y2 - y1)
-    return (x, y)
-
-
-def angle_between(seg1, seg2):
-    """Acute angle in degrees between two line segments."""
-    dx1, dy1 = seg1[2] - seg1[0], seg1[3] - seg1[1]
-    dx2, dy2 = seg2[2] - seg2[0], seg2[3] - seg2[1]
-    cos_val = abs(dx1 * dx2 + dy1 * dy2) / (
-        (np.hypot(dx1, dy1) + 1e-9) * (np.hypot(dx2, dy2) + 1e-9)
-    )
-    cos_val = np.clip(cos_val, 0, 1)
-    return np.degrees(np.arccos(cos_val))
-
-
-def cluster_points(points, radius):
-    """Merge points within `radius`; return per-cluster centroids.
-
-    Input is pre-sorted by (y, x) so the result is order-independent. Each
-    cluster's center is the running mean of all its members.
-    """
-    sorted_points = sorted(points, key=lambda p: (p[1], p[0]))
-
-    clusters = []   # each entry: [center_x, center_y, sum_x, sum_y, count]
-    for pt in sorted_points:
-        merged = False
-        for c in clusters:
-            if np.hypot(pt[0] - c[0], pt[1] - c[1]) < radius:
-                c[2] += pt[0]
-                c[3] += pt[1]
-                c[4] += 1
-                # Re-mean over all members so far.
-                c[0] = c[2] / c[4]
-                c[1] = c[3] / c[4]
-                merged = True
-                break
-        if not merged:
-            clusters.append([pt[0], pt[1], pt[0], pt[1], 1])
-    return [(int(round(c[0])), int(round(c[1]))) for c in clusters]
-
-
-def filter_singles_by_proportion(dots, y_tol, alley_ratio):
-    """Drop doubles-alley corner dots using ITF court proportions.
-
-    Per horizontal row (dots grouped by similar y):
-      - <= 2 dots: no alley corners present, kept verbatim.
-      - >= 3 dots: outermost two are the doubles corners; predict each singles
-        corner x at `span * alley_ratio` inward and keep the inner dot nearest
-        each prediction, discarding the rest.
-    """
-    if not dots:
-        return dots
-
-    sorted_dots = sorted(dots, key=lambda p: p[1])
-
-    groups, current = [], [sorted_dots[0]]
-    for pt in sorted_dots[1:]:
-        if abs(pt[1] - current[0][1]) <= y_tol:
-            current.append(pt)
-        else:
-            groups.append(current)
-            current = [pt]
-    groups.append(current)
-
-    filtered = []
-    for group in groups:
-        by_x = sorted(group, key=lambda p: p[0])
-
-        if len(by_x) <= 2:
-            filtered.extend(by_x)
-            continue
-
-        x_dl, x_dr = by_x[0][0], by_x[-1][0]
-        span = x_dr - x_dl
-        x_sl_pred = x_dl + span * alley_ratio
-        x_sr_pred = x_dr - span * alley_ratio
-
-        inner = by_x[1:-1]   # candidates between the doubles corners
-
-        sl = min(inner, key=lambda p: abs(p[0] - x_sl_pred))
-        sr = min(inner, key=lambda p: abs(p[0] - x_sr_pred))
-
-        if sl == sr:
-            filtered.append(sl)
-        else:
-            filtered.extend([sl, sr])
-
-    return filtered
-
-
-# ITF keypoint positions in feet, origin at BL (length 78 ft, singles width
-# 27 ft, service lines 18 ft from each baseline).
-REAL_FT = {
-    "BL":  (0.0,  0.0),  "BR":  (27.0, 0.0),
-    "TL":  (0.0, 78.0),  "TR":  (27.0, 78.0),
-    "SBL": (0.0, 18.0),  "SBR": (27.0, 18.0),
-    "STL": (0.0, 60.0),  "STR": (27.0, 60.0),
-}
-
-
-def project_all_corners(known):
-    """Fit a real-world-to-image homography from >= 4 measured keypoints
-    {label: (x, y) px} and project the remaining ITF keypoints into the image.
-
-    Measured points are returned unchanged. Result has all 8 labels.
-
-    Raises RuntimeError if the homography fit fails or is degenerate.
-    """
-    labels = list(known)
-    src = np.array([REAL_FT[k] for k in labels], dtype=np.float32)
-    dst = np.array([known[k] for k in labels], dtype=np.float32)
-    H, _ = cv2.findHomography(src, dst, method=cv2.RANSAC,
-                              ransacReprojThreshold=3.0)
-    if H is None:
-        raise RuntimeError("Homography from detected corners failed.")
-
-    out = {}
-    for label, (rx, ry) in REAL_FT.items():
-        p = H @ np.array([rx, ry, 1.0])
-        # Near-zero w would produce inf/NaN pixels.
-        if abs(p[2]) < 1e-9:
-            raise RuntimeError(
-                f"Degenerate homography: zero homogeneous divisor for {label}.")
-        out[label] = (int(round(p[0] / p[2])), int(round(p[1] / p[2])))
-    for label, (x, y) in known.items():
-        out[label] = (int(round(x)), int(round(y)))
-    return out
-
-
-def fit_sideline(segments, corner, max_dist=12.0, min_len=100.0):
-    """Least-squares fit x = a*y + b for the sideline through `corner`.
-
-    Uses steep Hough segments (>= `min_len`) whose extended line passes within
-    `max_dist` px of the corner. Returns (a, b), or None if < 2 points qualify.
-    """
-    cx, cy = corner
+def _sample_model(step=MODEL_STEP_M):
     pts = []
-    for x1, y1, x2, y2 in segments:
-        dx, dy = x2 - x1, y2 - y1
-        length = np.hypot(dx, dy)
-        if length < min_len or abs(dy) <= abs(dx):
+    for (x0, y0), (x1, y1) in MODEL_SEGMENTS:
+        n = max(2, int(np.hypot(x1 - x0, y1 - y0) / step))
+        t = np.linspace(0.0, 1.0, n)
+        pts.append(np.c_[x0 + t * (x1 - x0), y0 + t * (y1 - y0)])
+    return np.vstack(pts)
+
+
+MODEL_POINTS = _sample_model()
+
+
+# ── 1. Line pixels ────────────────────────────────────────────────────────────
+
+def line_pixel_mask(frame):
+    """uint8 mask (255 = court-line pixel) of thin, bright, unsaturated structures."""
+    h = frame.shape[0]
+    scale = h / 1080
+    tau = max(3, int(round(LINE_TAU_PX * scale)))
+    luma = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.int16)
+    sat = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)[..., 1]
+
+    def brighter_than(shift, axis):
+        return (luma - np.roll(luma, shift, axis=axis)) > LINE_MIN_CONTRAST
+
+    horizontal = brighter_than(tau, 1) & brighter_than(-tau, 1)
+    vertical = brighter_than(tau, 0) & brighter_than(-tau, 0)
+    mask = (luma > LINE_MIN_LUMA) & (sat < LINE_MAX_SAT) & (horizontal | vertical)
+    # np.roll wraps around: drop the borders it contaminates.
+    mask[:tau], mask[-tau:], mask[:, :tau], mask[:, -tau:] = False, False, False, False
+    return mask.astype(np.uint8) * 255
+
+
+# ── 2. Candidate lines ────────────────────────────────────────────────────────
+
+def _line_angle_deg(line):
+    a, b, _ = line
+    return np.degrees(np.arctan2(b, a)) % 180
+
+
+def candidate_lines(mask):
+    """Strongest distinct Hough lines as (horizontal, oblique) lists of (a, b, c),
+    with a x + b y = c. Horizontal ones are sorted top to bottom, oblique ones
+    left to right."""
+    h, w = mask.shape
+    found = cv2.HoughLines(mask, 1, np.pi / 360, threshold=int(HOUGH_VOTES_FRAC * h))
+    if found is None:
+        return [], []
+    horizontal, oblique = [], []
+    for rho, theta in found[:, 0, :]:          # strongest first
+        line = (float(np.cos(theta)), float(np.sin(theta)), float(rho))
+        is_horizontal = abs(np.degrees(theta) - 90) < HORIZONTAL_DEG
+        bucket = horizontal if is_horizontal else oblique
+        if len(bucket) >= MAX_CANDIDATES or _is_duplicate(line, bucket, is_horizontal, w, h):
             continue
-        dist = abs(dy * (cx - x1) - dx * (cy - y1)) / length
-        if dist <= max_dist:
-            pts += [(x1, y1), (x2, y2)]
-    if len(pts) < 2:
+        bucket.append(line)
+        if len(horizontal) >= MAX_CANDIDATES and len(oblique) >= MAX_CANDIDATES:
+            break
+    horizontal.sort(key=lambda ln: (ln[2] - ln[0] * w / 2) / ln[1])  # y at mid-width
+    oblique.sort(key=lambda ln: (ln[2] - ln[1] * 0.6 * h) / ln[0])  # x at 0.6 h
+    return horizontal, oblique
+
+
+def _is_duplicate(line, kept, is_horizontal, w, h, max_deg=2.5, max_px=12):
+    a, b, c = line
+    for a2, b2, c2 in kept:
+        d_angle = abs(_line_angle_deg(line) - _line_angle_deg((a2, b2, c2)))
+        if min(d_angle, 180 - d_angle) > max_deg:
+            continue
+        if is_horizontal:
+            gap = abs((c - a * w / 2) / b - (c2 - a2 * w / 2) / b2)
+        else:
+            gap = abs((c - b * h / 2) / a - (c2 - b2 * h / 2) / a2)
+        if gap < max_px:
+            return True
+    return False
+
+
+def _intersect(l1, l2):
+    a1, b1, c1 = l1
+    a2, b2, c2 = l2
+    det = a1 * b2 - a2 * b1
+    if abs(det) < 1e-9:
         return None
-    pts = np.array(pts, dtype=np.float64)
-    a, b = np.polyfit(pts[:, 1], pts[:, 0], 1)
-    return float(a), float(b)
+    return np.array([(c1 * b2 - c2 * b1) / det, (a1 * c2 - a2 * c1) / det])
 
 
-def find_ground_line_bands(hsv_img, xl_fit, xr_fit, y_min, y_max,
-                           cov_thr=0.5, max_thickness=14):
-    """Find horizontal ground lines via a per-row white-coverage profile.
+# ── 3. Model fitting ──────────────────────────────────────────────────────────
 
-    For each row, measures the fraction of white-ish pixels (relaxed mask,
-    since far lines are dimmer) along the chord between the two fitted
-    sidelines. Ground lines are THIN high-coverage runs; the elevated net is a
-    thick run and is rejected. Returns the center y of each thin band.
-    """
-    relaxed = cv2.inRange(hsv_img,
-                          np.array([0, 0, 195], dtype=np.uint8),
-                          np.array([180, 95, 255], dtype=np.uint8))
-    runs, run = [], None
-    for y in range(int(y_min), int(y_max)):
-        xl = int(xl_fit[0] * y + xl_fit[1]) + 6
-        xr = int(xr_fit[0] * y + xr_fit[1]) - 6
-        cov = relaxed[y, xl:xr].mean() / 255.0 if xr - xl >= 50 else 0.0
-        if cov >= cov_thr:
-            run = [y, y] if run is None else [run[0], y]
-        elif run is not None:
-            runs.append(run)
-            run = None
-    if run is not None:
-        runs.append(run)
-    return [(y0 + y1) / 2.0 for y0, y1 in runs
-            if (y1 - y0 + 1) <= max_thickness]
+def _square_to_quad(quads):
+    """Homographies mapping the unit square (0,0),(1,0),(1,1),(0,1) onto each
+    quad of `quads` (N, 4, 2), in closed form (Heckbert, 1989)."""
+    x0, y0 = quads[:, 0, 0], quads[:, 0, 1]
+    x1, y1 = quads[:, 1, 0], quads[:, 1, 1]
+    x2, y2 = quads[:, 2, 0], quads[:, 2, 1]
+    x3, y3 = quads[:, 3, 0], quads[:, 3, 1]
+    sx, sy = x0 - x1 + x2 - x3, y0 - y1 + y2 - y3
+    dx1, dx2, dy1, dy2 = x1 - x2, x3 - x2, y1 - y2, y3 - y2
+    den = dx1 * dy2 - dx2 * dy1
+    den = np.where(np.abs(den) < 1e-9, 1e-9, den)
+    g = (sx * dy2 - dx2 * sy) / den
+    k = (dx1 * sy - sx * dy1) / den
+    H = np.zeros((len(quads), 3, 3))
+    H[:, 0] = np.c_[x1 - x0 + g * x1, x3 - x0 + k * x3, x0]
+    H[:, 1] = np.c_[y1 - y0 + g * y1, y3 - y0 + k * y3, y0]
+    H[:, 2] = np.c_[g, k, np.ones_like(g)]
+    return H
 
 
-def select_far_lines(bands, bl, br, xl_fit, xr_fit, tol=12.0):
-    """Identify the far baseline and service-line bands by projective fit.
+def _hypotheses(horizontal, oblique, w, h):
+    """All (image quad, model line indices) pairs that pass basic sanity checks,
+    as homographies model metres -> image pixels."""
+    nh, nv = len(horizontal), len(oblique)
+    X = np.full((nh, nv, 2), np.nan)
+    for i, lh in enumerate(horizontal):
+        for j, lv in enumerate(oblique):
+            p = _intersect(lh, lv)
+            if p is not None and -0.3 * w < p[0] < 1.3 * w and -0.3 * h < p[1] < 1.3 * h:
+                X[i, j] = p
+    min_gap = 20 * h / 1080
+    quads = []
+    for i in range(nh):
+        for i2 in range(i + 1, nh):
+            for j in range(nv):
+                for j2 in range(j + 1, nv):
+                    q = np.array([X[i, j], X[i, j2], X[i2, j2], X[i2, j]])
+                    if np.isnan(q).any():
+                        continue
+                    if q[1, 0] - q[0, 0] < min_gap or q[2, 0] - q[3, 0] < min_gap:
+                        continue
+                    if min(q[2, 1], q[3, 1]) - max(q[0, 1], q[1, 1]) < min_gap:
+                        continue
+                    quads.append(q)
+    if not quads:
+        return np.empty((0, 3, 3))
+    # Each image quad against each ordered choice of 2 horizontal x 2 vertical
+    # model lines (same top-to-bottom / left-to-right order as in the image).
+    pairs = [(a, b) for a in range(4) for b in range(a + 1, 4)]
+    model = np.array([(a, b, c, d) for a, b in pairs for c, d in pairs])
+    quads = np.repeat(np.array(quads), len(model), axis=0)
+    model = np.tile(model, (len(quads) // len(model), 1))
+    ya, yb = H_LINES[model[:, 0]], H_LINES[model[:, 1]]
+    xa, xb = V_LINES[model[:, 2]], V_LINES[model[:, 3]]
+    to_unit = np.zeros((len(model), 3, 3))       # model rectangle -> unit square
+    to_unit[:, 0, 0] = 1 / (xb - xa)
+    to_unit[:, 0, 2] = -xa / (xb - xa)
+    to_unit[:, 1, 1] = 1 / (yb - ya)
+    to_unit[:, 1, 2] = -ya / (yb - ya)
+    to_unit[:, 2, 2] = 1
+    return _square_to_quad(quads) @ to_unit
 
-    For each candidate (baseline, service) pair, builds the homography from
-    (TL, TR, BL, BR) and requires the projected far/near service lines to land
-    on detected bands within `tol` px. Rejects banner/fence lines and the
-    elevated net. Returns (y_baseline, y_service, residuals), or None.
-    """
-    best = None
-    for yb in bands:
-        for ys in bands:
-            if ys <= yb:        # service line sits below the baseline in image y
+
+def _score(Hs, dist, radius):
+    """(score, model points on lines, model points in frame) per homography."""
+    h, w = dist.shape
+    P = np.c_[MODEL_POINTS, np.ones(len(MODEL_POINTS))].T
+    proj = Hs @ P
+    z = proj[:, 2]
+    in_front = z > 1e-6
+    x = proj[:, 0] / np.where(in_front, z, 1)
+    y = proj[:, 1] / np.where(in_front, z, 1)
+    inside = in_front & (x >= 0) & (x < w - 1) & (y >= 0) & (y < h - 1)
+    xi = np.clip(x, 0, w - 1).astype(np.int32)
+    yi = np.clip(y, 0, h - 1).astype(np.int32)
+    hit = inside & (dist[yi, xi] <= radius)
+    n_in, n_hit = inside.sum(1), hit.sum(1)
+    return n_hit - 0.5 * (n_in - n_hit), n_hit, n_in
+
+
+def fit_court_model(mask, chunk=3000):
+    """Best homography (court metres -> pixels) for a line-pixel mask, with its
+    match ratio, or (None, 0.0) when no hypothesis is plausible."""
+    h, w = mask.shape
+    horizontal, oblique = candidate_lines(mask)
+    if len(horizontal) < 2 or len(oblique) < 2:
+        return None, 0.0
+    Hs = _hypotheses(horizontal, oblique, w, h)
+    if not len(Hs):
+        return None, 0.0
+    dist = cv2.distanceTransform(255 - mask, cv2.DIST_L2, 3)
+    radius = max(2.0, MATCH_RADIUS_PX * h / 1080)
+    best = (-np.inf, None, 0, 0)
+    for s in range(0, len(Hs), chunk):
+        score, n_hit, n_in = _score(Hs[s:s + chunk], dist, radius)
+        k = int(np.argmax(score))
+        if score[k] > best[0]:
+            best = (score[k], Hs[s + k], n_hit[k], n_in[k])
+    _, H, n_hit, n_in = best
+    if n_in < MIN_MODEL_POINTS:
+        return None, 0.0
+    return H, n_hit / n_in
+
+
+# ── 4. Refinement ─────────────────────────────────────────────────────────────
+
+def _model_line(seg):
+    (x0, y0), (x1, y1) = seg
+    a, b = y0 - y1, x1 - x0
+    return (a, b, a * x0 + b * y0)
+
+
+def refine_homography(H, mask, iterations=3):
+    """Refit every model line on the line pixels around its projection and
+    re-estimate H from the intersections of the refitted lines."""
+    h = mask.shape[0]
+    ys, xs = np.nonzero(mask)
+    pixels = np.c_[xs, ys].astype(np.float64)
+    band = max(4.0, 6.0 * h / 1080)
+    for _ in range(iterations):
+        fitted = {}
+        for k, seg in enumerate(MODEL_SEGMENTS):
+            p0, p1 = cv2.perspectiveTransform(np.array([[seg[0]], [seg[1]]], np.float64), H)[:, 0]
+            length = np.hypot(*(p1 - p0))
+            if length < 1:
                 continue
-            tl = (xl_fit[0] * yb + xl_fit[1], yb)
-            tr = (xr_fit[0] * yb + xr_fit[1], yb)
-            try:
-                pts = project_all_corners(
-                    {"TL": tl, "TR": tr, "BL": bl, "BR": br})
-            except RuntimeError:
+            u = (p1 - p0) / length
+            rel = pixels - p0
+            along = rel @ u
+            across = np.abs(rel[:, 0] * u[1] - rel[:, 1] * u[0])
+            near = (across < band) & (along > -5) & (along < length + 5)
+            if near.sum() < 30:
                 continue
-            y_far = (pts["STL"][1] + pts["STR"][1]) / 2.0
-            y_near = (pts["SBL"][1] + pts["SBR"][1]) / 2.0
-            r_far = abs(y_far - ys)
-            r_near = min(abs(y_near - b) for b in bands)
-            if r_far > tol or r_near > tol:
-                continue
-            score = r_far + r_near
-            if best is None or score < best[0]:
-                best = (score, yb, ys, r_far, r_near)
-    if best is None:
-        return None
-    _, yb, ys, r_far, r_near = best
-    return yb, ys, (r_far, r_near)
+            vx, vy, cx, cy = cv2.fitLine(pixels[near].astype(np.float32),
+                                         cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()
+            fitted[k] = (vy, -vx, vy * cx - vx * cy)
+        src, dst = [], []
+        for i in fitted:
+            for j in fitted:
+                if j <= i:
+                    continue
+                m = _intersect(_model_line(MODEL_SEGMENTS[i]), _model_line(MODEL_SEGMENTS[j]))
+                p = _intersect(fitted[i], fitted[j])
+                if m is not None and p is not None:
+                    src.append(m)
+                    dst.append(p)
+        if len(src) < 4:
+            break
+        H_new, _ = cv2.findHomography(np.array(src), np.array(dst), 0)
+        if H_new is None:
+            break
+        H = H_new
+    return H
 
 
-def find_court_corners(dots, frame_shape, rank=0):
-    """Pick the 4 boundary corners by scoring normalised (x, y) coordinates.
+def detect_court(frame):
+    """(H court metres -> pixels, match ratio) for one frame; H is None on failure."""
+    mask = line_pixel_mask(frame)
+    H, ratio = fit_court_model(mask)
+    if H is None:
+        return None, 0.0
+    return refine_homography(H, mask), ratio
 
-      TL -> min(nx + ny)   top-left
-      TR -> min(ny - nx)   top-right
-      BL -> min(nx - ny)   bottom-left
-      BR -> max(nx + ny)   bottom-right
 
-    `rank` selects the n-th in each score order (0 = most extreme).
-    Raises ValueError if fewer than 4 dots are given.
-    """
-    pts = np.array(dots, dtype=np.float32)
-    if len(pts) < 4:
-        raise ValueError(f"Need at least 4 dots; got {len(pts)}.")
-
-    h, w = frame_shape[:2]
-    nx = pts[:, 0] / w
-    ny = pts[:, 1] / h
-
-    def pick(scores, ascending):
-        order = np.argsort(scores) if ascending else np.argsort(-scores)
-        idx = min(rank, len(order) - 1)
-        p = pts[order[idx]]
-        return (int(round(p[0])), int(round(p[1])))
-
-    tl = pick(nx + ny, ascending=True)
-    tr = pick(ny - nx, ascending=True)
-    bl = pick(nx - ny, ascending=True)
-    br = pick(nx + ny, ascending=False)
-    return tl, tr, bl, br
+def keypoints_from_homography(H):
+    """The 8 labelled singles keypoints {label: (x, y)} in pixels."""
+    labels = list(_REAL_WORLD)
+    pts = np.array([[_REAL_WORLD[k]] for k in labels], dtype=np.float64)
+    px = cv2.perspectiveTransform(pts, H)[:, 0]
+    return {k: (float(x), float(y)) for k, (x, y) in zip(labels, px)}
 
 
 # ── Court tracker ─────────────────────────────────────────────────────────────
 
 class CourtTracker:
-    """Detect court keypoints: white mask + Hough lines + intersection
-    clustering + ITF-proportion filtering."""
+    """Detect the court on a few frames of the video and save its keypoints."""
 
-    def __init__(self, video_path, no_display=False, roi_top=0.15,
-                 far_line="baseline", output_dir="outputs",
-                 roi_bottom=ROI_BOTTOM_FRACTION):
+    def __init__(self, video_path, no_display=False, output_dir="outputs",
+                 frames_to_try=FRAMES_TO_TRY):
         self.video_path = video_path
         self.no_display = no_display
-        self.roi_top = roi_top
-        self.roi_bottom = roi_bottom
-        self.far_line = far_line
         self.output_dir = output_dir
+        self.frames_to_try = frames_to_try
+
+    def _best_fit(self, cap):
+        """(H, ratio, frame index, frame) of the best fit over the sampled frames."""
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        last = max(1, total // 2)
+        indices = sorted({int(round(i * last / max(1, self.frames_to_try - 1)))
+                          for i in range(self.frames_to_try)})
+        best = (None, 0.0, -1, None)
+        for idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            H, ratio = detect_court(frame)
+            print(f"  frame {idx:5d}: " + (f"{ratio:.0%} of the court model on detected lines"
+                                           if H is not None else "no court found"))
+            if H is not None and ratio > best[1]:
+                best = (H, ratio, idx, frame)
+            if best[1] >= GOOD_MATCH_RATIO:
+                break
+        return best
 
     def run(self):
-        """Detect the 8 keypoints, write them to CSV, and (unless no_display)
-        play back the annotated video. Returns the 8-keypoint dict."""
-        video_stem = os.path.splitext(os.path.basename(self.video_path))[0]
-        csv_path = os.path.join(self.output_dir, "court_coordinates",
-                                f"{video_stem}_court.csv")
-
-        os.makedirs(os.path.join(self.output_dir, "court_coordinates"),
-                    exist_ok=True)
+        """Detect the court, write the 8 keypoints to CSV plus an overlay image,
+        and (unless no_display) play the video with the court drawn on it.
+        Returns the keypoint dict."""
+        stem = os.path.splitext(os.path.basename(self.video_path))[0]
+        out_dir = os.path.join(self.output_dir, "court_coordinates")
+        os.makedirs(out_dir, exist_ok=True)
+        csv_path = os.path.join(out_dir, f"{stem}_court.csv")
 
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {self.video_path}")
-
-        # finally releases the capture/window on every exit path.
         try:
-            ret, frame = cap.read()
-            if not ret:
-                raise RuntimeError("Failed to read the first frame.")
-
-            h, w = frame.shape[:2]
-
-            # 1. White mask
-            hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(hsv, LOWER_WHITE, UPPER_WHITE)
-
-            # 2. Apply ROI
-            roi_top    = int(h * self.roi_top)
-            roi_bottom = int(h * self.roi_bottom)
-            roi_left   = int(w * ROI_LEFT_FRACTION)
-            roi_right  = int(w * ROI_RIGHT_FRACTION)
-            mask[:roi_top,    :] = 0
-            mask[roi_bottom:, :] = 0
-            mask[:, :roi_left]   = 0
-            mask[:, roi_right:]  = 0
-
-            # 3. Clean the mask
-            kernel     = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            mask_clean = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-            edges      = cv2.Canny(mask_clean, 50, 150)
-
-            # 4. Detect line segments
-            raw_lines = cv2.HoughLinesP(
-                edges,
-                rho=HOUGH_RHO,
-                theta=HOUGH_THETA,
-                threshold=HOUGH_THRESHOLD,
-                minLineLength=HOUGH_MIN_LENGTH,
-                maxLineGap=HOUGH_MAX_GAP,
-            )
-
-            if raw_lines is None:
-                print("No lines detected - try loosening HOUGH_THRESHOLD or HOUGH_MIN_LENGTH.")
-                if not self.no_display:
-                    cv2.imshow("White Mask",
-                               cv2.bitwise_and(frame, frame, mask=mask))
-                    cv2.waitKey(0)
-                    cv2.destroyAllWindows()
+            print(f"Fitting the court model on {self.video_path}...")
+            H, ratio, frame_idx, frame = self._best_fit(cap)
+            if H is None or ratio < MIN_MATCH_RATIO:
                 raise RuntimeError(
-                    "No court lines detected (try loosening HOUGH_THRESHOLD / "
-                    "HOUGH_MIN_LENGTH).")
+                    f"Court not found in {self.video_path}: best fit matched only "
+                    f"{ratio:.0%} of the court model (need {MIN_MATCH_RATIO:.0%}). "
+                    "The clip needs a fixed broadcast view of the whole court.")
 
-            segments = raw_lines[:, 0, :]
-
-            # 5. Pairwise intersections
-            raw_intersections = []
-            for i in range(len(segments)):
-                for j in range(i + 1, len(segments)):
-                    angle = angle_between(segments[i], segments[j])
-                    if angle < MIN_ANGLE_DEG or angle > (180 - MIN_ANGLE_DEG):
-                        continue
-                    pt = line_intersection(segments[i], segments[j])
-                    if pt is None:
-                        continue
-                    x, y = pt
-                    if roi_left <= x < roi_right and roi_top <= y < roi_bottom:
-                        raw_intersections.append((x, y))
-
-            # 6. Cluster nearby intersections
-            all_dots = cluster_points(raw_intersections, CLUSTER_RADIUS)
-            print(f"Detected {len(segments)} line segments -> {len(all_dots)} intersection points (pre-filter).")
-
-            # 6b. Strip doubles-alley corners using ITF width proportions
-            dots = filter_singles_by_proportion(all_dots, Y_GROUP_TOLERANCE, ALLEY_RATIO)
-            print(f"After singles-court proportion filter: {len(dots)} dots.")
-            for i, d in enumerate(dots):
-                print(f"  dot[{i:2d}] = {d}")
-
-            # 7. Select the 4 extreme corners of the detected dots
-            tl, tr, bl, br = find_court_corners(dots, frame.shape, rank=SINGLES_CORNER_RANK)
-
-            # 7b. Refine the far side. Hough intersections are unreliable there (far
-            # ground lines are thin/dim while banner edges and the elevated net are
-            # bright), so instead scan a white-coverage profile between the fitted
-            # sidelines and pick the (baseline, service) pair consistent with the ITF model.
-            far_sel = None
-            xl_fit = fit_sideline(segments, bl)
-            xr_fit = fit_sideline(segments, br)
-            if xl_fit is not None and xr_fit is not None:
-                bands = find_ground_line_bands(hsv, xl_fit, xr_fit,
-                                               y_min=roi_top,
-                                               y_max=min(bl[1], br[1]) - 30)
-                if bands:
-                    far_sel = select_far_lines(bands, bl, br, xl_fit, xr_fit)
-
-            if far_sel is not None:
-                yb, ys, (r_far, r_near) = far_sel
-                tl = (int(round(xl_fit[0] * yb + xl_fit[1])), int(round(yb)))
-                tr = (int(round(xr_fit[0] * yb + xr_fit[1])), int(round(yb)))
-                known = {"TL": tl, "TR": tr, "BL": bl, "BR": br}
-                print(f"Far lines via coverage profile: baseline y={yb:.0f}, "
-                      f"service y={ys:.0f} (residuals: far {r_far:.1f}px, "
-                      f"near {r_near:.1f}px)")
-            else:
-                print("WARNING: coverage-profile far-line detection failed, falling "
-                      "back to Hough corners" +
-                      (" interpreted as the far service line (--far-line service)."
-                       if self.far_line == "service" else "."))
-                if self.far_line == "service":
-                    known = {"STL": tl, "STR": tr, "BL": bl, "BR": br}
-                else:
-                    known = {"TL": tl, "TR": tr, "BL": bl, "BR": br}
-            all_pts = project_all_corners(known)
-
-            corners = {k: all_pts[k] for k in ("TL", "TR", "BL", "BR")}
-            service = {k: all_pts[k] for k in ("STL", "STR", "SBL", "SBR")}
-            tl, tr, bl, br = corners["TL"], corners["TR"], corners["BL"], corners["BR"]
-            print(f"\nCourt corners  TL:{tl}  TR:{tr}  BL:{bl}  BR:{br}")
-            print(f"Service corners  STL:{service['STL']}  STR:{service['STR']}  SBL:{service['SBL']}  SBR:{service['SBR']}")
-
-            # 7c. Drop net-zone dots from the display only (corners already saved).
-            court_span = bl[1] - tl[1]
-            # A non-positive span (collapsed/inverted corners) makes the net band
-            # meaningless, so skip the filter.
-            if court_span > 0:
-                net_y = tl[1] + court_span * NET_Y_FRACTION
-                net_band = court_span * NET_Y_BAND
-                dots = [d for d in dots
-                        if abs(d[1] - net_y) > net_band]
-
-            # 8. Save all 8 named corners to CSV
-            keypoints = {**corners, **service}
+            keypoints = keypoints_from_homography(H)
             with open(csv_path, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["label", "x", "y"])
                 for label in ("TL", "TR", "BL", "BR", "STL", "STR", "SBL", "SBR"):
-                    pt = keypoints[label]
-                    writer.writerow([label, pt[0], pt[1]])
-            print(f"Saved all corners to '{csv_path}'.")
+                    x, y = keypoints[label]
+                    writer.writerow([label, f"{x:.1f}", f"{y:.1f}"])
+            print(f"Court fitted on frame {frame_idx} ({ratio:.0%} match). "
+                  f"Saved keypoints to '{csv_path}'.")
 
-            # 8b. Overlay image to check the keypoints and the homography by eye.
             overlay_path = os.path.splitext(csv_path)[0] + ".png"
-            overlay, errors = draw_court_overlay(frame, csv_path)
+            overlay, _ = draw_court_overlay(frame, csv_path)
             cv2.imwrite(overlay_path, overlay)
-            print(f"Saved court overlay to '{overlay_path}' (keypoint reprojection "
-                  f"error: mean {np.mean(list(errors.values())):.1f}px, "
-                  f"max {max(errors.values()):.1f}px).")
+            print(f"Saved court overlay to '{overlay_path}'.")
 
-            # 9. Play back: dots in red, the 4 corners ringed magenta
-            if self.no_display:
-                return keypoints
-
-            self._play_back(cap, corners, service, dots, tl, tr, bl, br)
+            if not self.no_display:
+                self._play_back(cap, csv_path)
             return keypoints
         finally:
             cap.release()
             cv2.destroyAllWindows()
 
-    def _play_back(self, cap, corners, service, dots, tl, tr, bl, br):
-        """Rewind and draw, per frame, the court fill + outline, all dots, and
-        the corner/service markers. Display only; writes nothing. Caller owns
-        cap.release()/destroyAllWindows() and the no_display early-return."""
-        fps = safe_fps(cap.get(cv2.CAP_PROP_FPS))
-        delay = max(1, int(PLAYBACK_DELAY_BASE_MS / fps))
-
-        # Seek to frame 0; on some codecs this lands on a nearby keyframe, not exactly 0.
+    def _play_back(self, cap, csv_path):
+        """Play the video with the fitted court drawn on every frame; q quits."""
+        delay = max(1, int(PLAYBACK_DELAY_BASE_MS / safe_fps(cap.get(cv2.CAP_PROP_FPS))))
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        quad_pts = np.array([tl, tr, br, bl], dtype=np.int32)
-
         while True:
-            ret, current_frame = cap.read()
-            if not ret:
+            ok, frame = cap.read()
+            if not ok:
                 break
-
-            # Translucent green court fill
-            overlay = current_frame.copy()
-            cv2.fillPoly(overlay, [quad_pts], (0, 180, 0))
-            cv2.addWeighted(overlay, 0.20, current_frame, 0.80, 0, current_frame)
-
-            cv2.polylines(current_frame, [quad_pts], isClosed=True, color=(0, 255, 0), thickness=2)
-
-            # Detected dots: filled red
-            for (x, y) in dots:
-                cv2.circle(current_frame, (x, y), DOT_RADIUS, (0, 0, 255), -1)
-
-            # Court corners: magenta ring + label
-            for label, corner in corners.items():
-                cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 0, 255), 2)
-                cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 0, 255), 2)
-
-            # Service corners: cyan ring + label. STL also gets a red fill since it is
-            # geometric (not from Hough) and thus has no red dot of its own.
-            for label, corner in service.items():
-                if label == "STL":
-                    cv2.circle(current_frame, corner, DOT_RADIUS, (0, 0, 255), -1)
-                cv2.circle(current_frame, corner, DOT_RADIUS + 4, (255, 255, 0), 2)
-                cv2.putText(current_frame, label, (corner[0] + 12, corner[1] - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
-
-            cv2.imshow("Tennis Court - Video Playback", current_frame)
+            overlay, _ = draw_court_overlay(frame, csv_path)
+            cv2.imshow("Court detection (q to quit)", cv2.resize(overlay, (1280, 720)))
             if cv2.waitKey(delay) & 0xFF == ord("q"):
                 break
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Court keypoint detection: white mask + Hough lines + "
-                    "intersection clustering + ITF-proportion filtering")
+        description="Court keypoint detection by fitting the ITF court model to "
+                    "the white court lines")
     parser.add_argument("--video", default="data/Input_video2.mp4")
     parser.add_argument("--no-display", action="store_true",
-                        help="skip the annotated video playback")
-    parser.add_argument("--roi-top", type=float, default=0.15, dest="roi_top",
-                        help="top ROI cut as fraction of frame height; raise it "
-                             "when white banner/fence lines above the court get "
-                             "mistaken for the far baseline (default: 0.15)")
-    parser.add_argument("--roi-bottom", type=float, default=ROI_BOTTOM_FRACTION,
-                        dest="roi_bottom",
-                        help="bottom ROI cut as fraction of frame height; lower it "
-                             "when white writing painted below the near baseline "
-                             "gets mistaken for it (default: %(default)s)")
-    parser.add_argument("--far-line", choices=["baseline", "service"],
-                        default="baseline", dest="far_line",
-                        help="which court line the TOPMOST detected corner row "
-                             "belongs to. Use 'service' when the far baseline is "
-                             "too thin/washed-out for the Hough transform and "
-                             "the top corners are on the far service line; the "
-                             "real baseline corners are then projected from ITF "
-                             "proportions (default: baseline)")
+                        help="skip the video playback with the fitted court")
     parser.add_argument("--output", default="outputs", dest="output_dir",
-                        help="output directory for generated files such as the "
-                             "court-coordinates CSV (default: outputs)")
+                        help="base output directory (default: outputs)")
     args = parser.parse_args()
 
-    CourtTracker(
-        video_path=args.video,
-        no_display=args.no_display,
-        roi_top=args.roi_top,
-        roi_bottom=args.roi_bottom,
-        far_line=args.far_line,
-        output_dir=args.output_dir,
-    ).run()
+    CourtTracker(video_path=args.video, no_display=args.no_display,
+                 output_dir=args.output_dir).run()

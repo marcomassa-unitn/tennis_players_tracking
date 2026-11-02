@@ -115,15 +115,11 @@ def step_court(p, args, produced):
         return
 
     from tracking.court_tracking import CourtTracker
-    # Force headless: run()'s trailing playback loop is standalone-CLI viz only,
-    # and would otherwise block on a keypress (and can OOM on long videos). The
-    # CSV is already written before that loop.
+    # Force headless: run()'s trailing playback loop is standalone-CLI viz only
+    # and would otherwise block on a keypress. The CSV is written before it.
     keypoints = CourtTracker(
         video_path=p["video"],
         no_display=True,
-        roi_top=args.roi_top,
-        roi_bottom=args.roi_bottom,
-        far_line=args.far_line,
         output_dir=p["output"],
     ).run()
     print(f"Detected {len(keypoints)} court keypoints -> {p['court_csv']}")
@@ -355,15 +351,6 @@ def build_parser():
                         help="skip shot analysis")
     parser.add_argument("--skip-evaluation", action="store_true", dest="skip_evaluation",
                         help="skip evaluation (requires ground truth CSVs)")
-
-    # Court tuning (forwarded to CourtTracker).
-    parser.add_argument("--roi-top", type=float, default=0.15, dest="roi_top",
-                        help="top ROI fraction for court detection")
-    parser.add_argument("--roi-bottom", type=float, default=0.95, dest="roi_bottom",
-                        help="bottom ROI fraction for court detection")
-    parser.add_argument("--far-line", choices=["baseline", "service"],
-                        default="baseline", dest="far_line",
-                        help="far court line used for keypoints")
 
     # Motion estimation tuning.
     parser.add_argument("--flow-frames", type=int, default=200, dest="flow_frames",

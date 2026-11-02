@@ -2,17 +2,21 @@
 
 Draws, on a frame of the original video:
   - the 8 detected keypoints (red), labelled;
-  - every line of the ITF singles court model (yellow), reprojected into the
-    image through the inverse of the pixel -> metre homography.
+  - every painted line of the ITF court model (yellow), doubles alleys
+    included, reprojected into the image through the homography fitted on
+    those 8 keypoints.
 
-If the yellow lines sit on the painted white lines -- including the centre
-service line and the net line, which are not used to fit the homography --
-the keypoints and the homography are correct. The mean / max reprojection
-error of the keypoints is printed and written on the image.
+If the yellow lines sit on the painted white lines -- including the doubles
+sidelines and the centre service line, which the 8 singles keypoints do not
+pin down -- the keypoints and the homography are correct. The reprojection
+error only measures how consistent the 8 points are with each other, so the
+visual check is the one that matters.
 
 Usage (from project root, after court_tracking.py has written the CSV):
     python utils/court_overlay.py --video data/Input_video2.mp4
     python utils/court_overlay.py --video data/input4.mp4 --frame 100
+
+Without --frame, the first frame that is not black is used.
 """
 
 import argparse
@@ -25,18 +29,20 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_converter import CourtConverter
-from utils.court_geometry import _REAL_WORLD, CL_X, NET, SVC_B, SVC_T, L_m, W_m
+from utils.court_geometry import _REAL_WORLD, ALLEY, CL_X, SVC_B, SVC_T, L_m, W_m
 
-# Court model segments in metres (TL origin), drawn through the homography.
-_MODEL_LINES = [
-    ((0.0, 0.0), (W_m, 0.0)),        # far baseline
-    ((0.0, L_m), (W_m, L_m)),        # near baseline
-    ((0.0, 0.0), (0.0, L_m)),        # left sideline
-    ((W_m, 0.0), (W_m, L_m)),        # right sideline
-    ((0.0, SVC_T), (W_m, SVC_T)),    # far service line
-    ((0.0, SVC_B), (W_m, SVC_B)),    # near service line
-    ((CL_X, SVC_T), (CL_X, SVC_B)),  # centre service line
-    ((0.0, NET), (W_m, NET)),        # net (ground line under the net)
+# Painted lines of the court in metres (origin at the far-left singles corner).
+# Shared with tracking/court_tracking.py, which fits exactly this model.
+MODEL_SEGMENTS = [
+    ((-ALLEY, 0.0), (W_m + ALLEY, 0.0)),    # far baseline
+    ((-ALLEY, L_m), (W_m + ALLEY, L_m)),    # near baseline
+    ((-ALLEY, 0.0), (-ALLEY, L_m)),         # left doubles sideline
+    ((W_m + ALLEY, 0.0), (W_m + ALLEY, L_m)),  # right doubles sideline
+    ((0.0, 0.0), (0.0, L_m)),               # left singles sideline
+    ((W_m, 0.0), (W_m, L_m)),               # right singles sideline
+    ((0.0, SVC_T), (W_m, SVC_T)),           # far service line
+    ((0.0, SVC_B), (W_m, SVC_B)),           # near service line
+    ((CL_X, SVC_T), (CL_X, SVC_B)),         # centre service line
 ]
 
 _LINE_COLOR = (0, 230, 255)    # yellow (BGR)
@@ -64,7 +70,7 @@ def draw_court_overlay(frame, court_csv):
     scale = max(1.0, out.shape[1] / 1280)          # keep strokes visible on 4K
     thick = int(round(2 * scale))
 
-    for a, b in _MODEL_LINES:
+    for a, b in MODEL_SEGMENTS:
         p, q = _to_px(H_inv, [a, b])
         cv2.line(out, tuple(np.round(p).astype(int)), tuple(np.round(q).astype(int)),
                  _LINE_COLOR, thick, cv2.LINE_AA)
@@ -92,17 +98,32 @@ def draw_court_overlay(frame, court_csv):
     return out, errors
 
 
-def save_court_overlay(video_path, court_csv, out_path, frame_idx=0):
-    """Draw the overlay on frame `frame_idx` of the video, save it, report errors."""
+def _read_frame(video_path, frame_idx=None, min_brightness=40):
+    """Frame `frame_idx`, or the first frame that is not black (fade-ins)."""
     cap = cv2.VideoCapture(video_path)
     try:
-        if frame_idx:
+        if frame_idx is not None:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ok, frame = cap.read()
+            ok, frame = cap.read()
+            return frame if ok else None
+        frame = None
+        for _ in range(300):
+            ok, candidate = cap.read()
+            if not ok:
+                break
+            frame = candidate
+            if frame.mean() >= min_brightness:
+                break
+        return frame
     finally:
         cap.release()
-    if not ok:
-        raise RuntimeError(f"Cannot read frame {frame_idx} of {video_path}")
+
+
+def save_court_overlay(video_path, court_csv, out_path, frame_idx=None):
+    """Draw the overlay on a frame of the video, save it, report errors."""
+    frame = _read_frame(video_path, frame_idx)
+    if frame is None:
+        raise RuntimeError(f"Cannot read a frame of {video_path}")
 
     image, errors = draw_court_overlay(frame, court_csv)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -124,7 +145,8 @@ def main():
     parser.add_argument("--video", default="data/Input_video2.mp4")
     parser.add_argument("--court", default=None,
                         help="court CSV (default: outputs/court_coordinates/<video name>_court.csv)")
-    parser.add_argument("--frame", type=int, default=0, help="frame to draw on (default 0)")
+    parser.add_argument("--frame", type=int, default=None,
+                        help="frame to draw on (default: first non-black frame)")
     parser.add_argument("--output", default=None,
                         help="image path (default: next to the court CSV, <video name>_court.png)")
     args = parser.parse_args()
