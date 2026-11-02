@@ -48,11 +48,13 @@ from analysis.shot_analysis import (
 
 # ── layout constants ────────────────────────────────────────────────────────────
 # RENDER and WINDOW size are decoupled: the canvas is composed at RENDER_WIDTH so
-# all text rasterises large and crisp, then area-downscaled ONCE to WINDOW_WIDTH
-# for display. A smaller window thus costs no text quality (it shrinks already-
-# crisp pixels).
+# all text rasterises large and crisp, then area-downscaled ONCE to the window
+# size for display. A smaller window thus costs no text quality (it shrinks
+# already-crisp pixels).
 RENDER_WIDTH = 1600      # px width the canvas is COMPOSED at (quality; not the window)
-WINDOW_WIDTH = 1100      # px width the window is SHOWN at (display size; <= RENDER_WIDTH)
+SCREEN_FRACTION = 0.40   # share of the screen AREA each window covers by default
+MAX_RENDER_WIDTH = 1920  # beyond this, compose cost breaks 30 fps; the window
+                         # stretches the canvas instead (invisible on hi-DPI screens)
 PANEL_W   = 380          # width (px) of the right column (minimap + stats)
 MINI_FRAC = 0.50         # minimap's share of the right-column height (stats gets
                          # the rest: 8 category rows + totals + footer need the room)
@@ -539,18 +541,62 @@ def _fit_to_screen(canvas: np.ndarray, window_width: int) -> np.ndarray:
     return canvas
 
 
+def _enable_dpi_awareness() -> None:
+    """Make Windows report and use real pixels for this process.
+
+    Must run BEFORE the first OpenCV window is created: switching DPI awareness
+    after a window exists (on a screen scaled to 125-150 %) leaves its client
+    area and the drawn image out of sync -- the image sits in the top-left
+    corner of a mostly white window until the window is resized. No-op
+    elsewhere.
+    """
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per-monitor aware
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
 def _screen_size(default=(1920, 1080)) -> tuple[int, int]:
     """(width, height) of the primary screen in px; ``default`` if unknown (Windows-only API)."""
     try:
         import ctypes
         u = ctypes.windll.user32
-        u.SetProcessDPIAware()
         w, h = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
         if w > 0 and h > 0:
             return int(w), int(h)
     except Exception:
         pass
     return default
+
+
+def _window_size(aspect: float, screen_fraction: float = SCREEN_FRACTION,
+                 width: int | None = None) -> tuple[int, int]:
+    """(w, h) of a window with the given width/height ``aspect``.
+
+    With ``width`` it is used as is; otherwise the window covers
+    ``screen_fraction`` of the screen area, capped to fit on the screen.
+    """
+    sw, sh = _screen_size()
+    if not width or width <= 0:
+        width = (screen_fraction * sw * sh * aspect) ** 0.5
+        width = min(width, 0.95 * sw, 0.90 * sh * aspect)
+    width = int(round(width))
+    return width, int(round(width / aspect))
+
+
+def _place_window(win_name: str, w: int, h: int) -> None:
+    """Resize an OpenCV window to w x h and centre it on the primary screen.
+
+    Called right after the window's first imshow(): sizing a WINDOW_NORMAL
+    window before it has an image is unreliable on Windows.
+    """
+    cv2.resizeWindow(win_name, w, h)
+    _center_window(win_name, w, h)
+    cv2.waitKey(1)
 
 
 def _center_window(win_name: str, w: int, h: int) -> None:
@@ -640,7 +686,8 @@ def _summary_panel(title: str, img, panel_h: int, bar_h: int = 34) -> np.ndarray
 
 
 def _show_summary_window(output_dir: str, window_name: str,
-                         max_width: int = 1360, panel_h: int = 660) -> bool:
+                         screen_fraction: float = SCREEN_FRACTION,
+                         panel_h: int = 660) -> bool:
     """Open a separate, centred window tiling heatmap | zones | shot hitmap.
 
     Returns True if at least one figure was found. Missing figures become a
@@ -664,15 +711,14 @@ def _show_summary_window(output_dir: str, window_name: str,
         board[gap:gap + panel_h, x:x + c.shape[1]] = c
         x += c.shape[1] + gap
 
-    if max_width and board.shape[1] > max_width:     # fit to a sane width
-        scale = max_width / board.shape[1]
-        board = cv2.resize(board, (max_width, int(round(board.shape[0] * scale))),
-                           interpolation=cv2.INTER_AREA)
+    # Same share of the screen as the main window, whatever the screen size.
+    w, h = _window_size(board.shape[1] / board.shape[0], screen_fraction)
+    interp = cv2.INTER_AREA if w < board.shape[1] else cv2.INTER_CUBIC
+    board = cv2.resize(board, (w, h), interpolation=interp)
 
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, board.shape[1], board.shape[0])
     cv2.imshow(window_name, board)
-    _center_window(window_name, board.shape[1], board.shape[0])
+    _place_window(window_name, w, h)
     return found
 
 
@@ -680,17 +726,29 @@ def _show_summary_window(output_dir: str, window_name: str,
 
 def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
         disp_h, fps_override, shots_csv=None, max_shot_markers=0,
-        render_width=RENDER_WIDTH, window_width=WINDOW_WIDTH,
-        output_dir="outputs") -> None:
+        render_width=RENDER_WIDTH, window_width=None,
+        output_dir="outputs", screen_fraction=SCREEN_FRACTION) -> None:
     # Solve the RENDER height so the canvas width (video + PANEL_W) == render_width
     # while the video keeps its aspect ratio. The shown window is a separate,
     # smaller size (canvas area-downscaled once at display time):
     #   vw + PANEL_W = render_width, vw = src_w*disp_h/src_h
     #   => disp_h = (render_width - PANEL_W) * src_h / src_w.
+    _enable_dpi_awareness()   # before any window exists (see its docstring)
     probe = cv2.VideoCapture(video)
     src_w = probe.get(cv2.CAP_PROP_FRAME_WIDTH) or 1920.0
     src_h = probe.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1080.0
     probe.release()
+    # Window size from the canvas aspect ratio (video + PANEL_W column), which
+    # itself depends on the render width: render as wide as the window (up to
+    # MAX_RENDER_WIDTH) so text is not upscaled, and iterate to a fixed point.
+    def canvas_aspect(width):
+        return width / ((width - PANEL_W) * src_h / src_w)
+
+    requested_width, base_render = window_width, render_width
+    for _ in range(3):
+        window_width, win_h = _window_size(canvas_aspect(render_width),
+                                           screen_fraction, requested_width)
+        render_width = max(base_render, min(window_width, MAX_RENDER_WIDTH))
     if render_width and render_width > PANEL_W + 80 and src_w > 0:
         disp_h = int(round((render_width - PANEL_W) * src_h / src_w))
 
@@ -787,16 +845,11 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
 
     win = "Tennis Live View  (q to quit)"
     # Frames are pre-downscaled to window_width, so the shown image is 1:1 crisp.
+    # The window is sized and centred after its first frame (see _place_window).
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    if window_width and window_width > 0:
-        # Size the window at window_width, preserving the canvas aspect ratio
-        # (canvas is vw + PANEL_W wide by disp_h tall), centred on screen.
-        canvas_w = int(round(src_w * disp_h / src_h)) + PANEL_W
-        win_h = int(round(disp_h * window_width / canvas_w))
-        cv2.resizeWindow(win, window_width, win_h)
-        _center_window(win, window_width, win_h)
-    print(f"  Render @ {render_width}px wide -> window @ {window_width}px "
-          f"(text rendered high, shown small).")
+    window_placed = False
+    print(f"  Render @ {render_width}px wide -> window {window_width}x{win_h}px "
+          f"({screen_fraction:.0%} of the screen unless --window-width is given).")
     print(f"  Playing at {fps:.0f} fps - press 'q' in the window to quit.")
     idx = 0
     # shot_markers is frame-sorted, so one advancing pointer (next_shot) reveals
@@ -847,7 +900,11 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             last_canvas = compose(frame, mini, stats, disp_h, PANEL_W, mini_h,
                                   player_overlays, ball_overlay)
             # Downscale the high-res canvas to the window size ONCE here.
-            cv2.imshow(win, _fit_to_screen(last_canvas, window_width))
+            shown_img = _fit_to_screen(last_canvas, window_width)
+            cv2.imshow(win, shown_img)
+            if not window_placed:
+                _place_window(win, window_width, win_h)
+                window_placed = True
 
             # Wait only the time LEFT in this frame's period (after processing) so
             # render overhead doesn't drag playback below real time.
@@ -876,7 +933,7 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             cv2.imshow(win, _fit_to_screen(final, window_width))
             # Separate window tiling the whole-clip analysis figures.
             summary_win = "Clip summary  (combined heatmap | zones | shot hitmap)"
-            if _show_summary_window(output_dir, summary_win):
+            if _show_summary_window(output_dir, summary_win, screen_fraction):
                 print(f"  Summary window: combined heatmap + zones + shot hitmap "
                       f"(from {output_dir}).")
             print("  Clip finished - frozen on last frame; press 'q' to quit.")
@@ -924,12 +981,16 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=720,
                         help="display height in px of the composited window "
                              "(default: 720)")
-    parser.add_argument("--window-width", type=int, default=WINDOW_WIDTH,
+    parser.add_argument("--screen-fraction", type=float, default=SCREEN_FRACTION,
+                        dest="screen_fraction",
+                        help="share of the screen area each window covers, so it "
+                             "looks the same on any monitor "
+                             f"(default: {SCREEN_FRACTION})")
+    parser.add_argument("--window-width", type=int, default=None,
                         dest="window_width",
-                        help="on-screen WIDTH (px) of the window. Smaller = smaller "
-                             "window; text stays sharp because it is rendered at "
-                             "--render-width and downscaled once for display "
-                             f"(0 = show at full render width, default: {WINDOW_WIDTH})")
+                        help="fixed on-screen WIDTH (px) of the window, overriding "
+                             "--screen-fraction. Text stays sharp because it is "
+                             "rendered at --render-width and downscaled once")
     parser.add_argument("--render-width", "--max-width", type=int,
                         default=RENDER_WIDTH, dest="render_width",
                         help="internal RENDER width (px) the canvas is composed at "
@@ -967,7 +1028,7 @@ def main() -> None:
     run(args.video, players_csv, court_csv, ball_csv,
         args.min_area, args.anchor, args.height, args.fps,
         shots_csv, args.max_shot_markers, args.render_width, args.window_width,
-        args.output)
+        args.output, args.screen_fraction)
 
 
 if __name__ == "__main__":
