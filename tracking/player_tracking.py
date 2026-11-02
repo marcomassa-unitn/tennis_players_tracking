@@ -9,7 +9,7 @@ import numpy as np
 
 # Make the project root importable when this file is run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils.video import safe_fps
+from utils.video import check_full_read, safe_fps
 
 # Foreground intensity-difference threshold (0-255), fps-independent.
 DIFF_THRESH = 15
@@ -21,6 +21,7 @@ MIN_COMPONENT_AREA = 300
 class PlayerTracker:
     def __init__(self, video_path, csv_path, display=True):
         self.display = display
+        self.video_path = video_path
         self.cap = cv2.VideoCapture(video_path)
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
@@ -64,11 +65,14 @@ class PlayerTracker:
         self.frame_ms = 5
 
         self.csv_path = csv_path
+        self._tmp_csv_path = csv_path + ".part"
         self.csv_file = None
         self.csv_writer = None
 
     def _open_csv(self):
-        self.csv_file = open(self.csv_path, "w", newline="")
+        # Rows go to a temporary file that replaces csv_path only after a
+        # complete run, so a failed run never leaves a truncated CSV behind.
+        self.csv_file = open(self._tmp_csv_path, "w", newline="")
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow(
             ["frame", "player_id", "x", "y", "w", "h", "cx", "cy", "area"]
@@ -296,6 +300,8 @@ class PlayerTracker:
 
     def run(self):
         frame_idx = 0
+        stopped_by_user = False
+        total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         # Reads and rewinds the first WARMUP_FRAMES to build static_bg.
         self._compute_static_background()
         self._open_csv()
@@ -348,14 +354,26 @@ class PlayerTracker:
 
                     key = cv2.waitKey(self.frame_ms) & 0xFF
                     if key == ord("q"):
+                        stopped_by_user = True
                         break
 
                 frame_idx += 1
+            if not stopped_by_user:
+                check_full_read(frame_idx, total_frames, self.video_path)
+        except BaseException:
+            self._close_csv()
+            if os.path.exists(self._tmp_csv_path):
+                os.remove(self._tmp_csv_path)
+            raise
         finally:
             self.cap.release()
             self._close_csv()
             cv2.destroyAllWindows()
 
+        os.replace(self._tmp_csv_path, self.csv_path)
+        if stopped_by_user:
+            print(f"WARNING: stopped with 'q' at frame {frame_idx} of {total_frames}; "
+                  f"{self.csv_path} covers only the frames processed so far.")
         print(f"Tracking saved to {self.csv_path}")
 
 

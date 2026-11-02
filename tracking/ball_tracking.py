@@ -11,7 +11,7 @@ from ultralytics import YOLO
 
 # Make the project root importable when this file is run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils.video import safe_fps
+from utils.video import check_full_read, safe_fps
 
 # Min YOLO confidence to accept a ball detection.
 BALL_CONF = 0.65
@@ -146,6 +146,7 @@ class BallTracker:
                 ball_positions.append(detection)
         finally:
             cap.release()
+        check_full_read(len(ball_positions), total, video_path)
 
         ball_positions, real_mask = self.interpolate_ball_positions(ball_positions)
 

@@ -776,6 +776,15 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
         fps = 30.0
     frame_period = 0.915 / fps   # seconds-per-frame (0.915 fudge trims render lag)
 
+    # A CSV that stops well before the end of the video comes from an
+    # interrupted tracking run; say so instead of silently drawing nothing.
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    for label, per_frame in (("Player", boxes), ("Ball", ball_boxes)):
+        if per_frame and total_frames and max(per_frame) < total_frames - fps:
+            print(f"  WARNING: {label} CSV ends at frame {max(per_frame)} of "
+                  f"{total_frames}; the tracking run was probably interrupted. "
+                  "Re-run it to get overlays for the whole clip.")
+
     win = "Tennis Live View  (q to quit)"
     # Frames are pre-downscaled to window_width, so the shown image is 1:1 crisp.
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
