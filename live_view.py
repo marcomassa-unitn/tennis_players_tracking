@@ -19,7 +19,8 @@ Usage (from the project root):
     python live_view.py --video data/Input_video2.mp4
 
 CSV paths default to <stem>-based names under ``--output``; each is overridable.
-Press ``q`` to close the window.
+Keys: ``space`` / ``p`` pause and resume, ``n`` steps one frame while paused,
+``q`` closes the window.
 """
 
 import argparse
@@ -588,6 +589,32 @@ def _window_size(aspect: float, screen_fraction: float = SCREEN_FRACTION,
     return width, int(round(width / aspect))
 
 
+PAUSE_KEYS = (ord(" "), ord("p"))
+STEP_KEY = ord("n")
+
+
+def _wait_while_paused(win_name: str, shown: np.ndarray) -> str:
+    """Hold the current frame until a key: "resume", "step" (one frame) or "quit"."""
+    img = shown.copy()
+    bar_h = max(28, img.shape[0] // 22)
+    cv2.rectangle(img, (0, 0), (img.shape[1], bar_h), (0, 0, 0), -1)
+    cv2.putText(img, "PAUSED  -  space: resume   n: next frame   q: quit",
+                (10, int(bar_h * 0.72)), cv2.FONT_HERSHEY_SIMPLEX,
+                bar_h / 42, (255, 255, 255), max(1, bar_h // 20), cv2.LINE_AA)
+    cv2.imshow(win_name, img)
+    while True:
+        key = cv2.waitKey(50) & 0xFF
+        if key in PAUSE_KEYS:
+            return "resume"
+        if key == STEP_KEY:
+            return "step"
+        if key == ord("q"):
+            return "quit"
+        # Closing the window with the mouse also quits.
+        if cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) < 1:
+            return "quit"
+
+
 def _place_window(win_name: str, w: int, h: int) -> None:
     """Resize an OpenCV window to w x h and centre it on the primary screen.
 
@@ -843,15 +870,17 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
                   f"{total_frames}; the tracking run was probably interrupted. "
                   "Re-run it to get overlays for the whole clip.")
 
-    win = "Tennis Live View  (q to quit)"
+    win = "Tennis Live View  (space: pause, q: quit)"
     # Frames are pre-downscaled to window_width, so the shown image is 1:1 crisp.
     # The window is sized and centred after its first frame (see _place_window).
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     window_placed = False
     print(f"  Render @ {render_width}px wide -> window {window_width}x{win_h}px "
           f"({screen_fraction:.0%} of the screen unless --window-width is given).")
-    print(f"  Playing at {fps:.0f} fps - press 'q' in the window to quit.")
+    print(f"  Playing at {fps:.0f} fps - in the window: space/p pause, "
+          "n next frame (while paused), q quit.")
     idx = 0
+    paused = False          # True after a single-frame step: pause again
     # shot_markers is frame-sorted, so one advancing pointer (next_shot) reveals
     # each marker as its frame is reached and keeps it shown to clip end
     # (O(total shots), not per frame).
@@ -909,7 +938,15 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             # Wait only the time LEFT in this frame's period (after processing) so
             # render overhead doesn't drag playback below real time.
             wait_ms = max(1, int(round((frame_period - (time.perf_counter() - t0)) * 1000)))
-            if cv2.waitKey(wait_ms) & 0xFF == ord("q"):
+            key = cv2.waitKey(wait_ms) & 0xFF
+            if key in PAUSE_KEYS or paused:
+                action = _wait_while_paused(win, shown_img)
+                paused = action == "step"
+                if action == "quit":
+                    key = ord("q")
+                else:
+                    cv2.imshow(win, shown_img)      # drop the PAUSED banner
+            if key == ord("q"):
                 cv2.destroyAllWindows()
                 return
             idx += 1

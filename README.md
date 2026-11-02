@@ -180,7 +180,7 @@ python pipeline.py --video data/Input_video2.mp4
 Then watch the result:
 
 ```bash
-python live_view.py --video data/Input_video2.mp4      # press q to quit
+python live_view.py --video data/Input_video2.mp4      # space: pause, n: next frame, q: quit
 ```
 
 If the weights are missing, ball tracking and shot analysis are skipped cleanly
