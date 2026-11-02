@@ -488,7 +488,8 @@ class PlayerTracker:
                 check_full_read(frame_idx, self.total_frames, self.video_path)
         finally:
             cap.release()
-            cv2.destroyAllWindows()
+            if self.display:        # headless OpenCV builds raise here
+                cv2.destroyAllWindows()
 
         rows = self._fill_gaps(detections)
         self._write_csv(rows)

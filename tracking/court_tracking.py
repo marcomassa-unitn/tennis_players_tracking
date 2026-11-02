@@ -401,7 +401,8 @@ class CourtTracker:
             return keypoints
         finally:
             cap.release()
-            cv2.destroyAllWindows()
+            if not self.no_display:     # headless OpenCV builds raise here
+                cv2.destroyAllWindows()
 
     def _play_back(self, cap, csv_path):
         """Play the video with the fitted court drawn on every frame; q quits."""
