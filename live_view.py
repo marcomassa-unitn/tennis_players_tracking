@@ -54,8 +54,8 @@ from analysis.shot_analysis import (
 # already-crisp pixels).
 RENDER_WIDTH = 1600      # px width the canvas is COMPOSED at (quality; not the window)
 SCREEN_FRACTION = 0.40   # share of the screen AREA each window covers by default
-MAX_RENDER_WIDTH = 1920  # beyond this, compose cost breaks 30 fps; the window
-                         # stretches the canvas instead (invisible on hi-DPI screens)
+MAX_RENDER_WIDTH = 1600  # beyond this, compositing gets too slow (14 fps at 1920
+                         # px on a laptop); the window stretches the canvas instead
 PANEL_W   = 380          # width (px) of the right column (minimap + stats)
 MINI_FRAC = 0.50         # minimap's share of the right-column height (stats gets
                          # the rest: 8 category rows + totals + footer need the room)
@@ -602,9 +602,12 @@ def _wait_while_paused(win_name: str, shown: np.ndarray) -> str:
                 (10, int(bar_h * 0.72)), cv2.FONT_HERSHEY_SIMPLEX,
                 bar_h / 42, (255, 255, 255), max(1, bar_h // 20), cv2.LINE_AA)
     cv2.imshow(win_name, img)
+    # Ignore the pause key for a moment: keyboard auto-repeat of the press that
+    # paused the clip must not resume it straight away.
+    t_paused = time.perf_counter()
     while True:
         key = cv2.waitKey(50) & 0xFF
-        if key in PAUSE_KEYS:
+        if key in PAUSE_KEYS and time.perf_counter() - t_paused > 0.3:
             return "resume"
         if key == STEP_KEY:
             return "step"
@@ -623,6 +626,15 @@ def _place_window(win_name: str, w: int, h: int) -> None:
     """
     cv2.resizeWindow(win_name, w, h)
     _center_window(win_name, w, h)
+    # Take the keyboard focus, so key presses reach the window rather than the
+    # terminal it was started from (Windows; elsewhere the window manager does it).
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.FindWindowW(None, win_name)
+        if hwnd:
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
     cv2.waitKey(1)
 
 
@@ -859,7 +871,6 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     fps = fps_override or cap.get(cv2.CAP_PROP_FPS)
     if not fps or not np.isfinite(fps) or fps <= 0:
         fps = 30.0
-    frame_period = 0.915 / fps   # seconds-per-frame (0.915 fudge trims render lag)
 
     # A CSV that stops well before the end of the video comes from an
     # interrupted tracking run; say so instead of silently drawing nothing.
@@ -881,6 +892,10 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
           "n next frame (while paused), q quit.")
     idx = 0
     paused = False          # True after a single-frame step: pause again
+    # Playback clock: frame i is due at clock_start + i / fps. When drawing a
+    # frame takes longer than 1 / fps, late frames are skipped (decoded, not
+    # drawn), so the clip always plays at real speed, as video players do.
+    clock_start = None
     # shot_markers is frame-sorted, so one advancing pointer (next_shot) reveals
     # each marker as its frame is reached and keeps it shown to clip end
     # (O(total shots), not per frame).
@@ -892,7 +907,12 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     last_canvas = None      # final composite to freeze on after the clip
     try:
         while True:
-            t0 = time.perf_counter()
+            if clock_start is not None and not paused:
+                late = int((time.perf_counter() - clock_start) * fps) - idx
+                for _ in range(max(0, late)):
+                    if not cap.grab():
+                        break
+                    idx += 1
             ret, frame = cap.read()
             if not ret:
                 break
@@ -934,11 +954,12 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             if not window_placed:
                 _place_window(win, window_width, win_h)
                 window_placed = True
+            if clock_start is None:
+                clock_start = time.perf_counter() - idx / fps
 
-            # Wait only the time LEFT in this frame's period (after processing) so
-            # render overhead doesn't drag playback below real time.
-            wait_ms = max(1, int(round((frame_period - (time.perf_counter() - t0)) * 1000)))
-            key = cv2.waitKey(wait_ms) & 0xFF
+            # Wait until the next frame is due (at least 1 ms, to pump events).
+            wait_s = clock_start + (idx + 1) / fps - time.perf_counter()
+            key = cv2.waitKey(max(1, int(wait_s * 1000))) & 0xFF
             if key in PAUSE_KEYS or paused:
                 action = _wait_while_paused(win, shown_img)
                 paused = action == "step"
@@ -946,6 +967,8 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
                     key = ord("q")
                 else:
                     cv2.imshow(win, shown_img)      # drop the PAUSED banner
+                    # Restart the clock from here: no catching up after a pause.
+                    clock_start = time.perf_counter() - (idx + 1) / fps
             if key == ord("q"):
                 cv2.destroyAllWindows()
                 return
