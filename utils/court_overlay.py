@@ -1,0 +1,142 @@
+"""Visual check of the court keypoints and of the homography built from them.
+
+Draws, on a frame of the original video:
+  - the 8 detected keypoints (red), labelled;
+  - every line of the ITF singles court model (yellow), reprojected into the
+    image through the inverse of the pixel -> metre homography.
+
+If the yellow lines sit on the painted white lines -- including the centre
+service line and the net line, which are not used to fit the homography --
+the keypoints and the homography are correct. The mean / max reprojection
+error of the keypoints is printed and written on the image.
+
+Usage (from project root, after court_tracking.py has written the CSV):
+    python utils/court_overlay.py --video data/Input_video2.mp4
+    python utils/court_overlay.py --video data/input4.mp4 --frame 100
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.court_converter import CourtConverter
+from utils.court_geometry import _REAL_WORLD, CL_X, NET, SVC_B, SVC_T, L_m, W_m
+
+# Court model segments in metres (TL origin), drawn through the homography.
+_MODEL_LINES = [
+    ((0.0, 0.0), (W_m, 0.0)),        # far baseline
+    ((0.0, L_m), (W_m, L_m)),        # near baseline
+    ((0.0, 0.0), (0.0, L_m)),        # left sideline
+    ((W_m, 0.0), (W_m, L_m)),        # right sideline
+    ((0.0, SVC_T), (W_m, SVC_T)),    # far service line
+    ((0.0, SVC_B), (W_m, SVC_B)),    # near service line
+    ((CL_X, SVC_T), (CL_X, SVC_B)),  # centre service line
+    ((0.0, NET), (W_m, NET)),        # net (ground line under the net)
+]
+
+_LINE_COLOR = (0, 230, 255)    # yellow (BGR)
+_POINT_COLOR = (0, 0, 255)     # red
+
+
+def _to_px(H_inv, pts_m):
+    """Project (N, 2) court-metre points into the image."""
+    pts = np.asarray(pts_m, dtype=np.float64).reshape(-1, 1, 2)
+    return cv2.perspectiveTransform(pts, H_inv).reshape(-1, 2)
+
+
+def _detected_keypoints(court_csv):
+    import csv
+    with open(court_csv, newline="") as f:
+        return {r["label"].strip(): (float(r["x"]), float(r["y"]))
+                for r in csv.DictReader(f)}
+
+
+def draw_court_overlay(frame, court_csv):
+    """Return (annotated frame, per-label reprojection errors in px)."""
+    H_inv = np.linalg.inv(CourtConverter(court_csv)._H)
+    detected = _detected_keypoints(court_csv)
+    out = frame.copy()
+    scale = max(1.0, out.shape[1] / 1280)          # keep strokes visible on 4K
+    thick = int(round(2 * scale))
+
+    for a, b in _MODEL_LINES:
+        p, q = _to_px(H_inv, [a, b])
+        cv2.line(out, tuple(np.round(p).astype(int)), tuple(np.round(q).astype(int)),
+                 _LINE_COLOR, thick, cv2.LINE_AA)
+
+    errors = {}
+    for label, (x, y) in detected.items():
+        if label in _REAL_WORLD:
+            rx, ry = _to_px(H_inv, [_REAL_WORLD[label]])[0]
+            errors[label] = float(np.hypot(rx - x, ry - y))
+        c = (int(round(x)), int(round(y)))
+        cv2.circle(out, c, int(8 * scale), _POINT_COLOR, -1, cv2.LINE_AA)
+        cv2.circle(out, c, int(8 * scale), (255, 255, 255), thick, cv2.LINE_AA)
+        off = (-int(60 * scale), -int(14 * scale)) if x < out.shape[1] / 2 else (int(14 * scale), -int(14 * scale))
+        org = (c[0] + off[0], c[1] + off[1])
+        cv2.putText(out, label, org, cv2.FONT_HERSHEY_DUPLEX, 0.8 * scale, (0, 0, 0), thick + 3, cv2.LINE_AA)
+        cv2.putText(out, label, org, cv2.FONT_HERSHEY_DUPLEX, 0.8 * scale, (255, 255, 255), thick, cv2.LINE_AA)
+
+    if errors:
+        vals = list(errors.values())
+        text = (f"red = detected keypoints, yellow = court model via homography | "
+                f"reprojection error: mean {np.mean(vals):.1f}px, max {np.max(vals):.1f}px")
+        org = (int(12 * scale), out.shape[0] - int(14 * scale))
+        cv2.putText(out, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.6 * scale, (0, 0, 0), thick + 3, cv2.LINE_AA)
+        cv2.putText(out, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.6 * scale, (255, 255, 255), thick, cv2.LINE_AA)
+    return out, errors
+
+
+def save_court_overlay(video_path, court_csv, out_path, frame_idx=0):
+    """Draw the overlay on frame `frame_idx` of the video, save it, report errors."""
+    cap = cv2.VideoCapture(video_path)
+    try:
+        if frame_idx:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok:
+        raise RuntimeError(f"Cannot read frame {frame_idx} of {video_path}")
+
+    image, errors = draw_court_overlay(frame, court_csv)
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    cv2.imwrite(out_path, image)
+    if errors:
+        worst = max(errors, key=errors.get)
+        print(f"Court overlay saved to '{out_path}' (keypoint reprojection error: "
+              f"mean {np.mean(list(errors.values())):.1f}px, "
+              f"max {errors[worst]:.1f}px at {worst}).")
+    else:
+        print(f"Court overlay saved to '{out_path}'.")
+    return errors
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Draw detected court keypoints and the reprojected court model "
+                    "on a video frame, to check the keypoints and the homography.")
+    parser.add_argument("--video", default="data/Input_video2.mp4")
+    parser.add_argument("--court", default=None,
+                        help="court CSV (default: outputs/court_coordinates/<video name>_court.csv)")
+    parser.add_argument("--frame", type=int, default=0, help="frame to draw on (default 0)")
+    parser.add_argument("--output", default=None,
+                        help="image path (default: next to the court CSV, <video name>_court.png)")
+    args = parser.parse_args()
+
+    stem = os.path.splitext(os.path.basename(args.video))[0]
+    court = args.court or os.path.join("outputs", "court_coordinates", f"{stem}_court.csv")
+    if not os.path.exists(court):
+        raise SystemExit(f"Court CSV not found: {court}\n"
+                         f"Run: python tracking/court_tracking.py --video {args.video} --no-display")
+    out = args.output or os.path.splitext(court)[0] + ".png"
+    save_court_overlay(args.video, court, out, args.frame)
+
+
+if __name__ == "__main__":
+    main()

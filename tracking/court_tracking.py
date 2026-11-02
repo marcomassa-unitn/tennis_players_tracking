@@ -9,6 +9,7 @@ import numpy as np
 
 # Make the project root importable when this file is run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.court_overlay import draw_court_overlay
 from utils.video import safe_fps
 
 # ── White HSV bounds ──────────────────────────────────────────────────────────
@@ -321,10 +322,12 @@ class CourtTracker:
     clustering + ITF-proportion filtering."""
 
     def __init__(self, video_path, no_display=False, roi_top=0.15,
-                 far_line="baseline", output_dir="outputs"):
+                 far_line="baseline", output_dir="outputs",
+                 roi_bottom=ROI_BOTTOM_FRACTION):
         self.video_path = video_path
         self.no_display = no_display
         self.roi_top = roi_top
+        self.roi_bottom = roi_bottom
         self.far_line = far_line
         self.output_dir = output_dir
 
@@ -356,7 +359,7 @@ class CourtTracker:
 
             # 2. Apply ROI
             roi_top    = int(h * self.roi_top)
-            roi_bottom = int(h * ROI_BOTTOM_FRACTION)
+            roi_bottom = int(h * self.roi_bottom)
             roi_left   = int(w * ROI_LEFT_FRACTION)
             roi_right  = int(w * ROI_RIGHT_FRACTION)
             mask[:roi_top,    :] = 0
@@ -478,6 +481,14 @@ class CourtTracker:
                     writer.writerow([label, pt[0], pt[1]])
             print(f"Saved all corners to '{csv_path}'.")
 
+            # 8b. Overlay image to check the keypoints and the homography by eye.
+            overlay_path = os.path.splitext(csv_path)[0] + ".png"
+            overlay, errors = draw_court_overlay(frame, csv_path)
+            cv2.imwrite(overlay_path, overlay)
+            print(f"Saved court overlay to '{overlay_path}' (keypoint reprojection "
+                  f"error: mean {np.mean(list(errors.values())):.1f}px, "
+                  f"max {max(errors.values()):.1f}px).")
+
             # 9. Play back: dots in red, the 4 corners ringed magenta
             if self.no_display:
                 return keypoints
@@ -548,6 +559,11 @@ if __name__ == "__main__":
                         help="top ROI cut as fraction of frame height; raise it "
                              "when white banner/fence lines above the court get "
                              "mistaken for the far baseline (default: 0.15)")
+    parser.add_argument("--roi-bottom", type=float, default=ROI_BOTTOM_FRACTION,
+                        dest="roi_bottom",
+                        help="bottom ROI cut as fraction of frame height; lower it "
+                             "when white writing painted below the near baseline "
+                             "gets mistaken for it (default: %(default)s)")
     parser.add_argument("--far-line", choices=["baseline", "service"],
                         default="baseline", dest="far_line",
                         help="which court line the TOPMOST detected corner row "
@@ -565,6 +581,7 @@ if __name__ == "__main__":
         video_path=args.video,
         no_display=args.no_display,
         roi_top=args.roi_top,
+        roi_bottom=args.roi_bottom,
         far_line=args.far_line,
         output_dir=args.output_dir,
     ).run()

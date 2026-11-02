@@ -180,6 +180,10 @@ python tracking/court_tracking.py  --video data/Input_video2.mp4 --no-display
 python tracking/player_tracking.py --video data/Input_video2.mp4 --no-display
 python tracking/ball_tracking.py   --video data/Input_video2.mp4 --no-display --no-video
 
+# Check the court keypoints: draws them and the reprojected court model on a frame
+# (court_tracking.py also saves this image next to the court CSV)
+python utils/court_overlay.py --video data/Input_video2.mp4
+
 # 2. Analysis
 python analysis/player_analysis.py --video data/Input_video2.mp4 [--no-animation]
 python analysis/shot_analysis.py   --video data/Input_video2.mp4 --p1-hand right --p2-hand right
@@ -202,6 +206,7 @@ Useful `pipeline.py` flags:
 - `--display` shows the OpenCV windows.
 - `--skip-court`, `--skip-tracking`, … reuse CSVs that are already on disk.
 - `--flow-frames N` caps the dense optical flow at N frames.
+- `--roi-top` / `--roi-bottom` crop banners or court-side writing that get mistaken for court lines.
 - `--gt-csv` / `--court-gt-csv` enable the evaluation stage.
 
 Every script supports `--help`.

@@ -122,6 +122,7 @@ def step_court(p, args, produced):
         video_path=p["video"],
         no_display=True,
         roi_top=args.roi_top,
+        roi_bottom=args.roi_bottom,
         far_line=args.far_line,
         output_dir=p["output"],
     ).run()
@@ -358,6 +359,8 @@ def build_parser():
     # Court tuning (forwarded to CourtTracker).
     parser.add_argument("--roi-top", type=float, default=0.15, dest="roi_top",
                         help="top ROI fraction for court detection")
+    parser.add_argument("--roi-bottom", type=float, default=0.95, dest="roi_bottom",
+                        help="bottom ROI fraction for court detection")
     parser.add_argument("--far-line", choices=["baseline", "service"],
                         default="baseline", dest="far_line",
                         help="far court line used for keypoints")
