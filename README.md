@@ -29,9 +29,13 @@ the one exception: it is small and fast, so it uses a YOLOv8 detector.
 - **One homography, metric everything.** A single RANSAC homography maps pixels
   to court metres, so positions, distances, speeds (km/h) and zone occupancy are
   all physical quantities.
-- **Two-player tracking with stable identities.** A running-average background
-  model plus connected components, with minimum-cost association so the players
-  keep their IDs through net crossings.
+- **Two-player tracking that does not depend on how the clip starts.** The
+  background is the median of frames spread over the whole clip, so a player
+  standing still to serve is still detected, and fade-ins from black do not
+  matter. Identities come from the court half (through the homography), so a
+  player who is lost comes back as soon as they are visible again. Camera
+  shake, cast shadows and on-screen TV graphics are filtered out. Both players
+  are found on 95–100 % of the frames of all five test clips.
 - **Perspective-invariant shot classification.** Shot types are read from
   scale-free trajectory-shape features, so near-side and far-side shots need no
   separate calibration. It labels all 23 shots of a hand-labelled rally
@@ -53,10 +57,10 @@ the pipeline produces:
 | Stage | Result |
 |---|---|
 | Court | 98 % of the court model on detected line pixels; fitted lines within ≈1 px of the painted ones |
-| Players | both players tracked over the whole clip, identities kept through net crossings |
-| Movement | near player 81.7 m covered (mean 9.2 km/h, p95 24.7 km/h); far player 97.7 m (mean 11.1 km/h, p95 29.6 km/h) |
+| Players | both players detected on 100 % of the frames, identities fixed by court half |
+| Movement | near player 96.0 m covered (mean 10.7 km/h, p95 29.6 km/h); far player 105.3 m (mean 11.9 km/h, p95 27.4 km/h) |
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
-| Shot mix | 17 flat, 5 slice, 2 dropshot, 1 lob; 18 backhands, 6 forehands |
+| Shot mix | 17 flat, 5 slice, 2 dropshot, 1 lob; 17 backhands, 6 forehands, 2 on the body axis (the serve included) |
 | Shot type | **23/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
 | Self-tests | synthetic stroke test 4/4, synthetic serve/smash test 4/4 with zero false positives |
 
@@ -82,6 +86,7 @@ flowchart LR
     V --> P[Player tracking<br/><sub>background subtraction</sub>]
     V --> B[Ball tracking<br/><sub>YOLOv8</sub>]
     C --> H((Homography<br/>px → m))
+    H --> P
     H --> PA[Player analysis<br/><sub>distance, speed, zones, heatmaps</sub>]
     P --> PA
     P --> M[Motion estimation<br/><sub>optical flow, block matching</sub>]
@@ -106,10 +111,17 @@ flowchart LR
    model well enough. An overlay image is saved next to the CSV to check the
    result.
 2. **Player tracking** ([`tracking/player_tracking.py`](tracking/player_tracking.py)).
-   A running-average background model (`cv2.accumulateWeighted`) is thresholded
-   and cleaned with morphology, then split into connected components. Players
-   are associated frame to frame by a 2×2 minimum-cost assignment with a
-   maximum-displacement gate, so identities survive the players crossing paths.
+   The background is the per-pixel median of about 40 frames spread over the
+   whole clip, leaving out black or fade-in frames. Each frame is gain-matched to
+   it and compared with the background's local min/max over a few pixels, so the
+   slight shake of broadcast cameras does not light up the court lines. Cast
+   shadows are removed, and so are on-screen graphics, which stay pixel-identical
+   from frame to frame. Fragments of the same person are merged, and blobs are
+   kept only if their feet stand in the walkable area of the court. P1 is the
+   player in the near half, P2 the one in the far half. A player seen recently
+   is followed by proximity; otherwise the largest plausible blob in that half
+   is taken. Gaps up to 0.5 s are interpolated and flagged in an `interpolated`
+   column.
 3. **Player analysis** ([`analysis/player_analysis.py`](analysis/player_analysis.py)).
    The feet point of each box is projected to metres. From it the stage computes
    distance covered, mean, median, p95 and max speed (with a physiological 45 km/h
@@ -255,8 +267,11 @@ ruff check .    # lint
 ## Limitations
 
 - **Static camera assumed.** Replays and camera cuts must be trimmed beforehand.
-- **Identity by proximity only.** The tracker has no appearance model, so long
-  occlusions can still swap IDs. The evaluation measures this as ID switches.
+- **Players stay in their half.** Identities come from the court half, which
+  holds in singles play; a player crossing the net (rare) would swap IDs.
+- **Distances include detection jitter.** They are summed frame by frame from
+  the feet point, so the few centimetres of frame-to-frame jitter (more at the
+  far end, where one pixel spans more court) inflate them.
 - **Ball speeds are approximate.** The homography models the ground plane, while
   the ball is airborne at contact. The metre-based shot thresholds may need
   retuning for a different camera; the scale-free ones do not.

@@ -130,12 +130,17 @@ def _nearest_box(boxes, frame, pid, radius=3):
     return None
 
 
-def _ball_near_player(ball_xy, box, expand_w=0.9, expand_h=0.55):
-    """True if the ball is inside the player's expanded box."""
+def _ball_near_player(ball_xy, box, reach_x=0.8, reach_y=0.7):
+    """True if the ball is within racket reach of the player's box.
+
+    The reach is a multiple of the box HEIGHT (arm + racket is about 0.8 x a
+    person's height): the box width changes a lot with the pose, the height
+    much less.
+    """
     x, y, w, h = box
     bx, by = ball_xy
-    return (x - expand_w * w <= bx <= x + w + expand_w * w
-            and y - expand_h * h <= by <= y + h + expand_h * h)
+    return (x - reach_x * h <= bx <= x + w + reach_x * h
+            and y - reach_y * h <= by <= y + h + reach_y * h)
 
 
 def _gradient_runs(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
@@ -296,17 +301,19 @@ def detect_hits(track: pd.DataFrame, boxes: dict, fps: float,
 # ── forehand / backhand classification ─────────────────────────────────────────
 
 def classify_stroke(ball_cx, player_box, player_side, hand,
-                    deadband_frac=0.12):
+                    deadband_frac=0.10):
     """
     "forehand" / "backhand" / "unknown" (ball on the body axis).
 
     player_side : "near" | "far" relative to the camera.
     hand        : "right" | "left".
+    The body-axis dead band is a fraction of the box height, which depends on
+    the pose much less than the width does.
     """
     x, y, w, h = player_box
     player_cx = x + w / 2.0
     db = ball_cx - player_cx
-    if abs(db) < deadband_frac * w:
+    if abs(db) < deadband_frac * h:
         return "unknown"
     # dominant hand points image-right iff (near and right) or (far and left)
     dominant_is_image_right = (player_side == "near") == (hand == "right")

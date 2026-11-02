@@ -137,9 +137,16 @@ def step_tracking(p, args, produced):
               "Downstream steps that need it may fail.")
         return
 
+    # Identities come from the court half, so the tracker needs the court.
+    if not os.path.exists(p["court_csv"]):
+        print(f"Skipped: court CSV not found ({p['court_csv']}); "
+              "player tracking needs the court keypoints.")
+        return
+
     from tracking.player_tracking import PlayerTracker
     _ensure_parent(p["players_csv"])
-    PlayerTracker(p["video"], p["players_csv"], display=not args.no_display).run()
+    PlayerTracker(p["video"], p["players_csv"], p["court_csv"],
+                  display=not args.no_display).run()
     print(f"Player tracks -> {p['players_csv']}")
     produced["players_csv"] = p["players_csv"]
 

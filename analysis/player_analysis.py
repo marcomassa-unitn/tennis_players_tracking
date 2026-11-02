@@ -40,7 +40,16 @@ from utils.court_converter import CourtConverter
 # ── ITF singles court dimensions ───────────────────────────────────────────────
 # Shared via utils/court_geometry; imported (not redefined) so live_view.py can
 # read them as player_analysis.<name> module attributes.
-from utils.court_geometry import CL_X, NET, SVC_B, SVC_T, L_m, W_m
+from utils.court_geometry import (
+    CL_X,
+    NET,
+    RUNOFF_BEHIND,
+    RUNOFF_SIDE,
+    SVC_B,
+    SVC_T,
+    L_m,
+    W_m,
+)
 
 # Player colour convention, kept identical across every figure so colour -> player
 # is unambiguous: P1 = warm (red), P2 = cool (blue). Paired with the heatmap
@@ -79,9 +88,9 @@ _HEAT_LEGEND = {1: "#ff5a1f",     2: "#19c3ff"}
 # ── court zones ────────────────────────────────────────────────────────────────
 # Analysis covers the whole walkable area, not just the playing rectangle.
 # _BEHIND = run-off behind each baseline (m), _SIDE = lateral run-off beyond each
-# sideline (m; ITF recommends ~3.66 m).
-_BEHIND = 6.5
-_SIDE   = 3.7
+# sideline (m), shared with the player tracker through utils/court_geometry.
+_BEHIND = RUNOFF_BEHIND
+_SIDE   = RUNOFF_SIDE
 _ZONE_BANDS = [
     ("FB-out", "Behind baseline (far)",    -_BEHIND, 0.0),
     ("FB",     "Backcourt (far)",           0.0,     SVC_T),

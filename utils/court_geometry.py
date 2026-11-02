@@ -21,6 +21,11 @@ NET = L_m / 2.0           # 11.8872 m net
 CL_X = W_m / 2.0          # 4.1148 m  center service line
 ALLEY = 4.5 * _FT         # 1.3716 m  doubles alley (outside each singles sideline)
 
+# Walkable area around the singles court (typical tournament run-offs): players
+# can be anywhere in [-RUNOFF_SIDE, W_m + RUNOFF_SIDE] x [-RUNOFF_BEHIND, L_m + RUNOFF_BEHIND].
+RUNOFF_BEHIND = 6.5      # m behind each baseline
+RUNOFF_SIDE = 3.7        # m beyond each singles sideline (ITF recommends ~3.66 m)
+
 # Labelled-corner positions in meters, TL origin (baseline + service-box corners).
 _REAL_WORLD = {
     "TL":  (0.0,  0.0),
