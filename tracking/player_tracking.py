@@ -127,7 +127,14 @@ class PlayerTracker:
         self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if self.total_frames <= 0:
+            # Some containers do not store the frame count: count by decoding.
+            while cap.grab():
+                self.total_frames += 1
+            self.total_frames = max(self.total_frames, 0)
         cap.release()
+        if self.total_frames == 0:
+            raise RuntimeError(f"No frames could be read from {video_path}")
 
         self.scale = min(1.0, PROC_HEIGHT / self.H)      # full -> processing
         self.proc_size = (int(round(self.W * self.scale)), int(round(self.H * self.scale)))
