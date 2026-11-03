@@ -70,7 +70,7 @@ the pipeline produces:
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
 | Shot mix | 17 flat, 5 slice, 2 dropshot, 1 lob; 17 backhands, 6 forehands, 2 on the body axis (the serve included) |
 | Shot type | **23/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
-| Self-tests | synthetic stroke test 4/4, synthetic serve/smash test 4/4 with zero false positives |
+| Self-tests | synthetic stroke test 4/4, synthetic serve/smash test 5/5 with zero false positives |
 
 ¹ The shot-type thresholds were tuned on this same rally, so 23/23 shows the
 rules fit the labelled data. It is not an accuracy figure on unseen footage.
@@ -176,8 +176,14 @@ flowchart LR
    kept only when the ball is near a player. That rejects bounces. The stroke
    (forehand/backhand) comes from the ball's side relative to the body axis,
    taking handedness and court side into account. The shot type comes from
-   perspective-invariant features of the outgoing trajectory. Serve and smash go
-   in a separate, conservative overhead column.
+   perspective-invariant features of the outgoing trajectory. Serves are found
+   from the server's motion rather than from the ball: a player standing at their
+   own baseline, after a quiet spell with no opponent shot, whose box (in metres
+   at the feet) stays raised by the toss and racket and then peaks at contact.
+   The last peak is taken as the contact, so neither the toss release nor a gap
+   in the ball track is mistaken for it. Smashes are read from the ball (an
+   above-head contact on a descending ball, driven down). Both go in a separate,
+   conservative overhead column.
 7. **Evaluation** ([`evaluation/`](evaluation)). A small OpenCV tool annotates
    ground-truth boxes and court keypoints. The evaluator reports mean and median
    IoU, precision and recall at IoU 0.5, centre error (px), feet error (m), ID
@@ -327,6 +333,13 @@ ruff check .    # lint
   retuning for a different camera; the scale-free ones do not.
 - **Thresholds are tuned on one camera setup.** The shot-type defaults were fit
   on the demo rally.
+- **Serves need the server in view.** A serve hit during a fade-in, or before
+  the server's box is tracked, is not detected. The smash rule is only covered
+  by the synthetic test, since none of the clips contains a smash.
+- **Shot types ignore the bounce.** Lob, slice and dropshot are told apart from
+  the shape of the outgoing trajectory in the image, not from where and when the
+  ball lands. On clips other than the demo rally they are not checked against
+  labels.
 
 ## Report and presentation
 

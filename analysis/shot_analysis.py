@@ -492,42 +492,27 @@ def classify_shot_type(feats: dict, side: str, params: dict = None) -> str:
     return "flat" if peak_m >= p["far_peak_m"] else "slice"
 
 
-# ── overhead (serve / smash) detection ──────────────────────────────────────────
+# ── overhead (smash) detection ─────────────────────────────────────────────────
 #
-# ADDITIVE to shot_type: serve/smash live in a separate `overhead` column and
-# never overwrite it. Deliberately CONSERVATIVE — zero false positives on
-# groundstrokes/lobs is the priority, so anything uncertain returns "".
+# ADDITIVE to shot_type: the `overhead` column holds "serve" (found from the
+# server's motion, see detect_serves) or "smash" (from the ball, here), and never
+# overwrites shot_type. Deliberately CONSERVATIVE: zero false positives on
+# groundstrokes and lobs is the priority, so anything uncertain returns "".
 #
 # Geometry (image y grows DOWN; meters via the ground homography):
 #   * overhead gate: ball clearly ABOVE the head (ball_cy < box_top - margin*h)
 #     and roughly over the body. Rare for groundstrokes (ball ~ waist, off to the
 #     side), which is what protects the existing shot types.
-#   * SERVE: first shot; server stationary behind his own baseline; ball tossed
-#     up locally (slow, near-side incoming).
-#   * SMASH: off an opponent ball that arrives fast from across the net, then
-#     DRIVEN downward (vs a lob, which arcs up).
+#   * SMASH: off an opponent ball that arrives DESCENDING, then DRIVEN downward
+#     with a low apex (vs a lob, which arcs up).
 
 OVERHEAD_PARAMS = {
     # Common overhead gate
     "above_head_frac": 0.25,   # ball must be above box_top by this fraction of box h
     "x_align_frac": 0.60,      # |ball_cx - player_cx| must be below this fraction of box w
-    # Serve gate
-    "stationary_mps": 1.0,     # server feet speed (m/s) must be below this (~standing)
-    "behind_baseline_m": 1.5,  # server feet within this many m BEHIND his own baseline
-    "serve_toss_vy_px": 2.0,         # incoming ("toss") must be RISING or near apex: median
-                                     # per-step dcy (px/frame) must be <= this (image y grows
-                                     # down, so rising = negative). Replaces the m/s "slow toss"
-                                     # test, unreliable because the ground homography distorts
-                                     # the airborne toss near the baseline.
-    "smash_incoming_down_px": 5.0,   # incoming ball must be DESCENDING for a smash: median
-                                     # per-step dcy (px/frame) must be >= this (positive = down).
-    "serve_toss_local_m": 6.0,       # pre-contact ball must be on the server's OWN side of the
-                                     # net, within this margin past the net line (a toss stays on
-                                     # the server's half; a returned/across-net ball does not).
-                                     # NB the ground homography distorts the airborne toss, so this
-                                     # is a generous same-half check, not a tight distance.
     # Smash gate
-    "smash_incoming_fast_mps": 9.0,  # incoming ball speed (m/s) must be at/above this
+    "smash_incoming_down_px": 5.0,   # incoming ball must be DESCENDING: median per-step
+                                     # dcy (px/frame) at/above this (image y grows down)
     "smash_down_rise": 0.5,    # outgoing must descend: mean initial vertical step (px/frame) >= this
                                # (image y grows down, so a positive `rise` means the ball goes DOWN)
     "smash_min_apex": 6.0,     # outgoing apex (px the ball rises above contact) must be SMALL
@@ -544,32 +529,6 @@ def _box_feet(box):
     """Feet (mid-bottom) pixel point of a player box (x, y, w, h)."""
     x, y, w, h = box
     return (_box_cx(box), y + h)
-
-
-def _player_speed_mps(boxes, conv, f, pid, fps, dt=3):
-    """
-    Player feet speed (m/s) around frame ``f``.
-
-    Feet at f-dt and f+dt (via _nearest_box), projected to meters; distance /
-    elapsed time. None if a box is missing or a projection is non-finite.
-    """
-    b0 = _nearest_box(boxes, f - dt, pid)
-    b1 = _nearest_box(boxes, f + dt, pid)
-    if b0 is None or b1 is None:
-        return None
-    try:
-        x0, y0 = conv.to_meters(*_box_feet(b0))
-        x1, y1 = conv.to_meters(*_box_feet(b1))
-    except Exception:
-        return None
-    if not (np.isfinite(x0) and np.isfinite(y0)
-            and np.isfinite(x1) and np.isfinite(y1)):
-        return None
-    dist = float(np.hypot(x1 - x0, y1 - y0))
-    elapsed = (2 * dt) / float(fps)
-    if elapsed <= 0:
-        return None
-    return dist / elapsed
 
 
 def _incoming_ball_features(track, conv, i, fps, win=10):
@@ -612,80 +571,34 @@ def _incoming_ball_features(track, conv, i, fps, win=10):
     return out
 
 
-def classify_overhead(box, ball_cx, ball_cy, player_x_m, player_y_m, side,
-                      stroke, in_feats, out_feats, player_speed,
-                      is_first_shot, params=None):
+def classify_overhead(box, ball_cx, ball_cy, in_feats, out_feats, params=None):
     """
-    "serve" | "smash" | "" (none). CONSERVATIVE: returns "" the moment any
-    required signal is missing or out of range; serve and smash are exclusive.
+    "smash" | "" (none). CONSERVATIVE: returns "" the moment any required signal
+    is missing or out of range. Serves are found separately (detect_serves).
 
     box                : player bbox (x, y, w, h) px at contact.
     ball_cx, ball_cy   : ball px at contact (image y grows downward).
-    player_x_m,_y_m    : player feet court position (meters).
-    side               : "near" | "far".
-    stroke             : corroborates a serve, not required.
     in_feats           : from _incoming_ball_features.
     out_feats          : from _shot_type_features (outgoing shape).
-    player_speed       : feet speed (m/s) from _player_speed_mps, or None.
-    is_first_shot      : True iff the first detected shot of the clip.
     """
     p = params or OVERHEAD_PARAMS
-    if box is None:
+    if box is None or np.isnan(ball_cx) or np.isnan(ball_cy):
         return ""
     x, y, w, h = box
     if w <= 0 or h <= 0:
         return ""
-    player_cx = x + w / 2.0
-    box_top = y
 
     # ── Overhead gate: ball clearly above head AND x-aligned over the body ──
-    # (y grows down, so "above" = smaller y than box_top).
-    if not (ball_cy < box_top - p["above_head_frac"] * h):
+    # (y grows down, so "above" = smaller y than the box top).
+    if not (ball_cy < y - p["above_head_frac"] * h):
         return ""
-    if not (abs(ball_cx - player_cx) < p["x_align_frac"] * w):
+    if not (abs(ball_cx - (x + w / 2.0)) < p["x_align_frac"] * w):
         return ""
 
-    in_y = in_feats.get("in_y_m") if in_feats else None
-
-    # ── SERVE: first shot, stationary, behind own baseline, local toss ──
-    if is_first_shot:
-        # behind own baseline: near baseline y_m = L_m, far baseline y_m = 0
-        if side == "near":
-            behind = player_y_m >= L_m - p["behind_baseline_m"]
-        else:
-            behind = player_y_m <= 0.0 + p["behind_baseline_m"]
-        stationary = (player_speed is not None
-                      and player_speed < p["stationary_mps"])
-        # toss RISES (or near apex) pre-contact and originates on the server's OWN
-        # half (a smash's ball descends from across the net). Direction beats an
-        # m/s "slow" test: the homography inflates the airborne toss near the baseline.
-        in_vy = in_feats.get("in_vy_px") if in_feats else None
-        tossing = (in_vy is not None and not np.isnan(in_vy)
-                   and in_vy <= p["serve_toss_vy_px"])
-        if in_y is not None and not np.isnan(in_y):
-            if side == "near":   # near half: y_m > NET
-                local = in_y > NET - p["serve_toss_local_m"]
-            else:                # far half: y_m < NET
-                local = in_y < NET + p["serve_toss_local_m"]
-        else:
-            local = False
-        if behind and stationary and tossing and local:
-            return "serve"
-
-    # ── SMASH: opponent ball arrives fast, driven DOWNWARD on the way out ──
-    # (Excludes the serve setup: not first shot and/or not behind own baseline.)
-    behind_own = False
-    if side == "near":
-        behind_own = player_y_m >= L_m - p["behind_baseline_m"]
-    else:
-        behind_own = player_y_m <= 0.0 + p["behind_baseline_m"]
-    if is_first_shot and behind_own:
-        return ""   # serve setup, not a smash
-
+    # ── SMASH: the ball arrives descending and is driven DOWNWARD on the way out ──
     rise = out_feats.get("rise") if out_feats else None     # +ve = ball goes DOWN
     apex = out_feats.get("apex") if out_feats else None      # px the ball rose above contact
     in_vy = in_feats.get("in_vy_px") if in_feats else None
-    # smash ball arrives DESCENDING (in_vy_px > 0); a serve toss rises.
     descending_in = (in_vy is not None and not np.isnan(in_vy)
                      and in_vy >= p["smash_incoming_down_px"])
     downward = (rise is not None and not np.isnan(rise)
@@ -694,8 +607,112 @@ def classify_overhead(box, ball_cx, ball_cy, player_x_m, player_y_m, side,
                 and apex <= p["smash_min_apex"])
     if descending_in and downward and low_apex:
         return "smash"
-
     return ""
+
+
+# ── serve detection from the server's motion ───────────────────────────────────
+#
+# The ball alone is not enough to find a serve: the toss release looks like a
+# contact (the ball reverses near the player), the contact frame is often
+# missed, and the far player's toss is usually not detected at all. The server's
+# motion is a clearer signature: standing near their own baseline at the start
+# of a point, they raise arm and racket above the head (the box grows taller)
+# and bring them down after the contact. The contact is the last height peak of
+# that raised phase.
+
+SERVE_PARAMS = {
+    "raised_min": 1.15,      # box height / player's median height: raised phase
+    "raised_peak": 1.20,     # the phase must reach at least this...
+    "min_raised_s": 0.2,     # ...and last at least this long
+    "max_dip_s": 0.2,        # shorter dips inside the phase are bridged (racket drop)
+    "peak_tol": 0.03,        # contact = last local max within this fraction of the max
+    "near_baseline_m": 2.0,  # feet at most this far inside their own baseline
+    "max_move_m": 1.5,       # feet displacement during the phase (server stands)
+    "quiet_s": 2.5,          # no opponent shot in this time before the phase
+    "next_shot_s": 1.0,      # the same player striking again this soon: not a serve
+}
+
+
+def _metric_heights(boxes, conv, pid):
+    """Box height of player `pid` in metres-equivalent (px / local px-per-metre).
+
+    Dividing by the image scale at the feet removes perspective, so heights at
+    the near and far baselines are comparable. Returns (frames, heights, feet_m).
+    """
+    frames = sorted(f for f in boxes if pid in boxes[f])
+    if not frames:
+        return np.array([], int), np.array([]), np.empty((0, 2))
+    b = np.array([boxes[f][pid] for f in frames], float)        # x, y, w, h
+    feet_px = np.c_[b[:, 0] + b[:, 2] / 2, b[:, 1] + b[:, 3]]
+    feet_m = conv.to_meters_batch(feet_px)
+    m_to_px = np.linalg.inv(conv._H)
+    left = cv2.perspectiveTransform((feet_m - [0.5, 0]).reshape(-1, 1, 2), m_to_px)[:, 0]
+    right = cv2.perspectiveTransform((feet_m + [0.5, 0]).reshape(-1, 1, 2), m_to_px)[:, 0]
+    ppm = np.hypot(*(right - left).T)
+    return np.array(frames), b[:, 3] / np.maximum(ppm, 1e-6), feet_m
+
+
+def detect_serves(boxes, conv, fps, hits, params=None):
+    """Serves as [(contact_frame, pid, phase_start_frame), ...].
+
+    `hits` (from detect_hits) is used to check that a serve starts a point (no
+    opponent shot just before) and is answered by the opponent.
+    """
+    p = params or SERVE_PARAMS
+    min_len = max(2, int(round(p["min_raised_s"] * fps)))
+    max_dip = max(1, int(round(p["max_dip_s"] * fps)))
+    serves = []
+    for pid in (1, 2):
+        frames, hm, feet_m = _metric_heights(boxes, conv, pid)
+        if len(frames) < min_len:
+            continue
+        rel = hm / np.nanmedian(hm)
+        raised = rel >= p["raised_min"]
+        # Raised phases: runs of raised frames, bridging dips up to max_dip frames.
+        phases, start, last = [], None, None
+        for k, (f, up) in enumerate(zip(frames, raised)):
+            if not up:
+                continue
+            if start is not None and f - frames[last] <= max_dip + 1:
+                last = k
+                continue
+            if start is not None:
+                phases.append((start, last))
+            start = last = k
+        if start is not None:
+            phases.append((start, last))
+
+        for a, b in phases:
+            if frames[b] - frames[a] + 1 < min_len or rel[a:b + 1].max() < p["raised_peak"]:
+                continue
+            seg = rel[a:b + 1]
+            top = seg.max() * (1 - p["peak_tol"])
+            peaks = [k for k in range(len(seg))
+                     if seg[k] >= top
+                     and (k == 0 or seg[k] >= seg[k - 1])
+                     and (k == len(seg) - 1 or seg[k] >= seg[k + 1])]
+            contact_k = a + peaks[-1]
+            contact, phase_start = int(frames[contact_k]), int(frames[a])
+
+            # Near their own baseline (or behind it) and standing.
+            y = feet_m[a, 1]
+            near_own_baseline = (y >= L_m - p["near_baseline_m"] if y > NET
+                                 else y <= p["near_baseline_m"])
+            settle = max(a, contact_k - min_len)                # before the jump into the court
+            moved = float(np.hypot(*(feet_m[settle] - feet_m[a])))
+            if not near_own_baseline or not np.isfinite(moved) or moved > p["max_move_m"]:
+                continue
+            # Start of a point: no opponent shot just before the phase...
+            quiet_from = phase_start - p["quiet_s"] * fps
+            if any(h_pid != pid and quiet_from <= h_f <= phase_start for h_f, h_pid, _ in hits):
+                continue
+            # ...and the next shot after the contact is the opponent's (the return).
+            later = [(h_f, h_pid) for h_f, h_pid, _ in hits
+                     if contact + 0.3 * fps < h_f <= contact + p["next_shot_s"] * fps]
+            if later and min(later)[1] == pid:
+                continue
+            serves.append((contact, pid, phase_start))
+    return sorted(serves)
 
 
 def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
@@ -718,30 +735,48 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                        vy_min=vy_min, acc_thr=acc_thr, win=win,
                        reversal_look=reversal_look,
                        reversal_vy_frac=reversal_vy_frac)
-    first_frame = hits[0][0] if hits else None
+
+    # Serves come from the server's motion (detect_serves). The server's own
+    # "shots" during the toss are the toss release, not contacts: replace them
+    # with the serve contact.
+    serves = detect_serves(boxes, conv, fps, hits)
+    serve_frames = {c for c, _, _ in serves}
+    for contact, pid, phase_start in serves:
+        lo, hi = phase_start - 0.5 * fps, contact + 0.3 * fps
+        hits = [h for h in hits if not (h[1] == pid and lo <= h[0] <= hi)]
+        hits.append((contact, pid, 0.0))
+    hits.sort()
+
     n_dropped = 0
     rows = []
     for f, pid, _strength in hits:
         box = _nearest_box(boxes, f, pid)
         if box is None:
             continue
+        is_serve = f in serve_frames
         # ±2-frame median ball position (denoise)
         sel = track.loc[max(track.index.min(), f - 2): f + 2]
         # An all-NaN window (ball never seen here) would give nanmedian = NaN and
-        # poison classify_stroke / to_meters; skip and count instead.
+        # poison classify_stroke / to_meters; skip and count instead. A serve is
+        # kept anyway: it is found from the server's motion, and the far
+        # player's toss is often not detected.
         cx_win = sel["cx"].values
         cy_win = sel["cy"].values
         if np.all(np.isnan(cx_win)) or np.all(np.isnan(cy_win)):
-            n_dropped += 1
-            continue
-        ball_cx = float(np.nanmedian(cx_win))
-        ball_cy = float(np.nanmedian(cy_win))
+            if not is_serve:
+                n_dropped += 1
+                continue
+            ball_cx = ball_cy = np.nan
+        else:
+            ball_cx = float(np.nanmedian(cx_win))
+            ball_cy = float(np.nanmedian(cy_win))
 
         feet = _box_feet(box)
         # Player feet in meters — the hitmap marks where the PLAYER struck, not the ball.
         player_x_m, player_y_m = conv.to_meters(*feet)
         side = "near" if player_y_m > NET else "far"
-        stroke = classify_stroke(ball_cx, box, side, hands[pid])
+        stroke = ("unknown" if np.isnan(ball_cx)
+                  else classify_stroke(ball_cx, box, side, hands[pid]))
 
         # Shot type from outgoing shape; contact frame `f` -> array-index `i`
         # (the frame index is contiguous).
@@ -750,16 +785,16 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         shot_type = classify_shot_type(feats, side, tp)
 
         # Overhead (serve/smash): separate column; wrapped so short/missing data
-        # yields "" rather than raising.
-        try:
-            in_feats = _incoming_ball_features(track, conv, i, fps)
-            player_speed = _player_speed_mps(boxes, conv, f, pid, fps)
-            overhead = classify_overhead(
-                box, ball_cx, ball_cy, player_x_m, player_y_m, side,
-                stroke, in_feats, feats, player_speed,
-                is_first_shot=(first_frame is not None and f == first_frame))
-        except Exception:
-            overhead = ""
+        # yields "" rather than raising. Serves are already known; the ball-based
+        # classifier is only asked about smashes.
+        if is_serve:
+            overhead = "serve"
+        else:
+            try:
+                in_feats = _incoming_ball_features(track, conv, i, fps)
+                overhead = classify_overhead(box, ball_cx, ball_cy, in_feats, feats)
+            except Exception:
+                overhead = ""
 
         # CAVEAT: to_meters uses the ground homography but the ball is airborne at
         # contact, so ball_x_m/ball_y_m are indicative, not exact.
@@ -1199,12 +1234,14 @@ def type_self_test(ball_csv: str = None, players_csv: str = None,
 
 def overhead_self_test() -> None:
     """
-    Validate classify_overhead on four synthetic scenarios (same court as
+    Validate serve and smash detection on synthetic scenarios (same court as
     self_test):
-      (a) SERVE — stationary behind baseline, ball tossed above head -> "serve".
-      (b) SMASH — mid-court, fast descending ball, low-apex downward -> "smash".
-      (c) GROUNDSTROKE — ball at waist beside the body -> "".
-      (d) LOB — struck low and lofted up -> "".
+      (a) SERVE — near player at their baseline raises arm and racket (taller box),
+          dips, peaks at contact, lowers -> one serve at the last peak.
+      (b) NO SERVE — the same motion right after an opponent shot (a rally).
+      (c) SMASH — mid-court, fast descending ball, low-apex downward -> "smash".
+      (d) GROUNDSTROKE — ball at waist beside the body -> "".
+      (e) LOB — struck low and lofted up -> "".
     Drives the real helpers end-to-end.
     """
     # Same homography as _synthetic_court_csv: meters -> pixels.
@@ -1236,48 +1273,36 @@ def overhead_self_test() -> None:
         conv = CourtConverter(court_csv)
         fps = 30.0
         failures = []
-
-        # ── (a) SERVE ──────────────────────────────────────────────────────────
-        # Near player just behind his own baseline (y ~ L_m); head below the toss.
-        sx_m, sy_m = W_m / 2.0, L_m - 0.3       # behind near baseline
-        feet_px = m2px(sx_m, sy_m)
         bw, bh = 90.0, 200.0
-        box = (feet_px[0] - bw / 2.0, feet_px[1] - bh, bw, bh)
-        head_y = box[1]
-        ball_cx = box[0] + bw / 2.0             # over the body
-        ball_cy = head_y - 0.6 * bh             # well above head (toss apex)
-        # identical boxes -> ~0 m/s
-        boxes = {f: {1: box} for f in range(40)}
-        i = 20
-        # slow, local up-then-down toss near the server side
-        toss = [(i - 10, ball_cx, ball_cy + 18),
-                (i, ball_cx, ball_cy),
-                (i + 10, ball_cx + 2, ball_cy + 18)]
-        track = build_track(toss, frames=40)
-        in_feats = _incoming_ball_features(track, conv, i, fps)
-        out_feats = _shot_type_features(track, conv, i, fps,
-                                        SHOT_TYPE_PARAMS["k"], SHOT_TYPE_PARAMS["w30"])
-        spd = _player_speed_mps(boxes, conv, i, 1, fps)
-        px_m, py_m = conv.to_meters(*_box_feet(box))
-        side = "near" if py_m > NET else "far"
-        ov = classify_overhead(box, ball_cx, ball_cy, px_m, py_m, side,
-                               "unknown", in_feats, out_feats, spd,
-                               is_first_shot=True)
-        if ov != "serve":
-            failures.append(f"(a) SERVE: got {ov!r}, expected 'serve' "
-                            f"(speed={spd}, in_speed={in_feats['in_speed_m']:.2f})")
 
-        # ── (b) SMASH ──────────────────────────────────────────────────────────
-        # Near player mid-court; ball arrives FAST and is driven steeply DOWN, low apex.
-        mx_m, my_m = W_m / 2.0, NET + 2.0       # near side, mid-court
-        feet_px = m2px(mx_m, my_m)
+        # ── (a) SERVE from the server's motion ─────────────────────────────────
+        # Near player just behind his baseline; far player standing still.
+        feet = m2px(W_m / 2.0, L_m + 0.3)
+        far_feet = m2px(W_m / 2.0, -0.5)
+        heights = {f: bh for f in range(150)}
+        heights.update({f: 1.4 * bh for f in range(40, 62)})      # toss: arm up
+        heights.update({f: 1.05 * bh for f in range(62, 66)})     # racket drop
+        heights.update({66: 1.6 * bh, 67: 1.7 * bh, 68: 1.3 * bh})  # contact at 67
+        boxes = {f: {1: (feet[0] - bw / 2, feet[1] - h, bw, h),
+                     2: (far_feet[0] - 20, far_feet[1] - 90, 40, 90)}
+                 for f, h in heights.items()}
+        toss_release = [(41, 1, 2.0)]          # the ball leaving the hand looks like a hit
+        serves = detect_serves(boxes, conv, fps, toss_release + [(100, 2, 3.0)])
+        if [(c, pid) for c, pid, _ in serves] != [(67, 1)]:
+            failures.append(f"(a) SERVE: got {serves}, expected one serve by P1 at frame 67")
+
+        # ── (b) NO SERVE in a rally ────────────────────────────────────────────
+        serves = detect_serves(boxes, conv, fps, [(25, 2, 3.0)])     # opponent just hit
+        if serves:
+            failures.append(f"(b) RALLY: got {serves}, expected no serve")
+
+        # ── (c) SMASH ──────────────────────────────────────────────────────────
+        # Near player mid-court; ball arrives DESCENDING and is driven steeply DOWN.
+        feet_px = m2px(W_m / 2.0, NET + 2.0)
         box = (feet_px[0] - bw / 2.0, feet_px[1] - bh, bw, bh)
-        head_y = box[1]
         ball_cx = box[0] + bw / 2.0
-        ball_cy = head_y - 0.5 * bh             # above the head at contact
-        boxes = {f: {1: box} for f in range(80)}
+        ball_cy = box[1] - 0.5 * bh             # above the head at contact
         i = 30
-        # incoming DESCENDING (in_vy_px > 0), outgoing driven DOWN with low apex
         seg = [(i - 12, ball_cx - 30, ball_cy - 140),
                (i, ball_cx, ball_cy),
                (i + 26, ball_cx + 40, ball_cy + 260)]
@@ -1285,26 +1310,18 @@ def overhead_self_test() -> None:
         in_feats = _incoming_ball_features(track, conv, i, fps)
         out_feats = _shot_type_features(track, conv, i, fps,
                                         SHOT_TYPE_PARAMS["k"], SHOT_TYPE_PARAMS["w30"])
-        spd = _player_speed_mps(boxes, conv, i, 1, fps)
-        px_m, py_m = conv.to_meters(*_box_feet(box))
-        side = "near" if py_m > NET else "far"
-        ov = classify_overhead(box, ball_cx, ball_cy, px_m, py_m, side,
-                               "forehand", in_feats, out_feats, spd,
-                               is_first_shot=False)
+        ov = classify_overhead(box, ball_cx, ball_cy, in_feats, out_feats)
         if ov != "smash":
             failures.append(
-                f"(b) SMASH: got {ov!r}, expected 'smash' "
-                f"(in_speed={in_feats['in_speed_m']:.2f}, "
-                f"rise={out_feats['rise']:.2f}, apex={out_feats['apex']:.2f})")
+                f"(c) SMASH: got {ov!r}, expected 'smash' "
+                f"(rise={out_feats['rise']:.2f}, apex={out_feats['apex']:.2f})")
 
-        # ── (c) GROUNDSTROKE ────────────────────────────────────────────────────
+        # ── (d) GROUNDSTROKE ────────────────────────────────────────────────────
         # Ball at waist, off to the side -> overhead gate fails -> "".
         feet_px = m2px(W_m / 2.0, NET + 4.0)
         box = (feet_px[0] - bw / 2.0, feet_px[1] - bh, bw, bh)
         ball_cx = box[0] + bw + 30              # off to the side
         ball_cy = box[1] + 0.6 * bh             # waist height (inside the box)
-        boxes = {f: {1: box} for f in range(80)}
-        i = 30
         seg = [(i - 12, ball_cx - 120, ball_cy + 10),
                (i, ball_cx, ball_cy),
                (i + 26, ball_cx + 220, ball_cy - 20)]
@@ -1312,25 +1329,14 @@ def overhead_self_test() -> None:
         in_feats = _incoming_ball_features(track, conv, i, fps)
         out_feats = _shot_type_features(track, conv, i, fps,
                                         SHOT_TYPE_PARAMS["k"], SHOT_TYPE_PARAMS["w30"])
-        spd = _player_speed_mps(boxes, conv, i, 1, fps)
-        px_m, py_m = conv.to_meters(*_box_feet(box))
-        side = "near" if py_m > NET else "far"
-        ov = classify_overhead(box, ball_cx, ball_cy, px_m, py_m, side,
-                               "forehand", in_feats, out_feats, spd,
-                               is_first_shot=False)
+        ov = classify_overhead(box, ball_cx, ball_cy, in_feats, out_feats)
         if ov != "":
-            failures.append(f"(c) GROUNDSTROKE: got {ov!r}, expected '' (no overhead)")
+            failures.append(f"(d) GROUNDSTROKE: got {ov!r}, expected '' (no overhead)")
 
-        # ── (d) LOB ─────────────────────────────────────────────────────────────
-        # Struck low and lofted UP -> gate fails on height (and smash 'downward'
-        # would fail too) -> "".
-        feet_px = m2px(W_m / 2.0, NET + 4.0)
-        box = (feet_px[0] - bw / 2.0, feet_px[1] - bh, bw, bh)
+        # ── (e) LOB ─────────────────────────────────────────────────────────────
+        # Struck low and lofted UP -> gate fails on height -> "".
         ball_cx = box[0] + bw / 2.0
         ball_cy = box[1] + 0.5 * bh             # waist height, NOT above head
-        boxes = {f: {1: box} for f in range(80)}
-        i = 30
-        # outgoing arcs UP then down -> large apex, negative rise
         seg = [(i - 12, ball_cx - 60, ball_cy + 30),
                (i, ball_cx, ball_cy),
                (i + 13, ball_cx + 120, ball_cy - 220),
@@ -1339,14 +1345,9 @@ def overhead_self_test() -> None:
         in_feats = _incoming_ball_features(track, conv, i, fps)
         out_feats = _shot_type_features(track, conv, i, fps,
                                         SHOT_TYPE_PARAMS["k"], SHOT_TYPE_PARAMS["w30"])
-        spd = _player_speed_mps(boxes, conv, i, 1, fps)
-        px_m, py_m = conv.to_meters(*_box_feet(box))
-        side = "near" if py_m > NET else "far"
-        ov = classify_overhead(box, ball_cx, ball_cy, px_m, py_m, side,
-                               "forehand", in_feats, out_feats, spd,
-                               is_first_shot=False)
+        ov = classify_overhead(box, ball_cx, ball_cy, in_feats, out_feats)
         if ov != "":
-            failures.append(f"(d) LOB: got {ov!r}, expected '' (no overhead)")
+            failures.append(f"(e) LOB: got {ov!r}, expected '' (no overhead)")
 
     print("OVERHEAD-SELF-TEST shot_analysis")
     if failures:
@@ -1354,8 +1355,8 @@ def overhead_self_test() -> None:
         for msg in failures:
             print("   -", msg)
         raise SystemExit(1)
-    print("  PASS: 4/4 - serve and smash detected; groundstroke and lob "
-          "correctly produce no overhead (zero false positives).")
+    print("  PASS: 5/5 - serve found from the server's motion (none in a rally), smash "
+          "detected; groundstroke and lob produce no overhead (zero false positives).")
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
