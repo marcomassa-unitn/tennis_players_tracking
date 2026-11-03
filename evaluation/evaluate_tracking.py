@@ -12,6 +12,10 @@ ID-switch count. Per-frame detail goes to outputs/evaluation/player_eval.csv.
 Court keypoints (--court-gt): per-label pixel error and metric error
 through the GT homography.
 
+Ball (--ball-gt): on the annotated frames, precision / recall of the real
+(non-interpolated) ball detections within --ball-radius px, centre error
+of the matches, and the error of interpolated fills.
+
 Usage (from project root):
     python evaluation/evaluate_tracking.py \\
         --gt   outputs/ground_truth/players_clip2_gt.csv \\
@@ -19,6 +23,10 @@ Usage (from project root):
         --court outputs/court_coordinates/Input_video2_court.csv \\
         --court-gt   outputs/ground_truth/input_video2_court_gt.csv \\
         --court-pred outputs/court_coordinates/Input_video2_court.csv
+
+    python evaluation/evaluate_tracking.py \\
+        --ball-gt   outputs/ground_truth/ball_Input_video2_gt.csv \\
+        --ball-pred outputs/ball_coordinates/ball_Input_video2.csv
 """
 
 import argparse
@@ -243,6 +251,97 @@ def evaluate_court(gt_path, pred_path, out_dir):
     print(f"  per-label detail      : {detail}")
 
 
+# ── ball evaluation ────────────────────────────────────────────────────────────
+
+def load_ball_gt(path):
+    """{frame: (x, y) or None} from annotate.py ball (None = ball not visible)."""
+    gt = {}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            gt[int(row["frame"])] = ((float(row["x"]), float(row["y"]))
+                                     if int(row["visible"]) else None)
+    return gt
+
+
+def load_ball_pred(path):
+    """{frame: (cx, cy, interpolated)} from a ball tracker CSV."""
+    pred = {}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            pred[int(row["frame"])] = (float(row["cx"]), float(row["cy"]),
+                                       int(row.get("interpolated") or 0))
+    return pred
+
+
+def ball_metrics(gt, pred, radius):
+    """Detection metrics of real (non-interpolated) ball positions vs GT.
+
+    On each GT frame: a real detection within `radius` px of a visible ball is a
+    true positive; a visible ball with no such detection is a false negative;
+    a real detection with no visible ball, or farther than `radius`, is a false
+    positive. Interpolated positions are scored separately (pixel error only).
+    Returns (summary dict, per-frame rows).
+    """
+    tp = fp = fn = 0
+    errs, interp_errs, rows = [], [], []
+    for frame in sorted(gt):
+        g = gt[frame]
+        p = pred.get(frame)
+        real = p is not None and not p[2]
+        err = float(np.hypot(p[0] - g[0], p[1] - g[1])) if (p is not None and g) else None
+        if real and g and err <= radius:
+            tp += 1
+            errs.append(err)
+            outcome = "TP"
+        elif real:
+            fp += 1
+            fn += 1 if g else 0
+            outcome = "FP" if not g else "FP+FN"
+        elif g:
+            fn += 1
+            outcome = "FN"
+            if p is not None:
+                interp_errs.append(err)
+        else:
+            outcome = "TN"
+        rows.append([frame, int(g is not None), "" if p is None else int(not p[2]),
+                     "" if err is None else round(err, 1), outcome])
+    summary = {
+        "frames": len(gt), "visible": sum(1 for g in gt.values() if g),
+        "tp": tp, "fp": fp, "fn": fn,
+        "precision": tp / (tp + fp) if tp + fp else float("nan"),
+        "recall": tp / (tp + fn) if tp + fn else float("nan"),
+        "median_err_px": float(np.median(errs)) if errs else float("nan"),
+        "mean_err_px": float(np.mean(errs)) if errs else float("nan"),
+        "interp_median_err_px": float(np.median(interp_errs)) if interp_errs else float("nan"),
+    }
+    return summary, rows
+
+
+def evaluate_ball(gt_path, pred_path, radius, out_dir):
+    """Print ball detection metrics vs GT and save the per-frame detail."""
+    summary, rows = ball_metrics(load_ball_gt(gt_path), load_ball_pred(pred_path), radius)
+    print("\n" + "=" * 56)
+    print("  BALL TRACKING EVALUATION")
+    print("=" * 56)
+    print(f"  GT frames             : {summary['frames']} ({summary['visible']} with the ball visible)")
+    print(f"  TP / FP / FN          : {summary['tp']} / {summary['fp']} / {summary['fn']}"
+          f"  (match radius {radius:g} px)")
+    print(f"  precision             : {summary['precision']:.3f}")
+    print(f"  recall                : {summary['recall']:.3f}")
+    print(f"  centre error (TP)     : median {summary['median_err_px']:.1f} px, "
+          f"mean {summary['mean_err_px']:.1f} px")
+    print(f"  interpolated fills    : median error {summary['interp_median_err_px']:.1f} px")
+    os.makedirs(out_dir, exist_ok=True)
+    detail = os.path.join(out_dir, "ball_eval.csv")
+    with open(detail, "w", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(["frame", "gt_visible", "pred_real", "err_px", "outcome"])
+        wr.writerows(rows)
+    print(f"  per-frame detail      : {detail}")
+    return summary
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -262,17 +361,26 @@ def main():
     parser.add_argument("--court-pred", dest="court_pred",
                         default="outputs/court_coordinates/Input_video2_court.csv",
                         help="detected court keypoints CSV")
+    parser.add_argument("--ball-gt", dest="ball_gt",
+                        help="GT ball positions CSV (annotate.py ball)")
+    parser.add_argument("--ball-pred", dest="ball_pred",
+                        default="outputs/ball_coordinates/ball_Input_video2.csv",
+                        help="ball tracker CSV")
+    parser.add_argument("--ball-radius", type=float, default=10.0, dest="ball_radius",
+                        help="max distance (px) for a ball detection to match the GT")
     parser.add_argument("--output", default="outputs/evaluation")
     args = parser.parse_args()
 
-    if not args.gt and not args.court_gt:
-        parser.error("nothing to do: pass --gt and/or --court-gt")
+    if not (args.gt or args.court_gt or args.ball_gt):
+        parser.error("nothing to do: pass --gt, --court-gt and/or --ball-gt")
 
     if args.gt:
         evaluate_players(args.gt, args.pred, args.court,
                          args.iou_thr, args.output)
     if args.court_gt:
         evaluate_court(args.court_gt, args.court_pred, args.output)
+    if args.ball_gt:
+        evaluate_ball(args.ball_gt, args.ball_pred, args.ball_radius, args.output)
     print()
 
 

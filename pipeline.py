@@ -93,6 +93,8 @@ def derive_paths(video, output):
         "court_csv": os.path.join(output, "court_coordinates", f"{stem}_court.csv"),
         "players_csv": os.path.join(output, "player_coordinates", f"players_{stem}.csv"),
         "ball_csv": os.path.join(output, "ball_coordinates", f"ball_{stem}.csv"),
+        "ball_candidates_csv": os.path.join(output, "ball_coordinates",
+                                            f"ball_candidates_{stem}.csv"),
         "analysis_dir": os.path.join(output, "player_analysis"),
         "motion_dir": os.path.join(output, "motion_estimation"),
         "shots_dir": os.path.join(output, "shot_analysis"),
@@ -225,35 +227,30 @@ def step_ball(p, args, produced):
     if args.skip_ball:
         print("Skipped (--skip-ball).")
         return
-    # Expensive: reuse an existing CSV rather than recompute.
-    if os.path.exists(p["ball_csv"]):
-        print(f"Already done; reusing existing {p['ball_csv']}.")
-        produced["ball_csv"] = p["ball_csv"]
-        return
+    from tracking import ball_tracking
 
-    try:
-        from tracking.ball_tracking import BallTracker
-    except ImportError as exc:
-        print(f"Skipped: ball tracking dependencies unavailable ({exc}). "
-              "Install ultralytics to enable this step.")
-        return
+    # Stage 1 (YOLO detection) is the expensive part and usually runs on a GPU
+    # (notebooks/ball_tracking_colab.ipynb). Its candidates CSV is reused; stage 2
+    # (tracking) is cheap and always re-run, so tracker changes take effect.
+    cands = p["ball_candidates_csv"]
+    if not os.path.exists(cands):
+        if os.path.exists(p["ball_csv"]):
+            print(f"No candidates CSV; reusing existing {p['ball_csv']}.")
+            produced["ball_csv"] = p["ball_csv"]
+            return
+        if not os.path.exists(args.model):
+            print(f"Skipped: no candidates CSV ({cands}) and no model weights at "
+                  f"{args.model}. Run notebooks/ball_tracking_colab.ipynb and put the "
+                  "candidates CSV there, or place the weights (--model).")
+            return
+        try:
+            detector = ball_tracking.BallDetector(args.model)
+        except ImportError as exc:
+            print(f"Skipped: ball detection needs ultralytics ({exc}).")
+            return
+        detector.detect_candidates(p["video"], cands)
 
-    model_path = args.model
-    if not os.path.exists(model_path):
-        print(f"Skipped: model weights not found at {model_path}. "
-              "Place the YOLO ball-tracker weights there (or pass --model) to "
-              "enable this step.")
-        return
-
-    _ensure_parent(p["ball_csv"])
-    tracker = BallTracker(model_path)
-    tracker.run(
-        p["video"],
-        output_path=None,                 # no annotated video; CSV only here
-        csv_path=p["ball_csv"],
-        display=not args.no_display,
-    )
-    print(f"Ball tracks -> {p['ball_csv']}")
+    ball_tracking.track_from_candidates(cands, p["video"], p["ball_csv"])
     produced["ball_csv"] = p["ball_csv"]
 
 
@@ -353,7 +350,7 @@ def build_parser():
     parser.add_argument("--skip-motion", action="store_true", dest="skip_motion",
                         help="skip optical flow + block matching")
     parser.add_argument("--skip-ball", action="store_true", dest="skip_ball",
-                        help="skip ball tracking (requires ultralytics + weights)")
+                        help="skip ball tracking (detection needs ultralytics + weights, or a candidates CSV)")
     parser.add_argument("--skip-shots", action="store_true", dest="skip_shots",
                         help="skip shot analysis")
     parser.add_argument("--skip-evaluation", action="store_true", dest="skip_evaluation",

@@ -3,7 +3,7 @@ evaluation/annotate.py
 
 Interactive ground-truth annotation tool.
 
-Two modes:
+Three modes:
 
   boxes  — draw the two player bounding boxes on a subset of frames
            (every --step frames). Output CSV: frame,player_id,x,y,w,h
@@ -14,12 +14,18 @@ Two modes:
            on one frame. Output CSV: label,x,y  (same format produced by
            tracking/court_tracking.py, so the two are comparable).
 
+  ball   — click the ball centre on every --step frames (n = not visible),
+           with a magnifier around the cursor. Output CSV: frame,visible,x,y.
+           Resumes an existing file, skipping frames already labelled.
+
 Usage (from project root):
     python evaluation/annotate.py boxes --video data/Input_video2.mp4 \\
         --step 30 --output outputs/ground_truth/players_clip2_gt.csv
 
     python evaluation/annotate.py court --video data/Input_video2.mp4 \\
         --output outputs/ground_truth/input_video2_court_gt.csv
+
+    python evaluation/annotate.py ball --video data/Input_video2.mp4 --step 10
 
 Keys (boxes mode, inside the OpenCV ROI selector):
     draw with the mouse, ENTER/SPACE = confirm box, c = cancel selection
@@ -178,6 +184,127 @@ def annotate_court(video, frame_no, output):
     print(f"Saved court keypoints to {output}")
 
 
+# ── ball mode ──────────────────────────────────────────────────────────────────
+
+MAG_SRC = 40      # half-size (display px) of the magnified area around the cursor
+MAG_ZOOM = 4      # magnification factor of the inset
+
+
+def _load_ball_gt(path):
+    """{frame: (visible, x, y)} from an existing ball GT CSV (to resume)."""
+    if not os.path.exists(path):
+        return {}
+    out = {}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            vis = int(row["visible"])
+            out[int(row["frame"])] = (vis, float(row["x"]) if vis else None,
+                                      float(row["y"]) if vis else None)
+    return out
+
+
+def _save_ball_gt(path, labels):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(["frame", "visible", "x", "y"])
+        for fr in sorted(labels):
+            vis, x, y = labels[fr]
+            wr.writerow([fr, vis, f"{x:.1f}" if vis else "", f"{y:.1f}" if vis else ""])
+
+
+def annotate_ball(video, step, start, output):
+    """Click the ball centre on every `step`-th frame; `n` = ball not visible.
+
+    A magnified inset follows the cursor, since the ball is only ~10 px wide on
+    screen. Annotations are saved on quit and on every 10 frames, and an
+    existing output file is resumed (already labelled frames are skipped).
+    """
+    cap = cv2.VideoCapture(video)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video}")
+    n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frames = list(range(start, n_total, step))
+    labels = _load_ball_gt(output)
+    todo = [f for f in frames if f not in labels]
+    print(f"{len(frames)} frames to label ({len(frames) - len(todo)} already done).")
+    print("Click the ball centre, then ENTER/SPACE to confirm (click again to adjust).")
+    print("n = ball not visible   u = back to the previous frame   q = save and quit\n")
+
+    win = "annotate ball"
+    cv2.namedWindow(win)
+    mouse = {"pos": None, "click": None}
+
+    def on_mouse(event, x, y, flags, param):
+        mouse["pos"] = (x, y)
+        if event == cv2.EVENT_LBUTTONDOWN:
+            mouse["click"] = (x, y)
+
+    cv2.setMouseCallback(win, on_mouse)
+    history = []          # frames labelled in this session, for undo
+    i = 0
+    while i < len(todo):
+        fr = todo[i]
+        cap.set(cv2.CAP_PROP_POS_FRAMES, fr)
+        ok, frame = cap.read()
+        if not ok:
+            break
+        disp, s = _scaled(frame)
+        mouse["click"] = None
+        action = None
+        while action is None:
+            view = disp.copy()
+            if mouse["click"] is not None:
+                cv2.circle(view, mouse["click"], 7, (0, 0, 255), 1)
+            done = len(frames) - len(todo) + i
+            cv2.putText(view, f"frame {fr}  ({done + 1}/{len(frames)})  "
+                              "click ball, ENTER = ok, n = not visible, u = back, q = quit",
+                        (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            if mouse["pos"] is not None:
+                mx, my = mouse["pos"]
+                h, w = disp.shape[:2]
+                x0, y0 = max(0, mx - MAG_SRC), max(0, my - MAG_SRC)
+                x1, y1 = min(w, mx + MAG_SRC), min(h, my + MAG_SRC)
+                if x1 > x0 and y1 > y0:
+                    patch = cv2.resize(disp[y0:y1, x0:x1], None, fx=MAG_ZOOM, fy=MAG_ZOOM,
+                                       interpolation=cv2.INTER_NEAREST)
+                    cx, cy = (mx - x0) * MAG_ZOOM, (my - y0) * MAG_ZOOM
+                    cv2.line(patch, (cx - 12, cy), (cx + 12, cy), (0, 255, 0), 1)
+                    cv2.line(patch, (cx, cy - 12), (cx, cy + 12), (0, 255, 0), 1)
+                    ph, pw = patch.shape[:2]
+                    view[40:40 + ph, w - pw - 10:w - 10] = patch
+                    cv2.rectangle(view, (w - pw - 10, 40), (w - 10, 40 + ph), (0, 255, 0), 1)
+            cv2.imshow(win, view)
+            key = cv2.waitKey(20) & 0xFF
+            if key in (13, 10, 32) and mouse["click"] is not None:
+                cx, cy = mouse["click"]
+                labels[fr] = (1, cx / s, cy / s)
+                action = "next"
+            elif key == ord("n"):
+                labels[fr] = (0, None, None)
+                action = "next"
+            elif key == ord("u") and history:
+                prev = history.pop()
+                labels.pop(prev, None)
+                i = todo.index(prev)
+                action = "back"
+            elif key == ord("q"):
+                action = "quit"
+        if action == "quit":
+            break
+        if action == "next":
+            history.append(fr)
+            i += 1
+            if len(history) % 10 == 0:
+                _save_ball_gt(output, labels)
+
+    cap.release()
+    cv2.destroyAllWindows()
+    _save_ball_gt(output, labels)
+    n_vis = sum(1 for v, _, _ in labels.values() if v)
+    print(f"\nSaved {len(labels)} labelled frames ({n_vis} with the ball visible) to {output}")
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -202,9 +329,21 @@ def main():
     pc.add_argument("--output",
                     default="outputs/ground_truth/input_video2_court_gt.csv")
 
+    pl = sub.add_parser("ball", help="annotate the ball centre on sampled frames")
+    pl.add_argument("--video", default="data/Input_video2.mp4")
+    pl.add_argument("--step", type=int, default=10,
+                    help="annotate every N-th frame (default: 10)")
+    pl.add_argument("--start", type=int, default=0, help="first frame (default: 0)")
+    pl.add_argument("--output", default=None,
+                    help="output CSV (default: outputs/ground_truth/ball_<video name>_gt.csv)")
+
     args = parser.parse_args()
     if args.mode == "boxes":
         annotate_boxes(args.video, args.step, args.start, args.output)
+    elif args.mode == "ball":
+        stem = os.path.splitext(os.path.basename(args.video))[0]
+        output = args.output or os.path.join("outputs", "ground_truth", f"ball_{stem}_gt.csv")
+        annotate_ball(args.video, args.step, args.start, output)
     else:
         annotate_court(args.video, args.frame, args.output)
 

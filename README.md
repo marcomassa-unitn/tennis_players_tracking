@@ -133,8 +133,17 @@ flowchart LR
    is written from scratch: full search and three-step search, with
    motion-compensated PSNR against a no-motion baseline.
 5. **Ball tracking** ([`tracking/ball_tracking.py`](tracking/ball_tracking.py)).
-   A YOLOv8 detector (confidence 0.65) is gated by a frame-difference motion
-   check. Short gaps are interpolated and flagged as such.
+   Two stages. **Detection:** a fine-tuned YOLOv8x runs on 640 px tiles of the
+   frame at native resolution, plus the whole frame. On the whole frame alone
+   the ~15 px ball would shrink to ~5 px. Every candidate is kept with its
+   confidence and how much it moved since the previous frame. **Tracking:**
+   still candidates (balls held by ball kids) are discarded, and a
+   constant-velocity Kalman filter follows the ball, accepting only candidates
+   physically reachable from its last position. One-frame spikes are removed,
+   and gaps up to 0.33 s are filled with a shape-preserving cubic and flagged.
+   Detection needs a GPU and runs in the
+   [Colab notebook](notebooks/ball_tracking_colab.ipynb). Its candidates CSV is
+   reused, so tracking runs on any laptop.
 6. **Shot analysis** ([`analysis/shot_analysis.py`](analysis/shot_analysis.py)).
    Contacts are detected from persistent reversals of the vertical velocity and
    from acceleration peaks on the Savitzky–Golay-smoothed ball track, and are
@@ -161,14 +170,16 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 pip install -r requirements.txt
 ```
 
-**Optional: ball tracking.** Install the detector dependency and download the
-trained weights from the
-[latest release](https://github.com/marcomassa-unitn/tennis_players_tracking/releases/latest)
-into `models/ball_tracker.pt`:
+**Optional: ball tracking.** Ball detection runs a large YOLO model, best on a
+GPU. Download the trained weights from the
+[latest release](https://github.com/marcomassa-unitn/tennis_players_tracking/releases/latest).
+Then do one of the following:
 
-```bash
-pip install ultralytics
-```
+- run [`notebooks/ball_tracking_colab.ipynb`](notebooks/ball_tracking_colab.ipynb)
+  on a free Colab GPU and put the resulting `ball_candidates_<clip>.csv` in
+  `outputs/ball_coordinates/`;
+- or, with a GPU, put the weights in `models/ball_tracker.pt` and run
+  `pip install ultralytics`.
 
 Run the whole pipeline on the demo clip. It's headless and writes everything to
 `outputs/`:
@@ -195,7 +206,9 @@ paths need editing.
 # 1. Tracking: produces the CSVs everything else reads
 python tracking/court_tracking.py  --video data/Input_video2.mp4 --no-display
 python tracking/player_tracking.py --video data/Input_video2.mp4 --no-display
-python tracking/ball_tracking.py   --video data/Input_video2.mp4 --no-display --no-video
+python tracking/ball_tracking.py   --video data/Input_video2.mp4 --detect-only   # GPU: YOLO candidates
+python tracking/ball_tracking.py   --video data/Input_video2.mp4 \
+    --candidates outputs/ball_coordinates/ball_candidates_Input_video2.csv     # CPU: tracking
 
 # Check the court keypoints: draws them and the reprojected court model on a frame
 # (court_tracking.py also saves this image next to the court CSV)
@@ -212,10 +225,13 @@ python motion_estimation/block_matching.py --method both
 # 4. Ground truth and evaluation
 python evaluation/annotate.py boxes --video data/Input_video2.mp4 --step 30
 python evaluation/annotate.py court --video data/Input_video2.mp4
+python evaluation/annotate.py ball  --video data/Input_video2.mp4 --step 10   # click the ball, n = not visible
 python evaluation/evaluate_tracking.py --gt <gt_boxes.csv> \
     --pred outputs/player_coordinates/players_Input_video2.csv \
     --court outputs/court_coordinates/Input_video2_court.csv \
     --court-gt <gt_court.csv>
+python evaluation/evaluate_tracking.py --ball-gt outputs/ground_truth/ball_Input_video2_gt.csv \
+    --ball-pred outputs/ball_coordinates/ball_Input_video2.csv
 ```
 
 Useful `pipeline.py` flags:
