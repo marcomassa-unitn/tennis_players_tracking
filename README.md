@@ -232,6 +232,7 @@ paths need editing.
 # 1. Tracking: produces the CSVs everything else reads
 python tracking/court_tracking.py  --video data/Input_video2.mp4 --no-display
 python tracking/player_tracking.py --video data/Input_video2.mp4 --no-display
+python display_player_tracking.py  --video data/Input_video2.mp4   # watch the tracker's stages (saves nothing)
 python tracking/ball_tracking.py   --video data/Input_video2.mp4 --detect-only   # GPU: YOLO candidates
 python tracking/ball_tracking.py   --video data/Input_video2.mp4 \
     --candidates outputs/ball_coordinates/ball_candidates_Input_video2.csv     # CPU: tracking
@@ -286,6 +287,7 @@ python analysis/shot_analysis.py --type-self-test      # labelled demo rally (ne
 ```
 ├── pipeline.py              # one-command runner for all stages
 ├── live_view.py             # replay with overlays, minimap and live stats
+├── display_player_tracking.py  # player tracker's stages side by side, for inspection
 ├── tracking/                # court keypoints, player tracker, YOLO ball tracker
 ├── analysis/                # player statistics and shot detection/classification
 ├── motion_estimation/       # Farnebäck / Lucas–Kanade, block matching from scratch

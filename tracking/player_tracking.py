@@ -177,6 +177,10 @@ class PlayerTracker:
         self.frozen_frames = max(2, int(round(FROZEN_S * self.fps)))
         self._prev_raw = None
         self._frozen = None
+        # Set by display_player_tracking.py: keep each frame's intermediate
+        # images (difference, pixels removed by each filter) in self.layers.
+        self.record_layers = False
+        self.layers = None
         self._hann = cv2.createHanningWindow(self.proc_size, cv2.CV_32F)
         self.shift = (0.0, 0.0)     # camera translation of the current frame (proc px)
 
@@ -305,7 +309,9 @@ class PlayerTracker:
         diff = cv2.max(cv2.subtract(small, self._bg_hi[k]),
                        cv2.subtract(self._bg_lo[k], small)).max(axis=2)
         fg = diff > DIFF_THRESH
+        layers = {"k": k, "diff": diff}
         if np.hypot(*self.shift) > LINE_SUPPRESS_SHIFT_PX:
+            layers["lines"] = fg & self._bg_lines[k]
             fg &= ~self._bg_lines[k]
 
         # Cast shadows: darker than the background, same hue and saturation.
@@ -317,15 +323,22 @@ class PlayerTracker:
         shadow = ((v_ratio >= SHADOW_V_RATIO[0]) & (v_ratio <= SHADOW_V_RATIO[1])
                   & (dhue <= SHADOW_MAX_DHUE)
                   & (np.abs(hsv[..., 1] - bg_hsv[..., 1]) <= SHADOW_MAX_DSAT))
+        layers["shadow"] = fg & shadow
         fg &= ~shadow
 
         frozen = self._frozen_pixels(raw).astype(np.uint8)          # frame coordinates
-        fg &= _translate(frozen, *self.shift, interpolation=cv2.INTER_NEAREST).astype(bool) == 0
+        frozen = _translate(frozen, *self.shift, interpolation=cv2.INTER_NEAREST).astype(bool)
+        layers["graphics"] = fg & frozen
+        fg &= ~frozen
 
         # No morphological opening: the legs of the far player are ~2 px wide at
         # PROC_HEIGHT and would vanish; specks are dropped by area instead.
         mask = self._drop_off_court(fg.astype(np.uint8) * 255)
-        return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel_close)
+        layers["off_court"] = fg & (mask == 0)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel_close)
+        if self.record_layers:
+            self.layers = layers | {"final": mask > 0}
+        return mask
 
     def _drop_off_court(self, mask):
         """Remove raw blobs whose base lies far outside the walkable area.
@@ -560,7 +573,13 @@ class PlayerTracker:
 
     # ── main loop ────────────────────────────────────────────────────────────
 
-    def run(self):
+    def run(self, save=True, on_frame=None):
+        """Track both players and write the CSV.
+
+        save: False runs without writing anything (used by the viewer).
+        on_frame: optional callback(frame_idx, frame, candidates, detections),
+        called after each frame; returning True stops the run.
+        """
         print(f"Building the background from {BG_SAMPLES} frames sampled over the clip...")
         self.backgrounds = self._build_backgrounds()
 
@@ -574,6 +593,7 @@ class PlayerTracker:
                 if not ok:
                     break
                 small = cv2.resize(frame, self.proc_size, interpolation=cv2.INTER_AREA)
+                self.layers, cands = None, []
                 mask = self._foreground(small, self._background_for(frame_idx))
                 if mask is None:
                     dark_frames += 1
@@ -591,6 +611,9 @@ class PlayerTracker:
                 if self.display and self._show(frame, mask, detections, frame_idx):
                     stopped_by_user = True
                     break
+                if on_frame is not None and on_frame(frame_idx, frame, cands, detections):
+                    stopped_by_user = True
+                    break
                 frame_idx += 1
             if not stopped_by_user:
                 check_full_read(frame_idx, self.total_frames, self.video_path)
@@ -600,6 +623,8 @@ class PlayerTracker:
                 cv2.destroyAllWindows()
 
         rows = self._fill_gaps(detections)
+        if not save:
+            return
         self._write_csv(rows)
         processed = max(frame_idx - dark_frames, 1)
         for pid in (1, 2):
