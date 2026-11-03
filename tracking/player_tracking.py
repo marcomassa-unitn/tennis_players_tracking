@@ -5,8 +5,10 @@
    so the median is the empty court, and a player standing still (e.g. while
    serving) still differs from it. People who barely move, such as ball kids,
    fall into the background.
-2. Foreground: the frame is gain-matched to the background (absorbs fade-ins
-   and exposure drift) and compared with the background's local min / max over
+2. Foreground: the frame is aligned to the background (a broadcast camera can
+   tilt or pan by a few pixels during a clip; the shift is measured by phase
+   correlation), gain-matched to it (absorbs fade-ins and exposure drift) and
+   compared with the background's local min / max over
    a few pixels, so the slight shake of broadcast cameras does not turn court
    lines into foreground; cast shadows (darker pixels with the background's
    hue) are removed.
@@ -35,8 +37,10 @@ import numpy as np
 
 # Make the project root importable when this file is run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from tracking.court_tracking import line_pixel_mask
 from utils.court_converter import CourtConverter
 from utils.court_geometry import NET, RUNOFF_BEHIND, RUNOFF_SIDE, L_m, W_m
+from utils.court_overlay import MODEL_SEGMENTS
 from utils.video import check_full_read, safe_fps
 
 # ── Processing scale ──────────────────────────────────────────────────────────
@@ -46,6 +50,17 @@ PROC_HEIGHT = 540          # frames are processed at this height (boxes scaled b
 BG_SAMPLES = 41            # frames per median (odd)
 BG_SEGMENT_S = 30.0        # clips longer than 2 segments get one median per segment
 DARK_SAMPLE_RATIO = 0.6    # samples darker than this x the typical one are skipped
+
+# ── Court lines ───────────────────────────────────────────────────────────────
+LINE_SEARCH_PX = 15        # full-res px around the court model searched for line pixels
+LINE_MARGIN_PX = 4         # at PROC_HEIGHT: line pixels grown by this, then ignored
+
+# ── Camera motion ─────────────────────────────────────────────────────────────
+MAX_CAMERA_SHIFT_PX = 40   # at PROC_HEIGHT; larger estimates are treated as unreliable
+MIN_SHIFT_RESPONSE = 0.1   # phase-correlation peak below this: no reliable estimate
+LINE_SUPPRESS_SHIFT_PX = 0.5  # court lines are masked only when the camera moved more
+                              # than this (static cameras need no help, and the mask
+                              # would cut the feet of players standing on a line)
 
 # ── Foreground ────────────────────────────────────────────────────────────────
 DARK_FRAME_RATIO = 0.5     # frames darker than this x the background: no detection
@@ -70,6 +85,10 @@ MIN_PLAYER_HEIGHT_M = 0.6  # plausible player: taller than this...
 MAX_PLAYER_SIZE_M = (3.0, 3.5)  # ...and at most this (width, height): rejects
                                 # TV graphics and other large blobs
 MERGE_GAP_M = (0.3, 0.6)   # fragments closer than (x, y) merge into one person
+LINE_LIKE_ELONGATION = 3.0 # fragments wider than this x their height...
+LINE_LIKE_MAX_H_M = 0.15   # ...that are thinner than this
+LINE_LIKE_MAX_FILL = 0.3   # ...or fill less than this share of their box are
+                           # line remnants, never merged into a player
 BODY_COLUMN_FRAC = 0.2     # box columns thinner than this x the tallest one...
 SHADOW_BAND_FRAC = 0.25    # ...and lying in the bottom quarter of the box are a
                            # cast shadow on the ground, and are trimmed off
@@ -93,6 +112,19 @@ COLUMNS = ["frame", "player_id", "x", "y", "w", "h", "cx", "cy", "area", "interp
 
 def _luma_median(img_bgr):
     return float(np.median(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)))
+
+
+def _gray(img_bgr):
+    return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+
+def _translate(img, dx, dy, interpolation=cv2.INTER_LINEAR):
+    """Shift `img` by (-dx, -dy): undoes a camera translation of (dx, dy)."""
+    if dx == 0 and dy == 0:
+        return img
+    m = np.float32([[1, 0, -dx], [0, 1, -dy]])
+    return cv2.warpAffine(img, m, (img.shape[1], img.shape[0]), flags=interpolation,
+                          borderMode=cv2.BORDER_REPLICATE)
 
 
 def _median_stack(frames):
@@ -139,11 +171,14 @@ class PlayerTracker:
         self.scale = min(1.0, PROC_HEIGHT / self.H)      # full -> processing
         self.proc_size = (int(round(self.W * self.scale)), int(round(self.H * self.scale)))
         self.kernel_close = np.ones((7, 7), np.uint8)
+        self.kernel_strip = np.ones((7, 1), np.uint8)   # removes strips < 7 px tall
         self.recent_frames = max(1, int(round(RECENT_S * self.fps)))
         self.max_gap = max(1, int(round(MAX_GAP_S * self.fps)))
         self.frozen_frames = max(2, int(round(FROZEN_S * self.fps)))
         self._prev_raw = None
         self._frozen = None
+        self._hann = cv2.createHanningWindow(self.proc_size, cv2.CV_32F)
+        self.shift = (0.0, 0.0)     # camera translation of the current frame (proc px)
 
     # ── 1. background ────────────────────────────────────────────────────────
 
@@ -184,16 +219,42 @@ class PlayerTracker:
             keep = [f for f, lum in zip(frames, lumas) if lum >= DARK_SAMPLE_RATIO * np.median(lumas)]
             if len(keep) % 2 == 0 and len(keep) > 1:
                 keep = keep[1:]
+            # Align every sample to the middle one, so a camera that moved during
+            # the clip does not blur the median.
+            ref = _gray(keep[len(keep) // 2])
+            keep = [_translate(fr, *self._camera_shift(ref, fr)) for fr in keep]
             backgrounds.append((s, _median_stack(keep)))
             samples[k] = None
         if not backgrounds:
             raise RuntimeError(f"Could not sample frames from {self.video_path}")
         self._bg_luma = [_luma_median(bg) for _, bg in backgrounds]
+        self._bg_gray = [_gray(bg) for _, bg in backgrounds]
         self._bg_hsv = [cv2.cvtColor(bg, cv2.COLOR_BGR2HSV) for _, bg in backgrounds]
         k = np.ones((2 * JITTER_PX + 1, 2 * JITTER_PX + 1), np.uint8)
         self._bg_lo = [cv2.erode(bg, k) for _, bg in backgrounds]
         self._bg_hi = [cv2.dilate(bg, k) for _, bg in backgrounds]
+        self._bg_lines = [self._court_line_mask(bg) for _, bg in backgrounds]
         return backgrounds
+
+    def _court_line_mask(self, bg):
+        """Painted court lines of the background, grown by LINE_MARGIN_PX.
+
+        When the camera tilts or zooms slightly, alignment leaves the long court
+        lines a pixel or two off; a strip along the baseline would then light up
+        and fuse with the player standing on it. Line pixels are taken from the
+        background itself (thin bright structures), near the projected court
+        model, so they are exact even if the camera moved since the court was
+        detected.
+        """
+        near_model = np.zeros(bg.shape[:2], np.uint8)
+        width = max(1, int(round(2 * LINE_SEARCH_PX * self.scale)))
+        for a, b in MODEL_SEGMENTS:
+            p = cv2.perspectiveTransform(np.array([[a], [b]], np.float64), self.m_to_px)[:, 0]
+            p = np.round(p * self.scale).astype(int)
+            cv2.line(near_model, tuple(p[0]), tuple(p[1]), 255, width)
+        lines = cv2.bitwise_and(line_pixel_mask(bg), near_model)
+        k = np.ones((2 * LINE_MARGIN_PX + 1, 2 * LINE_MARGIN_PX + 1), np.uint8)
+        return cv2.dilate(lines, k) > 0
 
     def _background_for(self, frame_idx):
         k = 0
@@ -203,6 +264,13 @@ class PlayerTracker:
         return k
 
     # ── 2. foreground ────────────────────────────────────────────────────────
+
+    def _camera_shift(self, ref_gray, img):
+        """(dx, dy) translation of `img` relative to `ref_gray`, in processing px."""
+        (dx, dy), response = cv2.phaseCorrelate(ref_gray, _gray(img), self._hann)
+        if response < MIN_SHIFT_RESPONSE or np.hypot(dx, dy) > MAX_CAMERA_SHIFT_PX:
+            return 0.0, 0.0
+        return float(dx), float(dy)
 
     def _frozen_pixels(self, raw):
         """Pixels unchanged (within FROZEN_TOL) for FROZEN_S: on-screen graphics.
@@ -226,6 +294,9 @@ class PlayerTracker:
         if luma < DARK_FRAME_RATIO * self._bg_luma[k]:
             self._prev_raw = None
             return None
+        # Work in background coordinates: undo the camera's translation.
+        self.shift = self._camera_shift(self._bg_gray[k], small)
+        small = _translate(small, *self.shift)
         gain = self._bg_luma[k] / max(luma, 1.0)
         if abs(gain - 1.0) > 0.02:
             small = cv2.convertScaleAbs(small, alpha=gain)
@@ -234,6 +305,8 @@ class PlayerTracker:
         diff = cv2.max(cv2.subtract(small, self._bg_hi[k]),
                        cv2.subtract(self._bg_lo[k], small)).max(axis=2)
         fg = diff > DIFF_THRESH
+        if np.hypot(*self.shift) > LINE_SUPPRESS_SHIFT_PX:
+            fg &= ~self._bg_lines[k]
 
         # Cast shadows: darker than the background, same hue and saturation.
         hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV).astype(np.int16)
@@ -246,7 +319,8 @@ class PlayerTracker:
                   & (np.abs(hsv[..., 1] - bg_hsv[..., 1]) <= SHADOW_MAX_DSAT))
         fg &= ~shadow
 
-        fg &= ~self._frozen_pixels(raw)
+        frozen = self._frozen_pixels(raw).astype(np.uint8)          # frame coordinates
+        fg &= _translate(frozen, *self.shift, interpolation=cv2.INTER_NEAREST).astype(bool) == 0
 
         # No morphological opening: the legs of the far player are ~2 px wide at
         # PROC_HEIGHT and would vanish; specks are dropped by area instead.
@@ -343,8 +417,10 @@ class PlayerTracker:
         n, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
         inv = 1.0 / self.scale
         comps = []
-        for i in range(1, n):
-            x, y, w, h, area = stats[i]
+        todo = [(i, *stats[i]) for i in range(1, n)]
+        next_id = n
+        while todo:
+            i, x, y, w, h, area = todo.pop()
             if area < MIN_FRAGMENT_AREA:
                 continue
             c = {"x0": x * inv, "y0": y * inv, "x1": (x + w) * inv, "y1": (y + h) * inv,
@@ -354,6 +430,27 @@ class PlayerTracker:
             # player with a long cast shadow is wide but not tall.
             if feet is None or c["y1"] - c["y0"] > MAX_PLAYER_SIZE_M[1] * ppm:
                 continue            # never let such a blob absorb a player
+            # Line-shaped blobs (court-line remnants when the camera moves, thin
+            # shadows) are long, thin and mostly empty. A player's leg may touch
+            # one, so only the thin horizontal strips are removed (an opening
+            # with a vertical element keeps whatever is tall), and what remains
+            # is examined again as separate fragments.
+            bw, bh = c["x1"] - c["x0"], c["y1"] - c["y0"]
+            fill = c["area"] / max(bw * bh, 1.0)
+            if bw > LINE_LIKE_ELONGATION * bh and (bh < LINE_LIKE_MAX_H_M * ppm
+                                                   or fill < LINE_LIKE_MAX_FILL):
+                box = labels[y:y + h, x:x + w]
+                own = (box == i).astype(np.uint8)
+                kept = cv2.morphologyEx(own, cv2.MORPH_OPEN, self.kernel_strip)
+                box[own.astype(bool)] = 0
+                n2, lab2, st2, _ = cv2.connectedComponentsWithStats(kept)
+                for j in range(1, n2):
+                    box[lab2 == j] = next_id
+                    sx, sy, sw, sh, sa = st2[j]
+                    if sw <= LINE_LIKE_ELONGATION * sh:      # no longer line-shaped
+                        todo.append((next_id, x + sx, y + sy, sw, sh, sa))
+                    next_id += 1
+                continue
             c["ppm"] = ppm
             comps.append(c)
         if not comps:
@@ -410,6 +507,16 @@ class PlayerTracker:
             k = int(np.argmin(dists))
             return cands[k] if dists[k] <= gate else None
         return max(cands, key=lambda c: c["area"])
+
+    def _to_frame_coords(self, cand):
+        """Copy of a candidate (background coordinates) moved back into the frame."""
+        dx, dy = self.shift[0] / self.scale, self.shift[1] / self.scale
+        out = dict(cand)
+        for key in ("x0", "x1", "cx"):
+            out[key] += dx
+        for key in ("y0", "y1", "cy"):
+            out[key] += dy
+        return out
 
     # ── 5. gaps ──────────────────────────────────────────────────────────────
 
@@ -477,7 +584,8 @@ class PlayerTracker:
                     for pid in (1, 2):
                         best = self._pick(halves[pid], tracks[pid], frame_idx)
                         if best is not None:
-                            detections[pid][frame_idx] = best | {"frame": frame_idx, "pid": pid}
+                            detections[pid][frame_idx] = (self._to_frame_coords(best)
+                                                          | {"frame": frame_idx, "pid": pid})
                             tracks[pid] = (frame_idx, best)
 
                 if self.display and self._show(frame, mask, detections, frame_idx):

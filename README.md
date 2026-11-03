@@ -33,9 +33,10 @@ the one exception: it is small and fast, so it uses a YOLOv8 detector.
   background is the median of frames spread over the whole clip, so a player
   standing still to serve is still detected, and fade-ins from black do not
   matter. Identities come from the court half (through the homography), so a
-  player who is lost comes back as soon as they are visible again. Camera
+  player who is lost comes back as soon as they are visible again. The camera
+  tilting or panning a few pixels is compensated by phase correlation. Camera
   shake, cast shadows and on-screen TV graphics are filtered out. Both players
-  are found on 95–100 % of the frames of all five test clips.
+  are found on 95–100 % of the frames of all six test clips.
 - **Ball tracking measured against hand-labelled positions.** A fine-tuned
   YOLOv8x runs on full-resolution tiles, and the ball is chosen as the best
   physically plausible path through the candidates. Against hand-labelled ball
@@ -65,7 +66,7 @@ the pipeline produces:
 | Court | 98 % of the court model on detected line pixels; fitted lines within ≈1 px of the painted ones |
 | Players | both players detected on 100 % of the frames, identities fixed by court half |
 | Ball | found on 90 % of the frames (original detector: 60 %); vs hand-labelled positions: precision 1.00, recall 0.92, centre error 1.2 px |
-| Movement | near player 96.0 m covered (mean 10.7 km/h, p95 29.6 km/h); far player 105.3 m (mean 11.9 km/h, p95 27.4 km/h) |
+| Movement | near player 94.8 m covered (mean 10.6 km/h, p95 29.6 km/h); far player 104.2 m (mean 11.8 km/h, p95 27.4 km/h) |
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
 | Shot mix | 17 flat, 5 slice, 2 dropshot, 1 lob; 17 backhands, 6 forehands, 2 on the body axis (the serve included) |
 | Shot type | **23/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
@@ -119,9 +120,14 @@ flowchart LR
    result.
 2. **Player tracking** ([`tracking/player_tracking.py`](tracking/player_tracking.py)).
    The background is the per-pixel median of about 40 frames spread over the
-   whole clip, leaving out black or fade-in frames. Each frame is gain-matched to
-   it and compared with the background's local min/max over a few pixels, so the
-   slight shake of broadcast cameras does not light up the court lines. Cast
+   whole clip, leaving out black or fade-in frames, and aligned to each other.
+   Each frame is first realigned to it, because a broadcast camera can tilt or
+   pan a few pixels during a clip; the shift is measured by phase correlation.
+   The frame is then gain-matched and compared with the background's local
+   min/max over a few pixels, so the slight shake of broadcast cameras does not
+   light up the court lines. While the camera is shifted, the court lines
+   themselves are masked, and thin horizontal strips are removed from blobs.
+   Cast
    shadows are removed, and so are on-screen graphics, which stay pixel-identical
    from frame to frame. Fragments of the same person are merged, and blobs are
    kept only if their feet stand in the walkable area of the court. P1 is the
