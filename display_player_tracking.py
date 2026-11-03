@@ -8,10 +8,11 @@
                  (red cast shadow, blue on-screen graphics, yellow court lines,
                  grey far off court)
 
-Nothing is saved: the players CSV is not touched. Keys in the window: space / p
-pause and resume, n next frame while paused, q quit.
+The players CSV is not touched. If the clip has no court keypoints yet, the
+court is detected first and saved, as tracking/court_tracking.py would. Keys in
+the window: space / p pause and resume, n next frame while paused, q quit.
 
-Usage (from the project root, after the court has been detected):
+Usage (from the project root):
     python display_player_tracking.py --video data/input6.mp4
 """
 
@@ -35,6 +36,7 @@ from live_view import (
     _wait_while_paused,
     _window_size,
 )
+from tracking.court_tracking import CourtTracker
 from tracking.player_tracking import PlayerTracker
 
 WINDOW = "Player tracking stages  (space: pause, n: next, q: quit)"
@@ -124,6 +126,14 @@ def main():
 
     stem = os.path.splitext(os.path.basename(args.video))[0]
     court = args.court or os.path.join("outputs", "court_coordinates", f"{stem}_court.csv")
+    if not os.path.exists(court) and not args.court:
+        # The tracker needs the court; detect it first (this writes the court
+        # CSV and its overlay image, as tracking/court_tracking.py would).
+        print(f"No court keypoints for {args.video}: detecting the court first...")
+        try:
+            CourtTracker(args.video, no_display=True, output_dir="outputs").run()
+        except RuntimeError as exc:
+            raise SystemExit(f"Court detection failed: {exc}") from exc
     tracker = PlayerTracker(args.video, os.devnull, court, display=False)
     tracker.record_layers = True
 
