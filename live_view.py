@@ -684,7 +684,7 @@ def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
             "summary by removing this requirement.")
     sa_dir = Path(output_dir) / "shot_analysis"
     sa_dir.mkdir(parents=True, exist_ok=True)
-    track = sa.load_ball_track(ball_csv)
+    track = sa.load_ball_track(sa.ball_track_for_shots(ball_csv))
     boxes = sa.load_player_boxes(players_csv)
     conv = CourtConverter(court_csv)
     shots = sa.analyze_shots(track, boxes, conv, fps, hand_map)

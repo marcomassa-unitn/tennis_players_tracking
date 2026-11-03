@@ -36,6 +36,12 @@ the one exception: it is small and fast, so it uses a YOLOv8 detector.
   player who is lost comes back as soon as they are visible again. Camera
   shake, cast shadows and on-screen TV graphics are filtered out. Both players
   are found on 95–100 % of the frames of all five test clips.
+- **Ball tracking measured against hand-labelled positions.** A fine-tuned
+  YOLOv8x runs on full-resolution tiles, and the ball is chosen as the best
+  physically plausible path through the candidates. Against hand-labelled ball
+  positions, recall rises from 0.64 to 0.92 with no false positives, and the
+  centre error falls from 2.0 px to 1.2 px. On a second clip used only for
+  testing, recall goes from 0.72 to 0.88.
 - **Perspective-invariant shot classification.** Shot types are read from
   scale-free trajectory-shape features, so near-side and far-side shots need no
   separate calibration. It labels all 23 shots of a hand-labelled rally
@@ -58,6 +64,7 @@ the pipeline produces:
 |---|---|
 | Court | 98 % of the court model on detected line pixels; fitted lines within ≈1 px of the painted ones |
 | Players | both players detected on 100 % of the frames, identities fixed by court half |
+| Ball | found on 90 % of the frames (original detector: 60 %); vs hand-labelled positions: precision 1.00, recall 0.92, centre error 1.2 px |
 | Movement | near player 96.0 m covered (mean 10.7 km/h, p95 29.6 km/h); far player 105.3 m (mean 11.9 km/h, p95 27.4 km/h) |
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
 | Shot mix | 17 flat, 5 slice, 2 dropshot, 1 lob; 17 backhands, 6 forehands, 2 on the body axis (the serve included) |
@@ -136,14 +143,27 @@ flowchart LR
    Two stages. **Detection:** a fine-tuned YOLOv8x runs on 640 px tiles of the
    frame at native resolution, plus the whole frame. On the whole frame alone
    the ~15 px ball would shrink to ~5 px. Every candidate is kept with its
-   confidence and how much it moved since the previous frame. **Tracking:**
-   still candidates (balls held by ball kids) are discarded, and a
-   constant-velocity Kalman filter follows the ball, accepting only candidates
-   physically reachable from its last position. One-frame spikes are removed,
-   and gaps up to 0.33 s are filled with a shape-preserving cubic and flagged.
-   Detection needs a GPU and runs in the
+   confidence, its source and how much it moved since the previous frame.
+   **Tracking:** still candidates (balls held by ball kids) are discarded. The
+   ball is then the best path through the remaining candidates over the whole
+   clip, found by dynamic programming. Confident candidates earn points, while
+   links cost in proportion to the implied speed and the frames skipped, and
+   impossible speeds are forbidden. Knowing the frames after a racket hit, the
+   path picks the right candidate where a frame-by-frame filter would not.
+   One-frame spikes are removed, and gaps up to 0.33 s are filled with a
+   shape-preserving cubic and flagged. Detection needs a GPU and runs in the
    [Colab notebook](notebooks/ball_tracking_colab.ipynb). Its candidates CSV is
    reused, so tracking runs on any laptop.
+
+   | Ball vs hand-labelled positions | Precision | Recall | Centre error |
+   |---|---|---|---|
+   | Original detector (whole frame only), Input_video2 | 1.00 | 0.64 | 2.0 px |
+   | **Current**, Input_video2 (101 labelled frames) | **1.00** | **0.92** | **1.2 px** |
+   | Original detector, input_video | 0.97 | 0.72 | 2.1 px |
+   | **Current**, input_video (43 frames, test only) | **0.95** | **0.88** | **1.3 px** |
+
+   On the other test clips, the share of frames with a real detection rises from
+   44–48 % to 82–87 %.
 6. **Shot analysis** ([`analysis/shot_analysis.py`](analysis/shot_analysis.py)).
    Contacts are detected from persistent reversals of the vertical velocity and
    from acceleration peaks on the Savitzky–Golay-smoothed ball track, and are
@@ -288,6 +308,12 @@ ruff check .    # lint
 - **Distances include detection jitter.** They are summed frame by frame from
   the feet point, so the few centimetres of frame-to-frame jitter (more at the
   far end, where one pixel spans more court) inflate them.
+- **Shot analysis still reads the original ball track.** Contact detection was
+  designed and validated on the track of the original whole-frame detector.
+  On the denser new track, it sometimes takes the bounce just before a shot
+  for the contact. Shot analysis therefore reads `ball_wholeframe_<clip>.csv`,
+  which is rebuilt from the same detection run with the original rules.
+  Redesigning contact detection for the new track is future work.
 - **Ball speeds are approximate.** The homography models the ground plane, while
   the ball is airborne at contact. The metre-based shot thresholds may need
   retuning for a different camera; the scale-free ones do not.

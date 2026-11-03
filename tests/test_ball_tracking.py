@@ -7,6 +7,7 @@ from tracking.ball_tracking import (
     fill_gaps,
     tile_origins,
     track_candidates,
+    wholeframe_track,
 )
 
 FPS = 30
@@ -69,6 +70,25 @@ def test_spike_is_dropped_but_fast_straight_motion_is_kept():
     track[15] = tuple(_box(100 + 10 * 15 + 3, 500))       # small jitter: kept
     clean = drop_outliers(track)
     assert 10 not in clean and 15 in clean and len(clean) == 19
+
+
+def test_wholeframe_track_follows_the_original_rules():
+    rows = [
+        [0, *_box(100, 100), 0.70, 0.0, "frame"],    # first frame: no motion gate
+        [1, *_box(110, 100), 0.90, 0.3, "tile"],     # tile detections are ignored
+        [1, *_box(500, 500), 0.60, 0.3, "frame"],    # below the original 0.65
+        [2, *_box(120, 100), 0.80, 0.0, "frame"],    # still: rejected
+        [3, *_box(130, 100), 0.75, 0.4, "frame"],
+        [3, *_box(900, 100), 0.95, 0.4, "frame"],    # most confident wins
+    ]
+    cands = pd.DataFrame(rows, columns=["frame", "x1", "y1", "x2", "y2", "conf", "motion", "source"])
+    track = wholeframe_track(cands, 5)
+    centre = {f: ((x1 + x2) / 2, interp) for f, x1, y1, x2, y2, interp in track}
+    assert centre[0] == (100, 0) and centre[3] == (900, 0)
+    assert centre[1][1] == 1 and centre[2][1] == 1           # filled with a straight line
+    assert centre[1][0] == 100 + (900 - 100) / 3
+    assert centre[4] == (900, 1)                             # edge filled with the last position
+    assert wholeframe_track(cands.drop(columns="source"), 5) is None
 
 
 def test_tiles_cover_the_frame_with_overlap():

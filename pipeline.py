@@ -95,6 +95,8 @@ def derive_paths(video, output):
         "ball_csv": os.path.join(output, "ball_coordinates", f"ball_{stem}.csv"),
         "ball_candidates_csv": os.path.join(output, "ball_coordinates",
                                             f"ball_candidates_{stem}.csv"),
+        "ball_wholeframe_csv": os.path.join(output, "ball_coordinates",
+                                            f"ball_wholeframe_{stem}.csv"),
         "analysis_dir": os.path.join(output, "player_analysis"),
         "motion_dir": os.path.join(output, "motion_estimation"),
         "shots_dir": os.path.join(output, "shot_analysis"),
@@ -250,7 +252,8 @@ def step_ball(p, args, produced):
             return
         detector.detect_candidates(p["video"], cands)
 
-    ball_tracking.track_from_candidates(cands, p["video"], p["ball_csv"])
+    ball_tracking.track_from_candidates(cands, p["video"], p["ball_csv"],
+                                        p["ball_wholeframe_csv"])
     produced["ball_csv"] = p["ball_csv"]
 
 
@@ -272,7 +275,7 @@ def step_shots(p, args, produced):
     os.makedirs(p["shots_dir"], exist_ok=True)
     argv = [
         "shot_analysis",
-        "--ball", p["ball_csv"],
+        "--ball", shot_analysis.ball_track_for_shots(p["ball_csv"]),
         "--players", p["players_csv"],
         "--court", p["court_csv"],
         "--video", p["video"],

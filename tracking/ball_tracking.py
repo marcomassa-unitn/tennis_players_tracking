@@ -7,23 +7,30 @@ Stage 1 -- detection (needs ultralytics + the YOLOv8 weights; GPU recommended).
     ball to ~5 px; on the tiles it keeps its real size. The whole frame is kept
     too, because the model was trained on whole downscaled frames and some
     (motion-blurred) balls are only found that way. Duplicates are merged with
-    NMS, and every box above CANDIDATE_CONF is kept,
-    with the fraction of its pixels that moved since the previous frame, in
-    outputs/ball_coordinates/ball_candidates_<video name>.csv.
+    NMS, and every box above CANDIDATE_CONF is kept, with the fraction of its
+    pixels that moved since the previous frame and its source ("tile" or
+    "frame"), in outputs/ball_coordinates/ball_candidates_<video name>.csv.
 
 Stage 2 -- tracking (CPU, no model needed).
-    Still candidates are discarded (as the original motion gate did). A
-    constant-velocity Kalman filter follows the ball through the rest: a
-    candidate can only continue the track if it is physically reachable from
-    the last position (MAX_SPEED_PX); among those, confidence, motion and
-    agreement with the predicted position decide. The track restarts from the
-    strongest moving candidate after LOST_AFTER_S without the ball. Isolated
-    detections that jump away and back are dropped, and gaps up to MAX_GAP_S are
+    Still candidates are discarded (as the original motion gate did). Among
+    the rest, the ball is the best path over the whole clip (dynamic
+    programming): confident, moving candidates are rewarded, links between
+    them cost in proportion to the implied speed and to the frames skipped,
+    physically impossible links are forbidden, and restarting a track has a
+    fixed cost. Knowing the frames after a racket hit, the path picks the
+    right candidate where a frame-by-frame filter would follow the old
+    direction. Isolated detections that jump away and back are dropped, and
+    gaps up to MAX_GAP_S are
     filled with a shape-preserving cubic (PCHIP) through the real detections;
     longer gaps and the clip edges are left empty.
 
 Output: outputs/ball_coordinates/ball_<video name>.csv with
 frame, x, y, w, h, cx, cy, area, interpolated.
+
+Also written, from the "frame" candidates only: ball_wholeframe_<video name>.csv,
+the track of the original single-pass detector (whole frame, conf >= 0.65,
+motion gate, highest confidence, straight-line fills). Shot analysis was
+designed and validated on that track and still uses it; see the README.
 
 Usage (from project root):
     python tracking/ball_tracking.py --video data/Input_video2.mp4             # both stages
@@ -55,20 +62,23 @@ NMS_IOU = 0.3              # merge duplicates of the same ball from overlapping 
 MOTION_THRESH = 15         # per-pixel intensity change (0-255) that counts as motion
 
 # ── Stage 2: tracking (pixel values for 1080p, scaled with the frame height) ──
-MIN_TRACK_CONF = 0.25      # candidates below this are ignored by the tracker
+MIN_TRACK_CONF = 0.15      # candidates below this are ignored by the tracker
 MIN_MOTION = 0.05          # ...and so are still ones (balls held by ball kids or in
                            # pockets): at least this fraction of the box must move
-ACQUIRE_CONF = 0.5         # starting a track needs a confident candidate
 MAX_SPEED_PX = 150         # per frame: farther candidates cannot be the same ball
+CONF_BIAS = 0.3            # a node is worth conf + MOTION_BONUS * motion - CONF_BIAS
+MOTION_BONUS = 0.2
+SPEED_COST = 0.004         # path cost per px/frame of speed between linked nodes...
+SKIP_COST = 0.1            # ...plus this per frame skipped between them
+MAX_LINK_S = 0.33          # nodes farther apart in time can only be joined by a restart
+RESTART_COST = 1.0         # starting a new path segment
 SPIKE_SPEED_PX = 80        # a detection this fast in and out...
 SPIKE_DETOUR = 3.0         # ...on a path this much longer than its neighbours' gap
                            # is a one-frame false positive
-LOST_AFTER_S = 0.33        # without the ball this long, the track restarts
-ACCEL_STD_PX = 12          # Kalman process noise: hits and bounces change velocity
-MEAS_STD_PX = 3            # Kalman measurement noise: detection jitter
 MAX_GAP_S = 0.33           # gaps up to this long are filled; longer ones stay empty
 
-CANDIDATE_COLUMNS = ["frame", "x1", "y1", "x2", "y2", "conf", "motion"]
+CANDIDATE_COLUMNS = ["frame", "x1", "y1", "x2", "y2", "conf", "motion", "source"]
+WHOLEFRAME_CONF = 0.65     # the original detector's confidence threshold
 BALL_COLUMNS = ["frame", "x", "y", "w", "h", "cx", "cy", "area", "interpolated"]
 
 
@@ -104,24 +114,33 @@ class BallDetector:
         self.model = YOLO(model_path)
 
     def detect_frame(self, frame):
-        """[(x1, y1, x2, y2, conf), ...] for one frame: tiles + whole frame, merged."""
+        """[(x1, y1, x2, y2, conf, source), ...] for one frame.
+
+        source "tile": full-resolution tiles, duplicates merged across tiles;
+        source "frame": the whole frame in its own call, exactly as the original
+        single-pass detector ran it (so its track can be rebuilt bit for bit).
+        """
         h, w = frame.shape[:2]
         origins = tile_origins(w, h)
-        tiles = [frame[y:y + TILE, x:x + TILE] for x, y in origins]
-        if len(origins) > 1:                 # the whole frame, downscaled as in training
-            tiles.append(frame)
-            origins.append((0, 0))
-        results = self.model.predict(tiles, imgsz=TILE, conf=CANDIDATE_CONF, verbose=False)
-        boxes, scores = [], []
-        for (ox, oy), r in zip(origins, results):
-            for (x1, y1, x2, y2), c in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy()):
-                boxes.append([float(x1 + ox), float(y1 + oy), float(x2 - x1), float(y2 - y1)])
-                scores.append(float(c))
-        if not boxes:
-            return []
-        keep = cv2.dnn.NMSBoxes(boxes, scores, CANDIDATE_CONF, NMS_IOU)
-        return [(boxes[i][0], boxes[i][1], boxes[i][0] + boxes[i][2],
-                 boxes[i][1] + boxes[i][3], scores[i]) for i in np.array(keep).ravel()]
+        out = []
+        if len(origins) > 1:
+            tiles = [frame[y:y + TILE, x:x + TILE] for x, y in origins]
+            results = self.model.predict(tiles, imgsz=TILE, conf=CANDIDATE_CONF, verbose=False)
+            boxes, scores = [], []
+            for (ox, oy), r in zip(origins, results):
+                for (x1, y1, x2, y2), c in zip(r.boxes.xyxy.cpu().numpy(),
+                                               r.boxes.conf.cpu().numpy()):
+                    boxes.append([float(x1 + ox), float(y1 + oy), float(x2 - x1), float(y2 - y1)])
+                    scores.append(float(c))
+            if boxes:
+                keep = cv2.dnn.NMSBoxes(boxes, scores, CANDIDATE_CONF, NMS_IOU)
+                out += [(boxes[i][0], boxes[i][1], boxes[i][0] + boxes[i][2],
+                         boxes[i][1] + boxes[i][3], scores[i], "tile")
+                        for i in np.array(keep).ravel()]
+        r = self.model.predict(frame, conf=CANDIDATE_CONF, verbose=False)[0]
+        out += [(*map(float, b), float(c), "frame")
+                for b, c in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy())]
+        return out
 
     def detect_candidates(self, video_path, out_csv):
         """Write every candidate of every frame to `out_csv`; return the frame count."""
@@ -138,10 +157,11 @@ class BallDetector:
                 if not ok:
                     break
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                for x1, y1, x2, y2, conf in self.detect_frame(frame):
+                for x1, y1, x2, y2, conf, source in self.detect_frame(frame):
                     rows.append([idx, round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1),
                                  round(conf, 4),
-                                 round(motion_fraction(prev_gray, gray, (x1, y1, x2, y2)), 3)])
+                                 round(motion_fraction(prev_gray, gray, (x1, y1, x2, y2)), 3),
+                                 source])
                 prev_gray = gray
                 idx += 1
                 if idx % 100 == 0:
@@ -160,76 +180,71 @@ class BallDetector:
 
 # ═════════════════════════════ Stage 2: tracking ══════════════════════════════
 
-class _Kalman:
-    """Constant-velocity Kalman filter on the ball centre (pixels, 1 step = 1 frame)."""
-
-    F = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], float)
-    H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], float)
-
-    def __init__(self, xy, accel_std, meas_std):
-        self.x = np.array([xy[0], xy[1], 0.0, 0.0])
-        self.P = np.diag([meas_std ** 2, meas_std ** 2, 50.0 ** 2, 50.0 ** 2])
-        # Piecewise-constant random acceleration: Q = G G^T sigma_a^2.
-        G = np.array([[0.5, 0.0], [0.0, 0.5], [1.0, 0.0], [0.0, 1.0]])
-        self.Q = G @ G.T * accel_std ** 2
-        self.R = np.eye(2) * meas_std ** 2
-
-    def predict(self):
-        self.x = self.F @ self.x
-        self.P = self.F @ self.P @ self.F.T + self.Q
-        return self.x[:2]
-
-    def update(self, xy):
-        y = np.asarray(xy, float) - self.H @ self.x
-        S = self.H @ self.P @ self.H.T + self.R
-        K = self.P @ self.H.T @ np.linalg.inv(S)
-        self.x = self.x + K @ y
-        self.P = (np.eye(4) - K @ self.H) @ self.P
-
-
 def track_candidates(cands, n_frames, fps, frame_height=1080):
-    """Pick the ball among per-frame candidates.
+    """Pick the ball among per-frame candidates with the best path over the clip.
+
+    Offline dynamic programming (Viterbi-style) on a graph whose nodes are the
+    candidates. A node earns its confidence (plus a motion bonus) minus
+    CONF_BIAS; linking two nodes up to MAX_LINK_S apart costs SPEED_COST per
+    px/frame of the implied speed plus SKIP_COST per skipped frame, and is
+    forbidden above MAX_SPEED_PX. A path may also stop and restart elsewhere
+    for RESTART_COST, which a few good detections easily pay for but a weak
+    isolated object does not. Because the whole clip is known, a racket hit is
+    resolved by the frames after it, which a frame-by-frame filter cannot use.
 
     cands: DataFrame with CANDIDATE_COLUMNS. Returns {frame: (x1, y1, x2, y2)}
-    of the real detections kept by the tracker.
+    of the real detections on the best path.
     """
     s = frame_height / 1080
     max_speed = MAX_SPEED_PX * s
-    lost_after = max(2, int(round(LOST_AFTER_S * fps)))
-    cands = cands[(cands.conf >= MIN_TRACK_CONF) & (cands.motion >= MIN_MOTION)]
-    by_frame = {f: g.to_numpy() for f, g in cands.groupby("frame")}
+    max_link = max(1, int(round(MAX_LINK_S * fps)))
+    first = int(cands.frame.min()) if len(cands) else 0
+    # Still candidates are not the ball in play (motion is undefined on the
+    # first frame, which has no previous frame to compare with).
+    keep = (cands.conf >= MIN_TRACK_CONF) & ((cands.motion >= MIN_MOTION) | (cands.frame == first))
+    cands = cands[keep]
+    frames = sorted(cands.frame.unique())
+    numeric = ["frame", "x1", "y1", "x2", "y2", "conf", "motion"]
+    rows = {f: g[numeric].to_numpy(float) for f, g in cands.groupby("frame")}
+    pos = {f: np.c_[(r[:, 1] + r[:, 3]) / 2, (r[:, 2] + r[:, 4]) / 2] for f, r in rows.items()}
+    gain = {f: r[:, 5] + MOTION_BONUS * np.minimum(r[:, 6], 0.5) - CONF_BIAS for f, r in rows.items()}
 
-    track = {}
-    kf, last_xy, last_frame = None, None, None
-    for f in range(n_frames):
-        rows = by_frame.get(f)
-        missed = f - last_frame if last_frame is not None else None
-        if kf is not None and missed > lost_after:
-            kf = None                                   # lost: restart from scratch
-        pred = kf.predict() if kf is not None else None
-        if rows is None:
-            continue
-        centres = np.c_[(rows[:, 1] + rows[:, 3]) / 2, (rows[:, 2] + rows[:, 4]) / 2]
-        conf, motion = rows[:, 5], rows[:, 6]
-        if kf is None:
-            ok = conf >= ACQUIRE_CONF
-            if not ok.any():
-                continue
-            k = int(np.argmax(np.where(ok, conf, -1)))
-            kf = _Kalman(centres[k], ACCEL_STD_PX * s, MEAS_STD_PX * s)
-        else:
-            # Physically reachable from the last detection...
-            reach = np.hypot(*(centres - last_xy).T) <= max_speed * missed
-            if not reach.any():
-                continue
-            # ...then prefer confident candidates near the prediction.
-            spread = max(20 * s, np.sqrt(np.trace(kf.P[:2, :2])))
-            d_pred = np.hypot(*(centres - pred).T) / spread
-            score = np.where(reach, conf + 0.2 * motion - 0.5 * d_pred, -np.inf)
-            k = int(np.argmax(score))
-            kf.update(centres[k])
-        track[f] = tuple(rows[k, 1:5])
-        last_xy, last_frame = centres[k], f
+    best, back = {}, {}                 # best path score ending at each node, and its parent
+    run_best = (0.0, None)              # best score among nodes older than the link window
+    pending = []                        # frames whose nodes are still within the window
+    for f in frames:
+        while pending and pending[0] < f - max_link:
+            g = pending.pop(0)
+            k = int(np.argmax(best[g]))
+            if best[g][k] > run_best[0]:
+                run_best = (best[g][k], (g, k))
+        n = len(pos[f])
+        # Start (or restart after the window) a path at this node.
+        score = np.full(n, run_best[0] - RESTART_COST)
+        parent = [run_best[1]] * n
+        for g in pending:              # link from candidates in the previous frames
+            gap = f - g
+            speed = np.hypot(pos[f][None, :, 0] - pos[g][:, None, 0],
+                             pos[f][None, :, 1] - pos[g][:, None, 1]) / gap
+            cost = SPEED_COST * speed / s + SKIP_COST * (gap - 1)
+            cost[speed > max_speed] = np.inf
+            via = best[g][:, None] - cost
+            i = np.argmax(via, axis=0)
+            better = via[i, np.arange(n)] > score
+            score = np.where(better, via[i, np.arange(n)], score)
+            parent = [(g, int(i[j])) if better[j] else parent[j] for j in range(n)]
+        best[f] = score + gain[f]
+        back[f] = parent
+        pending.append(f)
+
+    if not best:
+        return {}
+    end = max(((f, int(np.argmax(v))) for f, v in best.items()), key=lambda fk: best[fk[0]][fk[1]])
+    track, node = {}, end
+    while node is not None:
+        f, k = node
+        track[int(f)] = tuple(rows[f][k, 1:5])
+        node = back[f][k]
     return track
 
 
@@ -294,6 +309,29 @@ def fill_gaps(track, fps):
     return rows
 
 
+def wholeframe_track(cands, n_frames):
+    """The original detector's track, rebuilt from the "frame" candidates.
+
+    Per frame, the most confident whole-frame box with conf >= WHOLEFRAME_CONF
+    that moved (no motion gate on the first frame, which has no previous one);
+    every gap filled with a straight line, the clip edges with the nearest
+    position. Returns rows like fill_gaps(), or None without "frame" candidates.
+    """
+    if "source" not in cands.columns or not (cands.source == "frame").any():
+        return None
+    first = int(cands.frame.min())
+    c = cands[(cands.source == "frame") & (cands.conf >= WHOLEFRAME_CONF)
+              & ((cands.motion >= MIN_MOTION) | (cands.frame == first))]
+    best = c.loc[c.groupby("frame").conf.idxmax()].set_index("frame")
+    df = pd.DataFrame(np.nan, index=range(n_frames), columns=["x1", "y1", "x2", "y2"])
+    df.loc[best.index, ["x1", "y1", "x2", "y2"]] = best[["x1", "y1", "x2", "y2"]].to_numpy()
+    real = df.x1.notna().to_numpy()
+    df = df.interpolate(limit_direction="both").bfill().ffill()
+    if df.x1.isna().all():
+        return []
+    return [(f, *df.loc[f].to_numpy(), int(not real[f])) for f in range(n_frames)]
+
+
 def write_ball_csv(rows, out_csv):
     os.makedirs(os.path.dirname(out_csv) or ".", exist_ok=True)
     with open(out_csv, "w", newline="") as f:
@@ -305,8 +343,8 @@ def write_ball_csv(rows, out_csv):
                          w * h, interp])
 
 
-def track_from_candidates(candidates_csv, video_path, out_csv):
-    """Stage 2: candidates CSV -> ball CSV. Returns a short summary dict."""
+def track_from_candidates(candidates_csv, video_path, out_csv, wholeframe_csv=None):
+    """Stage 2: candidates CSV -> ball CSV (and the whole-frame track, if asked)."""
     cap = cv2.VideoCapture(video_path)
     fps = safe_fps(cap.get(cv2.CAP_PROP_FPS))
     n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -326,6 +364,14 @@ def track_from_candidates(candidates_csv, video_path, out_csv):
           f"({summary['detected'] / max(n_frames, 1):.0%}), "
           f"{summary['outliers_dropped']} outliers dropped, "
           f"{summary['interpolated']} gap frames filled -> {out_csv}")
+    if wholeframe_csv:
+        legacy = wholeframe_track(cands, n_frames)
+        if legacy is None:
+            print("  (candidates have no whole-frame source column: whole-frame track "
+                  "not written; re-run detection to get it)")
+        else:
+            write_ball_csv(legacy, wholeframe_csv)
+            print(f"  whole-frame track for shot analysis -> {wholeframe_csv}")
     return summary
 
 
@@ -360,7 +406,8 @@ def default_paths(video, output_dir="outputs"):
     stem = os.path.splitext(os.path.basename(video))[0]
     base = os.path.join(output_dir, "ball_coordinates")
     return (os.path.join(base, f"ball_candidates_{stem}.csv"),
-            os.path.join(base, f"ball_{stem}.csv"))
+            os.path.join(base, f"ball_{stem}.csv"),
+            os.path.join(base, f"ball_wholeframe_{stem}.csv"))
 
 
 if __name__ == "__main__":
@@ -368,8 +415,8 @@ if __name__ == "__main__":
     DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "models", "ball_tracker.pt")
 
     parser = argparse.ArgumentParser(
-        description="Ball tracking: YOLO candidates on full-resolution tiles, then a "
-                    "Kalman tracker with outlier removal and gap filling")
+        description="Ball tracking: YOLO candidates on full-resolution tiles, then the "
+                    "best path through them, outlier removal and gap filling")
     parser.add_argument("--video", default="data/Input_video2.mp4", help="input video")
     parser.add_argument("--model", default=DEFAULT_MODEL,
                         help="YOLO ball-detector weights (.pt), needed by stage 1")
@@ -383,8 +430,11 @@ if __name__ == "__main__":
                         help="also write an annotated copy of the video here")
     args = parser.parse_args()
 
-    cand_csv, ball_csv = default_paths(args.video)
-    ball_csv = args.csv or ball_csv
+    cand_csv, ball_csv, wholeframe_csv = default_paths(args.video)
+    if args.csv:
+        ball_csv = args.csv
+        wholeframe_csv = os.path.join(os.path.dirname(args.csv) or ".",
+                                      "wholeframe_" + os.path.basename(args.csv))
     if args.candidates:
         cand_csv = args.candidates
     else:
@@ -394,6 +444,6 @@ if __name__ == "__main__":
                              "only with --candidates <csv>.")
         BallDetector(args.model).detect_candidates(args.video, cand_csv)
     if not args.detect_only:
-        track_from_candidates(cand_csv, args.video, ball_csv)
+        track_from_candidates(cand_csv, args.video, ball_csv, wholeframe_csv)
         if args.video_out:
             render_video(args.video, ball_csv, args.video_out)

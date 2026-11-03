@@ -104,6 +104,23 @@ def load_ball_track(ball_csv: str) -> pd.DataFrame:
     return full
 
 
+def ball_track_for_shots(ball_csv: str) -> str:
+    """The ball CSV that shot detection should read for `ball_csv`.
+
+    Shot detection was designed and validated on the track of the original
+    single-pass, whole-frame detector. The default ball track now comes from a
+    denser multi-scale detector and a different tracker, which changes the
+    timing of the contact candidates, so the whole-frame track written next to
+    it (ball_wholeframe_<video>.csv) is used when it exists.
+    """
+    folder, name = os.path.split(ball_csv)
+    if name.startswith("ball_") and not name.startswith(("ball_wholeframe_", "ball_candidates_")):
+        alt = os.path.join(folder, "ball_wholeframe_" + name[len("ball_"):])
+        if os.path.exists(alt):
+            return alt
+    return ball_csv
+
+
 def load_player_boxes(players_csv: str) -> dict:
     """{frame: {pid: (x, y, w, h)}} from the player tracker CSV."""
     df = pd.read_csv(players_csv)
@@ -1107,7 +1124,8 @@ def type_self_test(ball_csv: str = None, players_csv: str = None,
     detections are ignored. Exits non-zero if accuracy < 90 %.
     """
     base = Path(__file__).resolve().parent.parent / "outputs"
-    ball_csv = ball_csv or str(base / "ball_coordinates" / "ball_Input_video2.csv")
+    ball_csv = ball_csv or ball_track_for_shots(
+        str(base / "ball_coordinates" / "ball_Input_video2.csv"))
     players_csv = players_csv or str(
         base / "player_coordinates" / "players_Input_video2.csv")
     court_csv = court_csv or str(
@@ -1476,8 +1494,8 @@ def main() -> None:
     # Derive missing CSV paths from the video stem, matching the producers' defaults.
     video_stem = os.path.splitext(os.path.basename(args.video))[0]
     if args.ball is None:
-        args.ball = os.path.join("outputs", "ball_coordinates",
-                                 f"ball_{video_stem}.csv")
+        args.ball = ball_track_for_shots(os.path.join("outputs", "ball_coordinates",
+                                                      f"ball_{video_stem}.csv"))
     if args.players is None:
         args.players = os.path.join("outputs", "player_coordinates",
                                     f"players_{video_stem}.csv")
