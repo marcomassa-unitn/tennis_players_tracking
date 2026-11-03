@@ -1276,7 +1276,7 @@ def overhead_self_test() -> None:
         bw, bh = 90.0, 200.0
 
         # ── (a) SERVE from the server's motion ─────────────────────────────────
-        # Near player just behind his baseline; far player standing still.
+        # Near player just behind their baseline; far player standing still.
         feet = m2px(W_m / 2.0, L_m + 0.3)
         far_feet = m2px(W_m / 2.0, -0.5)
         heights = {f: bh for f in range(150)}
