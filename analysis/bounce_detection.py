@@ -280,7 +280,10 @@ def detect_bounces(ball, boxes, conv, fps, serves=(), params=None):
 
 
 def save_bounce_map(bounces: pd.DataFrame, out_dir) -> None:
-    """Plot the landing points on the court, reusing player_analysis's drawing."""
+    """Plot the landing points on the court, numbered in rally order.
+
+    Reuses player_analysis's court drawing.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -292,11 +295,11 @@ def save_bounce_map(bounces: pd.DataFrame, out_dir) -> None:
     _draw_court(ax)
     ax.set_facecolor("#1a1a2e")
     ax.patch.set_visible(True)
-    ax.scatter(bounces["x_m"], bounces["y_m"], s=70, zorder=5, edgecolors="white",
+    ax.scatter(bounces["x_m"], bounces["y_m"], s=190, zorder=5, edgecolors="white",
                c=np.where(bounces["reliable"], "#f6c945", "#888888"))
-    for r in bounces.itertuples():
-        ax.annotate(f"{r.frame:.0f}", (r.x_m, r.y_m), xytext=(6, 4), color="white",
-                    textcoords="offset points", fontsize=7, zorder=6)
+    for order, r in enumerate(bounces.itertuples(), start=1):
+        ax.text(r.x_m, r.y_m, str(order), color="#1a1a2e", fontsize=8, fontweight="bold",
+                ha="center", va="center", zorder=6)
     ax.set_title("Bounces (grey: uncertain landing point)", color="white")
     path = Path(out_dir) / "bounce_map.png"
     fig.savefig(path, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
@@ -343,7 +346,7 @@ def main() -> None:
     bounces.to_csv(path, index=False)
     print(f"Saved: {path}  ({len(bounces)} bounces, "
           f"{int(bounces['reliable'].sum())} with a reliable landing point)")
-    if not args.no_map and not bounces.empty:
+    if not args.no_map:
         save_bounce_map(bounces, out_dir)
 
 

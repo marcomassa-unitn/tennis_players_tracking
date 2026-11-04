@@ -11,6 +11,7 @@ from analysis.bounce_detection import (
     detect_bounces,
     detect_events,
     load_real_detections,
+    save_bounce_map,
 )
 from analysis.shot_analysis import _synthetic_court_csv, shot_flight
 from utils.court_converter import CourtConverter
@@ -158,3 +159,11 @@ def test_load_real_detections_drops_the_filled_gaps(tmp_path):
     pd.DataFrame({"frame": [1, 2, 3], "cx": [10.0, 20.0, 30.0], "cy": [5.0, 6.0, 7.0],
                   "interpolated": [0, 1, 0]}).to_csv(path, index=False)
     assert list(load_real_detections(str(path))["frame"]) == [1, 3]
+
+
+@pytest.mark.parametrize("rows", [0, 3])
+def test_the_bounce_map_is_saved_even_with_no_bounces(tmp_path, rows):
+    bounces = pd.DataFrame({"x_m": [4.0] * rows, "y_m": [6.0] * rows, "frame": [1.0] * rows,
+                            "reliable": [True] * rows})
+    save_bounce_map(bounces, tmp_path)
+    assert (tmp_path / "bounce_map.png").exists()

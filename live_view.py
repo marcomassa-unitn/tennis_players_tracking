@@ -643,10 +643,10 @@ def _analysis_ready(clip_dir, shots_csv) -> bool:
 
 def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
                                fps, min_area, anchor):
-    """Regenerate the three summary figures in-process, headless.
+    """Regenerate the summary figures in-process, headless.
 
-    heatmap_combined.png + zones.png (player_analysis) and shot_hitmap.png
-    (shot_analysis) only — the slow minimap.gif and per-shot PNGs are skipped.
+    heatmap_combined.png + zones.png (player_analysis), shot_hitmap.png
+    (shot_analysis) and bounce_map.png (bounce_detection) only — the slow minimap.gif and per-shot PNGs are skipped.
     Agg backend, so nothing pops up. Raises on any failure so the caller aborts
     (the figures are required for the end-of-clip summary).
     """
@@ -654,7 +654,7 @@ def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
 
     from analysis import player_analysis as pa
     from analysis import shot_analysis as sa
-    from analysis.bounce_detection import bounces_from_events, clip_events
+    from analysis.bounce_detection import bounces_from_events, clip_events, save_bounce_map
     from utils.court_converter import CourtConverter
 
     fps = fps or 30.0
@@ -684,7 +684,9 @@ def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
     # Same shots as the pipeline: contacts and types rely on the bounces.
     events = clip_events(ball_csv, boxes, conv, fps)
     events.to_csv(sa_dir / "events.csv", index=False)
-    bounces_from_events(events).to_csv(sa_dir / "bounces.csv", index=False)
+    bounces = bounces_from_events(events)
+    bounces.to_csv(sa_dir / "bounces.csv", index=False)
+    save_bounce_map(bounces, sa_dir)                       # -> bounce_map.png
     shots = sa.analyze_shots(track, boxes, conv, fps, hand_map, events=events,
                              real_ball=sa.load_real_detections(ball_csv))
     shots.to_csv(sa_dir / "shots.csv", index=False)
@@ -699,6 +701,7 @@ _SUMMARY_FIGS = [
     ("Combined heatmap", os.path.join("player_analysis", "heatmap_combined.png")),
     ("Court zones",      os.path.join("player_analysis", "zones.png")),
     ("Shot hitmap",      os.path.join("shot_analysis",   "shot_hitmap.png")),
+    ("Bounces",          os.path.join("shot_analysis",   "bounce_map.png")),
 ]
 _SUMMARY_BG = (26, 26, 46)   # dark indigo, matches the analysis figures' bg (BGR)
 
@@ -726,7 +729,7 @@ def _summary_panel(title: str, img, panel_h: int, bar_h: int = 34) -> np.ndarray
 def _show_summary_window(output_dir: str, window_name: str,
                          screen_fraction: float = SCREEN_FRACTION,
                          panel_h: int = 660) -> bool:
-    """Open a separate, centred window tiling heatmap | zones | shot hitmap.
+    """Open a separate, centred window tiling heatmap | zones | hitmap | bounces.
 
     Returns True if at least one figure was found. Missing figures become a
     labelled placeholder rather than an error, so a partial pipeline still works.
@@ -993,9 +996,9 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
                 stats, (PANEL_W, disp_h - mini_h), interpolation=cv2.INTER_AREA)
             cv2.imshow(win, _fit_to_screen(final, window_width))
             # Separate window tiling the whole-clip analysis figures.
-            summary_win = "Clip summary  (combined heatmap | zones | shot hitmap)"
+            summary_win = "Clip summary  (heatmap | zones | shot hitmap | bounces)"
             if _show_summary_window(output_dir, summary_win, screen_fraction):
-                print(f"  Summary window: combined heatmap + zones + shot hitmap "
+                print(f"  Summary window: heatmap + zones + shot hitmap + bounces "
                       f"(from {output_dir}).")
             print("  Clip finished - frozen on last frame; press 'q' to quit.")
             while True:
