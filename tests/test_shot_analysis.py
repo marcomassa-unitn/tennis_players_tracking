@@ -13,6 +13,7 @@ from analysis.shot_analysis import (
     BOUNCE_NEAR,
     HIT_FAR,
     _synthetic_court_csv,
+    analyze_shots,
     classify_flight,
     detect_serves,
     is_volley,
@@ -107,3 +108,15 @@ def test_a_swing_just_after_a_serve_is_the_return(conv):
     for f, players in _server_boxes(conv, 2, 0, 150, 90).items():
         boxes[f].update(players)
     assert [s[:2] for s in detect_serves(boxes, conv, 30.0, [])] == [(40, 1)]
+
+
+def test_a_serve_is_placed_where_the_server_stood_before_the_jump(conv):
+    boxes = _server_boxes(conv, 1, 0, 150, 67)
+    x, y, w, h = boxes[67][1]
+    boxes[67][1] = (x, y - 60.0, w, h)                # feet off the ground at contact
+    track = pd.DataFrame({"cx": 900.0, "cy": 400.0, "h": 12.0, "interp": False},
+                         index=pd.RangeIndex(150, name="frame"))
+    shots = analyze_shots(track, boxes, conv, 30.0, {1: "right", 2: "right"})
+    serve = shots[shots["overhead"] == "serve"].iloc[0]
+    assert serve["frame"] == 67
+    assert serve["player_y_m"] == pytest.approx(L_m + 0.3, abs=0.05)

@@ -895,7 +895,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
     # "shots" during the toss are the toss release, not contacts: replace them
     # with the serve contact.
     serves = detect_serves(boxes, conv, fps, hits)
-    serve_frames = {c for c, _, _ in serves}
+    serve_starts = {c: start for c, _, start in serves}
     for contact, pid, phase_start in serves:
         lo, hi = phase_start - 0.5 * fps, contact + 0.3 * fps
         hits = [h for h in hits if not (h[1] == pid and lo <= h[0] <= hi)]
@@ -911,7 +911,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         box = _nearest_box(boxes, f, pid)
         if box is None:
             continue
-        is_serve = f in serve_frames
+        is_serve = f in serve_starts
         # ±2-frame median ball position (denoise)
         sel = track.loc[max(track.index.min(), f - 2): f + 2]
         # An all-NaN window (ball never seen here) would give nanmedian = NaN and
@@ -930,7 +930,10 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
             ball_cy = float(np.nanmedian(cy_win))
         ball_cx, ball_cy = ball_at.get(f, (ball_cx, ball_cy))
 
-        feet = _box_feet(box)
+        # A server is in the air at contact, and feet off the ground project to the
+        # wrong place on the court: take the stance, before the jump.
+        stance = _nearest_box(boxes, serve_starts[f], pid) if is_serve else None
+        feet = _box_feet(stance or box)
         # Player feet in meters — the hitmap marks where the PLAYER struck, not the ball.
         player_x_m, player_y_m = conv.to_meters(*feet)
         side = "near" if player_y_m > NET else "far"

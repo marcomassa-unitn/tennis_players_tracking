@@ -193,7 +193,9 @@ flowchart LR
    own baseline, after a quiet spell with no opponent shot, whose box (in metres
    at the feet) stays raised by the toss and racket and then peaks at contact.
    The last peak is taken as the contact, so neither the toss release nor a gap
-   in the ball track is mistaken for it. Smashes are read from the ball (an
+   in the ball track is mistaken for it. The serve is placed where the server stood
+   before jumping, since feet in the air project to the wrong spot on the court.
+   Smashes are read from the ball (an
    above-head contact on a descending ball, driven down). Both go in a separate,
    conservative overhead column.
 7. **Bounce detection** ([`analysis/bounce_detection.py`](analysis/bounce_detection.py)).
