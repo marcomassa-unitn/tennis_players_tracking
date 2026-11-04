@@ -91,6 +91,11 @@ classifier.
   <br><em>Left: fitted court model (yellow) and the 8 keypoints (red). Right: dense optical flow (hue = direction, brightness = magnitude).</em>
 </p>
 
+<p align="center">
+  <img src="assets/impact_comparison.gif" alt="Ball path on the court: bending at every bounce when shots sit at the player's feet, straight when impacts sit on the flight line" width="365">
+  <br><em>Seen from above, a bounce does not turn the ball. Left: with shots placed at the player's feet, the path bends at every bounce, by an arm and a racket. Right: with impacts placed on the flight line, it runs straight. Those impacts also tell forehand from backhand on the court.</em>
+</p>
+
 ## How it works
 
 ```mermaid

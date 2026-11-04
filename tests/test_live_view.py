@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from analysis.impact_comparison import _trail
 from live_view import PANEL_W, BallMap, ball_ground_path, compose, load_bounce_markers
 
 FPS = 30.0
@@ -67,3 +68,10 @@ def test_the_ball_column_sits_between_the_video_and_the_panels():
     assert canvas[:, 960:960 + 260].any()
     without = compose(frame, side, side, 540, PANEL_W, 270)
     assert without.shape == (540, 960 + PANEL_W, 3)
+
+
+def test_the_trail_stops_where_the_path_is_interrupted():
+    path = {f: (float(f), 0.0) for f in (1, 2, 5, 6, 7)}
+    assert _trail(path, 7, 10) == [(5.0, 0.0), (6.0, 0.0), (7.0, 0.0)]
+    assert _trail(path, 7, 2) == [(6.0, 0.0), (7.0, 0.0)]
+    assert _trail(path, 4, 10) == []
