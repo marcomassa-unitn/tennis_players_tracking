@@ -94,7 +94,7 @@ _LEG_TOP   = 14              # baseline y of the first row (px)
 _LEG_GAP   = 6              # gap between a symbol and its label (px)
 # Stable category order so legend/stats rows never reshuffle as shots accumulate.
 _LEG_ORDER = ["forehand", "backhand", "slice", "dropshot",
-              "lob", "serve", "smash", "unknown"]
+              "lob", "volley", "serve", "smash", "unknown"]
 
 # On-VIDEO player box colours, matching player_tracking._draw_players (P1 green,
 # P2 red). Minimap dots reuse these via _DOT_BGR; the "P1"/"P2" labels carry id.

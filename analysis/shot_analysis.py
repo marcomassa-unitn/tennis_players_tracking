@@ -56,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_converter import CourtConverter
 
 # Court dimensions shared via utils/court_geometry.
-from utils.court_geometry import _FT, NET, L_m, W_m
+from utils.court_geometry import _FT, NET, SVC_T, L_m, W_m
 
 # ── loading ────────────────────────────────────────────────────────────────────
 
@@ -643,6 +643,7 @@ SERVE_PARAMS = {
     "max_move_m": 1.5,       # feet displacement during the phase (server stands)
     "quiet_s": 2.5,          # no opponent shot in this time before the phase
     "next_shot_s": 1.0,      # the same player striking again this soon: not a serve
+    "min_tail_s": 0.3,       # the clip must go on this long after the contact
 }
 
 
@@ -714,6 +715,9 @@ def detect_serves(boxes, conv, fps, hits, params=None):
                      and (k == len(seg) - 1 or seg[k] >= seg[k + 1])]
             contact_k = a + peaks[-1]
             contact, phase_start = int(frames[contact_k]), int(frames[a])
+            # A phase cut by the end of the clip has no real peak.
+            if frames[-1] - contact < p["min_tail_s"] * fps:
+                continue
 
             # Near their own baseline (or behind it) and standing.
             y = feet_m[a, 1]
@@ -733,7 +737,13 @@ def detect_serves(boxes, conv, fps, hits, params=None):
             if later and min(later)[1] == pid:
                 continue
             serves.append((contact, pid, phase_start))
-    return sorted(serves)
+
+    # A big swing just after a serve is the return, not another serve.
+    kept = []
+    for serve in sorted(serves):
+        if not kept or serve[2] - kept[-1][0] > p["quiet_s"] * fps:
+            kept.append(serve)
+    return kept
 
 
 # ── contacts that are really bounces ───────────────────────────────────────────
@@ -786,6 +796,7 @@ def move_contacts_off_bounces(hits, events, fps, min_gap_s=0.5, params=None):
 # Once a shot's bounce is known its type comes from the flight itself, which is
 # physics rather than image shape. A rally ball crosses in under a second; of the
 # slower ones a dropshot lands short, a lob flies high, and a slice floats low.
+# A volley is told by what came before: the ball never touched the ground.
 
 FLIGHT_PARAMS = {
     "slow_flight_s": 1.05,   # a longer flight is no longer a rally ball
@@ -834,6 +845,22 @@ def classify_flight(flight, params=None):
     if flight["depth_m"] <= p["drop_depth_m"]:
         return "dropshot"
     return "lob" if flight["apex_m"] >= p["lob_apex_m"] else "slice"
+
+
+def is_volley(contact, pid, y_m, previous, events, fps, params=None):
+    """True for a shot played inside the service line, before the ball bounced.
+
+    `previous` is the shot before, (frame, player, ...) or None. The service line
+    matters: a bounce hidden behind a player at the baseline also leaves no bounce
+    in `events`, and nobody volleys from there.
+    """
+    p = params or FLIGHT_PARAMS
+    if previous is None or previous[1] == pid or abs(y_m - NET) >= NET - SVC_T:
+        return False
+    landed = events[(events["event"] == BOUNCE_OF_PLAYER[pid])
+                    & (events["frame"] > previous[0])
+                    & (events["frame"] <= contact + p["late_bounce_s"] * fps)]
+    return landed.empty
 
 
 def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
@@ -921,6 +948,9 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                                  events, real_ball, conv, fps)
         if flight is not None:
             shot_type = classify_flight(flight)
+        if events is not None and not is_serve and is_volley(
+                f, pid, player_y_m, hits[k - 1] if k else None, events, fps):
+            shot_type = "volley"
 
         # Overhead (serve/smash): separate column; wrapped so short/missing data
         # yields "" rather than raising. Serves are already known; the ball-based
@@ -1014,7 +1044,7 @@ def print_summary(shots: pd.DataFrame, hands: dict) -> None:
               f"-  forehands {n_fh}, backhands {n_bh}, unknown {n_uk}")
     if has_type:
         print()
-        for t in ("flat", "slice", "dropshot", "lob", "unknown"):
+        for t in ("flat", "slice", "dropshot", "lob", "volley", "unknown"):
             n = (shots["shot_type"] == t).sum()
             if n:
                 print(f"  shot type {t:9s}: {n}")
@@ -1038,19 +1068,20 @@ SHOT_CATEGORY_COLORS = {
     "slice":    "#9467bd",   # purple
     "dropshot": "#d62728",   # red
     "lob":      "#8c564b",   # brown
+    "volley":   "#e377c2",   # pink
     "serve":    "#17becf",   # cyan
     "smash":    "#d4af37",   # gold
     "unknown":  "#7f7f7f",   # grey
 }
 _CATEGORY_FALLBACK_COLOR = "#111111"
-_SPECIAL_SHOT_TYPES = ("slice", "dropshot", "lob", "serve")
+_SPECIAL_SHOT_TYPES = ("slice", "dropshot", "lob", "volley", "serve")
 _PLAYER_MARKERS = {1: "o", 2: "^"}
 _PLAYER_MARKER_FALLBACK = "s"
 
 
 def shot_category(stroke, shot_type, overhead=""):
     """Colour category for a shot: overhead (serve/smash) wins, else a special
-    shot_type (slice/dropshot/lob/serve), else the forehand/backhand stroke."""
+    shot_type (slice/dropshot/lob/volley/serve), else the forehand/backhand stroke."""
     ov = (str(overhead) if overhead is not None else "").strip().lower()
     if ov in ("serve", "smash"):
         return ov

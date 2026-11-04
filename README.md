@@ -7,7 +7,7 @@
 
 **Turn a single, uncalibrated broadcast tennis clip into structured match data:**
 court geometry, metric player trajectories, movement statistics, the ball track,
-its bounces and a shot-by-shot breakdown (forehand/backhand, flat/slice/dropshot/lob,
+its bounces and a shot-by-shot breakdown (forehand/backhand, flat/slice/dropshot/lob/volley,
 serve/smash).
 
 The core is **classical computer vision**. Court detection, player tracking, motion
@@ -185,7 +185,8 @@ flowchart LR
    flight to the bounce of the next step: a flight under 1.05 s is flat; a slower
    ball is a dropshot if it lands within 4.5 m of the net, a lob if it flies above
    2 m, and a slice if it floats lower. The height is the ball's distance in the
-   image from the point below it on the court. Shots with no bounce found fall back
+   image from the point below it on the court. A shot played inside the service
+   line with no bounce since the opponent's shot is a volley. Shots with no bounce found fall back
    on perspective-invariant features of the outgoing trajectory. Serves are found
    from the server's motion rather than from the ball: a player standing at their
    own baseline, after a quiet spell with no opponent shot, whose box (in metres
@@ -365,7 +366,9 @@ ruff check .    # lint
 - **Shot types are labelled on one rally only.** On the other clips they are
   not checked against labels. Shots with no bounce found use the older rules on
   the trajectory shape, which were tuned on the demo rally and are less reliable.
-  A slow topspin ball can also fly above 2 m and be called a lob.
+  A slow topspin ball can also fly above 2 m and be called a lob. Volleys were
+  only checked by eye; overheads taken in the air count as volleys, and half-volleys
+  are not recognised.
 
 ## Report and presentation
 
