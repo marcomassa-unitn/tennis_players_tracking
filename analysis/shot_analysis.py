@@ -27,12 +27,15 @@ slice = floated/decelerating ball; else flat.
 CAVEAT: the homography is a GROUND plane but the ball is airborne at contact, so
 meters speeds are approximate — every meters threshold is a CLI flag (see
 --type-self-test) and may need per-camera retuning; the scale-free ones do not.
+These rules are the fallback: a shot whose bounce is known gets its type from the
+flight to that bounce (classify_flight).
 
 Use (from project root, after the ball CSV exists):
     python analysis/shot_analysis.py --ball outputs/ball_coordinates/ball_Input_video2.csv
     python analysis/shot_analysis.py --ball outputs/ball_coordinates/ball_Input_video2.csv \\
         --p1-hand right --p2-hand left
-    python analysis/shot_analysis.py --events outputs/shot_analysis/events.csv
+    python analysis/shot_analysis.py --events outputs/shot_analysis/events.csv \\
+        --real-ball outputs/ball_coordinates/ball_Input_video2.csv
     python analysis/shot_analysis.py --self-test        # synthetic, no YOLO
     python analysis/shot_analysis.py --type-self-test   # vs labelled ground truth
 """
@@ -103,6 +106,15 @@ def load_ball_track(ball_csv: str) -> pd.DataFrame:
                   f"(only {int(ok.sum())} valid points, need > {win}).")
     full["interp"] = interp
     return full
+
+
+def load_real_detections(ball_csv: str) -> pd.DataFrame:
+    """Frames with a real ball detection (frame, cx, cy), without the filled gaps."""
+    df = pd.read_csv(ball_csv)
+    if "interpolated" in df.columns:
+        df = df[df["interpolated"] == 0]
+    df = df.dropna(subset=["cx", "cy"])
+    return df[["frame", "cx", "cy"]].sort_values("frame").reset_index(drop=True)
 
 
 def ball_track_for_shots(ball_csv: str) -> str:
@@ -634,6 +646,14 @@ SERVE_PARAMS = {
 }
 
 
+def _px_per_metre(conv, x_m, y_m):
+    """Image scale at a ground point; it also holds for heights above that point."""
+    m_to_px = np.linalg.inv(conv._H)
+    ends = np.array([[[x_m - 0.5, y_m]], [[x_m + 0.5, y_m]]], dtype=np.float64)
+    a, b = cv2.perspectiveTransform(ends, m_to_px)[:, 0]
+    return float(np.hypot(*(b - a)))
+
+
 def _metric_heights(boxes, conv, pid):
     """Box height of player `pid` in metres-equivalent (px / local px-per-metre).
 
@@ -761,14 +781,71 @@ def move_contacts_off_bounces(hits, events, fps, min_gap_s=0.5, params=None):
     return kept, ball_at
 
 
+# ── shot type from the flight ──────────────────────────────────────────────────
+#
+# Once a shot's bounce is known its type comes from the flight itself, which is
+# physics rather than image shape. A rally ball crosses in under a second; of the
+# slower ones a dropshot lands short, a lob flies high, and a slice floats low.
+
+FLIGHT_PARAMS = {
+    "slow_flight_s": 1.05,   # a longer flight is no longer a rally ball
+    "drop_depth_m": 4.5,     # a dropshot lands this close to the net...
+    "lob_apex_m": 2.0,       # ...a lob flies above this height (the net is 0.91 m)
+    "late_bounce_s": 0.1,    # a bounce may follow the next contact by this much
+}
+
+
+def shot_flight(contact, pid, feet_m, next_contact, events, real_ball, conv, fps,
+                params=None):
+    """Flight of a shot to its bounce, or None if no bounce was found.
+
+    {"time_s", "depth_m" (landing point to net), "apex_m"}. The height of the ball
+    is its distance in the image from the point below it, taken on the straight
+    path from the striker's feet to the landing point.
+    """
+    p = params or FLIGHT_PARAMS
+    bounces = events[(events["event"] == BOUNCE_OF_PLAYER[3 - pid])
+                     & (events["frame"] > contact)
+                     & (events["frame"] < next_contact + p["late_bounce_s"] * fps)]
+    if bounces.empty:
+        return None
+    bounce = bounces.iloc[0]
+    seen = real_ball[real_ball["frame"].between(contact, bounce["frame"])]
+    if seen.empty:
+        return None
+    start = np.asarray(feet_m, float)
+    end = np.array([bounce["x_m"], bounce["y_m"]], float)
+    m_to_px = np.linalg.inv(conv._H)
+    heights = []
+    for frame, cy in zip(seen["frame"], seen["cy"]):
+        below = start + (frame - contact) / (bounce["frame"] - contact) * (end - start)
+        _, v, w = m_to_px @ np.array([below[0], below[1], 1.0])
+        heights.append((v / w - cy) / _px_per_metre(conv, *below))
+    return {"time_s": (bounce["frame"] - contact) / fps,
+            "depth_m": abs(bounce["y_m"] - NET),
+            "apex_m": max(heights)}
+
+
+def classify_flight(flight, params=None):
+    """flat / dropshot / lob / slice from shot_flight."""
+    p = params or FLIGHT_PARAMS
+    if flight["time_s"] < p["slow_flight_s"]:
+        return "flat"
+    if flight["depth_m"] <= p["drop_depth_m"]:
+        return "dropshot"
+    return "lob" if flight["apex_m"] >= p["lob_apex_m"] else "slice"
+
+
 def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                   vy_min=0.5, acc_thr=1.5, win=4,
                   reversal_look=6, reversal_vy_frac=0.5,
-                  type_params=None, events=None):
+                  type_params=None, events=None, real_ball=None):
     """Detect and classify every shot; return a DataFrame.
 
-    events : hits and bounces from bounce_detection.py, to correct the contacts
-             that are really bounces. Without them the contacts stay as detected.
+    events    : hits and bounces from bounce_detection.py, to correct the contacts
+                that are really bounces. Without them the contacts stay as detected.
+    real_ball : real detections of the ball (load_real_detections). With `events`,
+                the type of a shot with a known bounce comes from its flight.
     """
     tp = type_params or SHOT_TYPE_PARAMS
     # Warn on a ball/player frame-range mismatch: non-overlapping ranges mean
@@ -802,7 +879,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
 
     n_dropped = 0
     rows = []
-    for f, pid, _strength in hits:
+    for k, (f, pid, _strength) in enumerate(hits):
         box = _nearest_box(boxes, f, pid)
         if box is None:
             continue
@@ -837,6 +914,13 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         i = int(f - track.index.min())
         feats = _shot_type_features(track, conv, i, fps, tp["k"], tp["w30"])
         shot_type = classify_shot_type(feats, side, tp)
+        flight = None
+        if events is not None and real_ball is not None:
+            next_contact = hits[k + 1][0] if k + 1 < len(hits) else np.inf
+            flight = shot_flight(f, pid, (player_x_m, player_y_m), next_contact,
+                                 events, real_ball, conv, fps)
+        if flight is not None:
+            shot_type = classify_flight(flight)
 
         # Overhead (serve/smash): separate column; wrapped so short/missing data
         # yields "" rather than raising. Serves are already known; the ball-based
@@ -858,6 +942,9 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
             "side": side, "hand": hands[pid], "stroke": stroke,
             "shot_type": shot_type,
             "overhead": overhead,
+            "flight_s": round(flight["time_s"], 2) if flight else None,
+            "landing_depth_m": round(flight["depth_m"], 1) if flight else None,
+            "apex_m": round(flight["apex_m"], 1) if flight else None,
             "ball_pace": (round(feats["pace"], 1)
                           if feats["pace"] is not None
                           and not np.isnan(feats["pace"]) else None),
@@ -1232,10 +1319,11 @@ def type_self_test(ball_csv: str = None, players_csv: str = None,
     boxes = load_player_boxes(players_csv)
     conv = CourtConverter(court_csv)
     from analysis.bounce_detection import clip_events
-    events = clip_events(str(base / "ball_coordinates" / "ball_Input_video2.csv"),
-                         boxes, conv, fps)
+    real_csv = str(base / "ball_coordinates" / "ball_Input_video2.csv")
+    events = clip_events(real_csv, boxes, conv, fps)
     # GT was labelled on the default right/right run
-    shots = analyze_shots(track, boxes, conv, fps, {1: "right", 2: "right"}, events=events)
+    shots = analyze_shots(track, boxes, conv, fps, {1: "right", 2: "right"}, events=events,
+                          real_ball=load_real_detections(real_csv))
 
     if shots.empty or "shot_type" not in shots.columns:
         raise SystemExit("TYPE-SELF-TEST: no shots / no shot_type column produced.")
@@ -1443,6 +1531,9 @@ def main() -> None:
     parser.add_argument("--events", default=None,
                         help="events CSV from analysis/bounce_detection.py, to correct "
                              "the contacts that are really bounces")
+    parser.add_argument("--real-ball", default=None, dest="real_ball",
+                        help="ball CSV with the real detections (ball_<video name>.csv); "
+                             "with --events, shot types come from the flight to the bounce")
     parser.add_argument("--min-gap", type=float, default=0.5, dest="min_gap",
                         help="minimum distance in seconds between two shots")
     # Detection thresholds (px/frame units, tuned on the demo clip).
@@ -1581,7 +1672,9 @@ def main() -> None:
                           reversal_look=args.reversal_look,
                           reversal_vy_frac=args.reversal_vy_frac,
                           type_params=type_params,
-                          events=pd.read_csv(args.events) if args.events else None)
+                          events=pd.read_csv(args.events) if args.events else None,
+                          real_ball=(load_real_detections(args.real_ball)
+                                     if args.real_ball else None))
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)

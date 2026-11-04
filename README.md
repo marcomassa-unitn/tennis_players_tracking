@@ -69,15 +69,16 @@ the pipeline produces:
 | Movement | near player 94.8 m covered (mean 10.6 km/h, p95 29.6 km/h); far player 104.2 m (mean 11.8 km/h, p95 27.4 km/h) |
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
 | Bounces | vs 25 hand-labelled bounces: precision 1.00, recall 0.92, median time error 0.2 frames, median landing error 0.25 m; on a second clip (14 bounces, thresholds not tuned on it) 1.00, 1.00, 0.2 frames, 0.14 m |
-| Shot mix | 18 flat, 5 slice, 1 dropshot, 1 lob; 17 backhands, 6 forehands, 2 on the body axis (the serve included) |
-| Shot type | **21/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
+| Shot mix | 17 flat, 4 slice, 3 dropshot, 1 lob; 17 backhands, 6 forehands, 2 on the body axis (the serve included) |
+| Shot type | **23/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
 | Self-tests | synthetic stroke test 4/4, synthetic serve/smash test 5/5 with zero false positives |
 
-¹ The shot-type thresholds were tuned on this same rally, so this is not an
-accuracy figure on unseen footage. They were tuned before the contacts that were
-really bounces were corrected, and were deliberately not refitted afterwards: the
-two misses are the shots at frames 262 and 861. The report's 21/23 is a different
-result, from an earlier version of the classifier.
+¹ The three flight thresholds were chosen looking at this same rally, so 23/23
+shows the rules fit the labelled data. It is not an accuracy figure on unseen
+footage. On the other clips there are no labels: the 1.05 s split falls in a gap
+(1.04–1.10 s) that holds on all five clips, and the lobs found there were checked
+by eye. The report's 21/23 is a different result, from an earlier version of the
+classifier.
 
 | Combined position heatmap | Court-zone occupancy | Shot hitmap |
 |:---:|:---:|:---:|
@@ -180,8 +181,12 @@ flowchart LR
    ones left, right in front of the receiver, are moved to the hit that follows
    them using the events of the next step. The stroke
    (forehand/backhand) comes from the ball's side relative to the body axis,
-   taking handedness and court side into account. The shot type comes from
-   perspective-invariant features of the outgoing trajectory. Serves are found
+   taking handedness and court side into account. The shot type comes from the
+   flight to the bounce of the next step: a flight under 1.05 s is flat; a slower
+   ball is a dropshot if it lands within 4.5 m of the net, a lob if it flies above
+   2 m, and a slice if it floats lower. The height is the ball's distance in the
+   image from the point below it on the court. Shots with no bounce found fall back
+   on perspective-invariant features of the outgoing trajectory. Serves are found
    from the server's motion rather than from the ball: a player standing at their
    own baseline, after a quiet spell with no opponent shot, whose box (in metres
    at the feet) stays raised by the toss and racket and then peaks at contact.
@@ -357,10 +362,10 @@ ruff check .    # lint
   the landing, or the track has a gap there, no bounce is reported: these are the
   2 bounces missed on the demo rally. The median landing error is 0.14–0.25 m but
   reaches about 1 m at the far end, so this is no line-calling tool.
-- **Shot types ignore the bounce.** Lob, slice and dropshot are told apart from
-  the shape of the outgoing trajectory in the image, not from where and when the
-  ball lands. On clips other than the demo rally they are not checked against
-  labels.
+- **Shot types are labelled on one rally only.** On the other clips they are
+  not checked against labels. Shots with no bounce found use the older rules on
+  the trajectory shape, which were tuned on the demo rally and are less reliable.
+  A slow topspin ball can also fly above 2 m and be called a lob.
 
 ## Report and presentation
 

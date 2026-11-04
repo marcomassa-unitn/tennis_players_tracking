@@ -28,7 +28,6 @@ import os
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pandas as pd
 
@@ -41,11 +40,13 @@ from analysis.shot_analysis import (
     HIT_OF_PLAYER,
     _ball_near_player,
     _nearest_box,
+    _px_per_metre,
     ball_track_for_shots,
     detect_hits,
     detect_serves,
     load_ball_track,
     load_player_boxes,
+    load_real_detections,
 )
 from utils.court_converter import CourtConverter
 from utils.court_geometry import NET, L_m, W_m
@@ -77,17 +78,6 @@ BOUNCE_PARAMS = {
 
 # The rally cycle: each event is followed by the next one, wrapping around.
 RALLY_CYCLE = (HIT_NEAR, BOUNCE_FAR, HIT_FAR, BOUNCE_NEAR)
-
-
-# ── loading ────────────────────────────────────────────────────────────────────
-
-def load_real_detections(ball_csv: str) -> pd.DataFrame:
-    """Frames with a real ball detection (frame, cx, cy), without the filled gaps."""
-    df = pd.read_csv(ball_csv)
-    if "interpolated" in df.columns:
-        df = df[df["interpolated"] == 0]
-    df = df.dropna(subset=["cx", "cy"])
-    return df[["frame", "cx", "cy"]].sort_values("frame").reset_index(drop=True)
 
 
 # ── parabola segmentation ──────────────────────────────────────────────────────
@@ -142,14 +132,6 @@ def segment_trajectory(t, pts, fps, params=None):
             pieces.append((prev[j], j))
         j = prev[j]
     return pieces[::-1]
-
-
-def _px_per_metre(conv, x_m, y_m):
-    """Image scale at a ground point; it also holds for heights above that point."""
-    m_to_px = np.linalg.inv(conv._H)
-    ends = np.array([[[x_m - 0.5, y_m]], [[x_m + 0.5, y_m]]], dtype=np.float64)
-    a, b = cv2.perspectiveTransform(ends, m_to_px)[:, 0]
-    return float(np.hypot(*(b - a)))
 
 
 def find_junctions(t, pts, pieces, conv, fps, params=None):

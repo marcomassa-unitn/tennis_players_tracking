@@ -294,6 +294,7 @@ def step_shots(p, args, produced):
         "--p1-hand", args.p1_hand,
         "--p2-hand", args.p2_hand,
         "--events", os.path.join(p["shots_dir"], "events.csv"),
+        "--real-ball", p["ball_csv"],
         "--output", p["shots_dir"],
     ]
     if args.no_display:

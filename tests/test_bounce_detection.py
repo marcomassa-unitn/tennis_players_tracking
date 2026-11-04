@@ -12,7 +12,7 @@ from analysis.bounce_detection import (
     detect_events,
     load_real_detections,
 )
-from analysis.shot_analysis import _synthetic_court_csv
+from analysis.shot_analysis import _synthetic_court_csv, shot_flight
 from utils.court_converter import CourtConverter
 
 FPS = 30.0
@@ -131,6 +131,26 @@ def test_a_serve_anchors_the_order_without_a_junction(conv):
     boxes = _boxes(conv, RALLY, [RALLY[0], RALLY[4]], [RALLY[2], RALLY[6]])
     bounces = detect_bounces(ball, boxes, conv, FPS, serves=[(10, 1, 0)])
     assert list(bounces["side"]) == ["near", "far"]
+
+
+def test_flight_measures_time_depth_and_apex(conv):
+    lob = [(10.0, 4.0, 23.0, 1.0), (55.0, 5.0, 2.0, 0.0), (70.0, 5.2, -1.0, 1.0)]
+    span = 1.5
+    v0 = (0.0 - 1.0 + 0.5 * G * span ** 2) / span
+    events = pd.DataFrame({"frame": [55.0], "x_m": [5.0], "y_m": [2.0],
+                           "event": [BOUNCE_FAR]})
+    flight = shot_flight(10, 1, (4.0, 23.0), 70, events, _ball(conv, lob), conv, FPS)
+    assert flight["time_s"] == pytest.approx(span)
+    assert flight["depth_m"] == pytest.approx(11.8872 - 2.0)
+    assert flight["apex_m"] == pytest.approx(1.0 + v0 ** 2 / (2 * G), abs=0.3)
+
+
+def test_a_shot_without_a_bounce_has_no_flight(conv):
+    events = pd.DataFrame({"frame": [90.0], "x_m": [5.0], "y_m": [2.0],
+                           "event": [BOUNCE_FAR]})
+    ball = _ball(conv, RALLY)
+    assert shot_flight(10, 1, (4.0, 23.0), 60, events, ball, conv, FPS) is None
+    assert shot_flight(10, 2, (4.0, 1.0), 200, events, ball, conv, FPS) is None
 
 
 def test_load_real_detections_drops_the_filled_gaps(tmp_path):
