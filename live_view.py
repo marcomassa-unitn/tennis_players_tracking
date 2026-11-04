@@ -661,6 +661,7 @@ def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
 
     from analysis import player_analysis as pa
     from analysis import shot_analysis as sa
+    from analysis.bounce_detection import bounces_from_events, clip_events
     from utils.court_converter import CourtConverter
 
     fps = fps or 30.0
@@ -687,7 +688,12 @@ def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
     track = sa.load_ball_track(sa.ball_track_for_shots(ball_csv))
     boxes = sa.load_player_boxes(players_csv)
     conv = CourtConverter(court_csv)
-    shots = sa.analyze_shots(track, boxes, conv, fps, hand_map)
+    # Same shots as the pipeline: contacts and types rely on the bounces.
+    events = clip_events(ball_csv, boxes, conv, fps)
+    events.to_csv(sa_dir / "events.csv", index=False)
+    bounces_from_events(events).to_csv(sa_dir / "bounces.csv", index=False)
+    shots = sa.analyze_shots(track, boxes, conv, fps, hand_map, events=events,
+                             real_ball=sa.load_real_detections(ball_csv))
     shots.to_csv(sa_dir / "shots.csv", index=False)
     sa.save_shot_hitmap(shots, sa_dir)                     # -> shot_hitmap.png
 
