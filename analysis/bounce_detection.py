@@ -60,7 +60,7 @@ BOUNCE_PARAMS = {
     "max_piece": 75,
     "max_piece_s": 3.0,
     # Junctions
-    "max_hidden_s": 0.2,      # longest detection gap across a junction
+    "max_hidden_s": 0.3,      # longest detection gap across a junction
     "max_fit_gap_px": 15.0,   # the two parabolas must really meet
     "reliable_gap_px": 4.0,   # ...and meet this closely for a reliable landing point
     # Labels (m/s)
