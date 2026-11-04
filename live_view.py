@@ -177,11 +177,13 @@ def ball_ground_path(shots, bounces, fps, max_gap_s=BALL_MAX_GAP_S) -> dict:
 
     Projecting an airborne ball through the homography would throw it off the
     court. On the ground plane, though, a flight is a straight line at constant
-    speed, so the ball simply goes from each contact to each bounce. Events too far
+    speed, so the ball simply goes from each impact to each bounce. Events too far
     apart belong to different points, and no path is drawn between them.
     """
-    anchors = {(float(r.frame), float(r.player_x_m), float(r.player_y_m))
-               for r in shots.dropna(subset=["player_x_m", "player_y_m"]).itertuples()}
+    x, y = (("impact_x_m", "impact_y_m") if "impact_x_m" in shots.columns
+            else ("player_x_m", "player_y_m"))
+    anchors = {(float(r[0]), float(r[1]), float(r[2]))
+               for r in shots.dropna(subset=[x, y])[["frame", x, y]].itertuples(index=False)}
     anchors |= {(float(r.frame), float(r.x_m), float(r.y_m)) for r in bounces.itertuples()}
     anchors = sorted(anchors)
     path = {}

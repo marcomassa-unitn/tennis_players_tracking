@@ -17,8 +17,10 @@ from analysis.shot_analysis import (
     classify_flight,
     detect_serves,
     detect_smashes,
+    impact_point,
     is_volley,
     move_contacts_off_bounces,
+    stroke_from_impact,
 )
 from utils.court_converter import CourtConverter
 from utils.court_geometry import NET, L_m, W_m
@@ -165,3 +167,32 @@ def test_a_ball_passing_by_is_no_volley(conv):
     ball = _ball_from(conv, range(100, 140), 6.0, 22.0)
     empty = _bounce_at(10, BOUNCE_NEAR)
     assert not is_volley(120, 1, NET + 3.0, (90, 2), empty, ball, conv, 30.0)
+
+
+def test_the_impact_lies_on_the_line_of_the_flight():
+    # Straight down the middle from (4, 24) through the bounce at (4, 6).
+    assert impact_point((5.0, 2.0), (4.0, 24.0), (4.0, 6.0)) == pytest.approx((4.0, 2.0))
+
+
+def test_the_impact_is_the_point_of_the_line_closest_to_the_feet():
+    x, y = impact_point((5.0, 2.0), (0.0, 24.0), (4.0, 8.0))
+    assert (x - 0.0) / (y - 24.0) == pytest.approx(4.0 / -16.0)     # still on the line
+    assert np.hypot(x - 5.0, y - 2.0) == pytest.approx(0.49, abs=0.01)
+
+
+def test_no_impact_out_of_reach_or_before_the_bounce():
+    assert impact_point((6.5, 2.0), (4.0, 24.0), (4.0, 6.0)) is None    # 2.5 m from the line
+    assert impact_point((4.5, 9.0), (4.0, 24.0), (4.0, 6.0)) is None    # bounce still to come
+    assert impact_point((4.0, 2.0), (4.0, 6.0), (4.0, 6.0)) is None     # no flight to follow
+
+
+@pytest.mark.parametrize("impact_x, side, hand, expected", [
+    (5.0, "near", "right", "forehand"),
+    (3.0, "near", "right", "backhand"),
+    (5.0, "far", "right", "backhand"),
+    (3.0, "far", "right", "forehand"),
+    (5.0, "near", "left", "backhand"),
+    (4.05, "near", "right", None),
+])
+def test_stroke_side_on_the_court(impact_x, side, hand, expected):
+    assert stroke_from_impact(impact_x, 4.0, side, hand) == expected

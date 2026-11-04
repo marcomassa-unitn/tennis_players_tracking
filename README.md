@@ -70,7 +70,7 @@ the pipeline produces:
 | Movement | near player 94.8 m covered (mean 10.6 km/h, p95 29.6 km/h); far player 104.2 m (mean 11.8 km/h, p95 27.4 km/h) |
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
 | Bounces | vs 25 hand-labelled bounces: precision 1.00, recall 0.92, median time error 0.2 frames, median landing error 0.25 m; on a second clip (14 bounces, thresholds not tuned on it) 1.00, 1.00, 0.2 frames, 0.14 m |
-| Shot mix | 17 flat, 4 slice, 3 dropshot, 1 lob; 17 backhands, 6 forehands, 2 on the body axis (the serve included) |
+| Shot mix | 17 flat, 4 slice, 3 dropshot, 1 lob; 16 backhands, 7 forehands, 2 on the body axis (the serve included) |
 | Shot type | **23/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
 | Self-tests | synthetic stroke test 4/4, synthetic serve/smash test 5/5 with zero false positives |
 
@@ -210,6 +210,12 @@ flowchart LR
    where the homography is exact. The order of a rally (hit, bounce on the other side,
    hit, …) picks the final labels, which is what separates a near bounce from the
    near hit that follows it. Pipeline step 6 runs this first, then the shots.
+   Seen from above, a bounce does not turn the ball, so the previous impact, the bounce
+   and the next impact lie on one line. The player's feet are about 0.85 m off it, an
+   arm and a racket away, so the impact is taken on the line, unless the player is out
+   of reach of it. The side of the impact then gives forehand or backhand on the court,
+   and the two methods agree on 92 of the 97 shots where both apply; the five that
+   differ were checked by eye, and the image-based rule was the wrong one in four.
 8. **Evaluation** ([`evaluation/`](evaluation)). A small OpenCV tool annotates
    ground-truth boxes and court keypoints. The evaluator reports mean and median
    IoU, precision and recall at IoU 0.5, centre error (px), feet error (m), ID

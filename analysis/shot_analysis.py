@@ -852,6 +852,53 @@ def move_contacts_off_bounces(hits, events, fps, min_gap_s=0.5, params=None):
     return kept, ball_at
 
 
+# ── impact point from the ball's flight ────────────────────────────────────────
+#
+# Seen from above a bounce does not turn the ball: the previous impact, the bounce
+# and the next impact lie on one line. The player's feet do not, being an arm and a
+# racket away from it (0.85 m in the median), so the impact is the point of that line
+# closest to the feet. It also tells which side of the player the ball was on, on the
+# court, whatever the image shows at a contact frame a little off.
+
+IMPACT_PARAMS = {
+    "max_reach_m": 1.7,          # arm and racket: further from the line, something is off
+    "stroke_deadband_m": 0.15,   # an impact this close to the feet tells no side
+}
+
+
+def impact_point(feet_m, previous_impact, bounce_m, params=None):
+    """Where the ball was struck, on the line of its flight, or None if it does not fit.
+
+    None when the player is out of reach of the line, or still before the bounce on
+    it: then the bounce is wrong, or an event is missing.
+    """
+    p = params or IMPACT_PARAMS
+    feet, start, bounce = (np.asarray(v, float) for v in (feet_m, previous_impact, bounce_m))
+    flight = bounce - start
+    length = np.hypot(*flight)
+    if not length > 0:
+        return None
+    direction = flight / length
+    along = (feet - bounce) @ direction
+    impact = bounce + along * direction
+    if along <= 0 or np.hypot(*(feet - impact)) > p["max_reach_m"]:
+        return None
+    return float(impact[0]), float(impact[1])
+
+
+def stroke_from_impact(impact_x, feet_x, side, hand, params=None):
+    """forehand / backhand from the impact's side of the feet, None if too close to tell.
+
+    Court x grows to the image right, so this is classify_stroke on the ground.
+    """
+    p = params or IMPACT_PARAMS
+    offset = impact_x - feet_x
+    if abs(offset) < p["stroke_deadband_m"]:
+        return None
+    dominant_is_right = (side == "near") == (hand == "right")
+    return "forehand" if (offset > 0) == dominant_is_right else "backhand"
+
+
 # ── shot type from the flight ──────────────────────────────────────────────────
 #
 # Once a shot's bounce is known its type comes from the flight itself, which is
@@ -877,7 +924,7 @@ def shot_flight(contact, pid, feet_m, next_contact, events, real_ball, conv, fps
 
     {"time_s", "depth_m" (landing point to net), "apex_m"}. The height of the ball
     is its distance in the image from the point below it, taken on the straight
-    path from the striker's feet to the landing point.
+    path from `feet_m` (the impact, when known) to the landing point.
     """
     p = params or FLIGHT_PARAMS
     bounces = events[(events["event"] == BOUNCE_OF_PLAYER[3 - pid])
@@ -992,6 +1039,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         hits, ball_at = move_contacts_off_bounces(hits, events, fps, min_gap_s)
 
     flight_known = events is not None and real_ball is not None
+    previous = None         # the last shot kept: (frame, player, impact)
     n_dropped = 0
     rows = []
     for k, (f, pid, _strength) in enumerate(hits):
@@ -1028,6 +1076,22 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         stroke = ("unknown" if np.isnan(ball_cx) or is_smash
                   else classify_stroke(ball_cx, box, side, hands[pid]))
 
+        # Impact on the line of the flight, after a bounce on this side.
+        impact = None
+        if events is not None and previous is not None and previous[1] != pid and not is_serve:
+            late = FLIGHT_PARAMS["late_bounce_s"] * fps
+            bounces = events[(events["event"] == BOUNCE_OF_PLAYER[pid])
+                             & (events["frame"] > previous[0])
+                             & (events["frame"] < f + late)]
+            if not bounces.empty:
+                landed = bounces.iloc[0]
+                impact = impact_point((player_x_m, player_y_m), previous[2],
+                                      (landed["x_m"], landed["y_m"]))
+        if impact is not None and not is_smash:
+            stroke = stroke_from_impact(impact[0], player_x_m, side, hands[pid]) or stroke
+        impact = impact or (player_x_m, player_y_m)
+        previous = (f, pid, impact)
+
         # Shot type from outgoing shape; contact frame `f` -> array-index `i`
         # (the frame index is contiguous).
         i = int(f - track.index.min())
@@ -1036,8 +1100,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         flight = None
         if flight_known:
             next_contact = hits[k + 1][0] if k + 1 < len(hits) else np.inf
-            flight = shot_flight(f, pid, (player_x_m, player_y_m), next_contact,
-                                 events, real_ball, conv, fps)
+            flight = shot_flight(f, pid, impact, next_contact, events, real_ball, conv, fps)
         if flight is not None:
             shot_type = classify_flight(flight)
         if (flight_known and not (is_serve or is_smash) and shot_type != "dropshot"
@@ -1075,6 +1138,8 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
             "player_cx": round(_box_cx(box), 1),
             "player_x_m": round(player_x_m, 2),
             "player_y_m": round(player_y_m, 2),
+            "impact_x_m": round(impact[0], 2),
+            "impact_y_m": round(impact[1], 2),
             "ball_x_m": round(bx_m, 2), "ball_y_m": round(by_m, 2),
         })
     if n_dropped:

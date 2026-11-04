@@ -23,6 +23,13 @@ def test_the_ball_flies_straight_from_a_contact_to_its_bounce():
     assert 9 not in path and 41 not in path
 
 
+def test_the_path_goes_through_the_impact_rather_than_the_feet():
+    shots = pd.DataFrame({"frame": [10, 70], "player_x_m": [4.0, 9.0], "player_y_m": [24.0, 0.0],
+                          "impact_x_m": [4.0, 7.0], "impact_y_m": [24.0, 0.0]})
+    path = ball_ground_path(shots, _bounces((40, 5.5, 12.0, True)), FPS)
+    assert path[70] == pytest.approx((7.0, 0.0))
+
+
 def test_the_bounce_frame_can_fall_between_two_frames():
     path = ball_ground_path(_shots((10, 0.0, 0.0)), _bounces((20.5, 10.5, 0.0, True)), FPS)
     assert path[20] == pytest.approx((10.0, 0.0))
