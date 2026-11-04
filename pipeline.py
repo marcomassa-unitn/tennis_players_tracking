@@ -271,8 +271,19 @@ def step_shots(p, args, produced):
         print("Skipped: ball CSV not found (run ball tracking first).")
         return
 
-    from analysis import shot_analysis
+    from analysis import bounce_detection, shot_analysis
     os.makedirs(p["shots_dir"], exist_ok=True)
+    argv = [
+        "bounce_detection",
+        "--ball", p["ball_csv"],
+        "--players", p["players_csv"],
+        "--court", p["court_csv"],
+        "--fps", str(args.fps),
+        "--output", p["shots_dir"],
+    ]
+    with _override_argv(argv):
+        bounce_detection.main()
+
     argv = [
         "shot_analysis",
         "--ball", shot_analysis.ball_track_for_shots(p["ball_csv"]),
@@ -282,6 +293,7 @@ def step_shots(p, args, produced):
         "--fps", str(args.fps),
         "--p1-hand", args.p1_hand,
         "--p2-hand", args.p2_hand,
+        "--events", os.path.join(p["shots_dir"], "events.csv"),
         "--output", p["shots_dir"],
     ]
     if args.no_display:

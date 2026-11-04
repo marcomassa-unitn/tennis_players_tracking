@@ -27,6 +27,11 @@ Usage (from project root):
     python evaluation/evaluate_tracking.py \\
         --ball-gt   outputs/ground_truth/ball_Input_video2_gt.csv \\
         --ball-pred outputs/ball_coordinates/ball_Input_video2.csv
+
+    python evaluation/evaluate_tracking.py \\
+        --bounce-gt   outputs/ground_truth/bounce_Input_video2_gt.csv \\
+        --bounce-pred outputs/shot_analysis/bounces.csv \\
+        --court       outputs/court_coordinates/Input_video2_court.csv
 """
 
 import argparse
@@ -342,6 +347,95 @@ def evaluate_ball(gt_path, pred_path, radius, out_dir):
     return summary
 
 
+# ── bounce evaluation ──────────────────────────────────────────────────────────
+
+def load_bounce_pred(path):
+    """[(frame, cx, cy), ...] from analysis/bounce_detection.py."""
+    with open(path, newline="") as f:
+        return [(float(r["frame"]), float(r["cx"]), float(r["cy"])) for r in csv.DictReader(f)]
+
+
+def bounce_metrics(gt, pred, tolerance, conv=None):
+    """Detected bounces vs GT (`gt` as from load_ball_gt, None = contact hidden).
+
+    Pairs are taken closest in time first, each bounce used once, at most
+    `tolerance` frames apart. A bounce the GT marks as hidden still has to be found
+    to count for `recall`; `recall_visible` leaves those out. Landing errors are
+    measured on the visible pairs, in metres when a CourtConverter is given.
+    """
+    pairs = sorted((abs(p[0] - f), f, i) for f in gt for i, p in enumerate(pred)
+                   if abs(p[0] - f) <= tolerance)
+    used_gt, used_pred, matches = set(), set(), {}
+    for _, f, i in pairs:
+        if f not in used_gt and i not in used_pred:
+            used_gt.add(f)
+            used_pred.add(i)
+            matches[f] = i
+
+    rows, frame_errs, px_errs, m_errs = [], [], [], []
+    for f in sorted(gt):
+        if f not in matches:
+            rows.append([f, "", "", "", "FN"])
+            continue
+        frame, cx, cy = pred[matches[f]]
+        frame_errs.append(abs(frame - f))
+        err_px = err_m = ""
+        if gt[f] is not None:
+            err_px = float(np.hypot(cx - gt[f][0], cy - gt[f][1]))
+            px_errs.append(err_px)
+            if conv is not None:
+                err_m = float(np.hypot(*np.subtract(conv.to_meters(cx, cy),
+                                                    conv.to_meters(*gt[f]))))
+                m_errs.append(err_m)
+        rows.append([f, frame, err_px, err_m, "TP"])
+    rows += [["", pred[i][0], "", "", "FP"] for i in range(len(pred)) if i not in used_pred]
+
+    tp = len(matches)
+    visible = [f for f in gt if gt[f] is not None]
+    tp_visible = sum(f in matches for f in visible)
+
+    def median(values):
+        return float(np.median(values)) if values else float("nan")
+
+    return {
+        "gt": len(gt), "visible": len(visible), "tp": tp,
+        "fp": len(pred) - tp, "fn": len(gt) - tp,
+        "precision": tp / len(pred) if pred else float("nan"),
+        "recall": tp / len(gt) if gt else float("nan"),
+        "recall_visible": tp_visible / len(visible) if visible else float("nan"),
+        "median_frame_err": median(frame_errs),
+        "median_err_px": median(px_errs),
+        "median_err_m": median(m_errs),
+    }, rows
+
+
+def evaluate_bounces(gt_path, pred_path, tolerance, court_path, out_dir):
+    """Print bounce metrics vs GT and save the per-bounce detail."""
+    conv = CourtConverter(court_path) if court_path else None
+    summary, rows = bounce_metrics(load_ball_gt(gt_path), load_bounce_pred(pred_path),
+                                   tolerance, conv)
+    print("\n" + "=" * 56)
+    print("  BOUNCE DETECTION EVALUATION")
+    print("=" * 56)
+    print(f"  GT bounces            : {summary['gt']} ({summary['visible']} visible)")
+    print(f"  TP / FP / FN          : {summary['tp']} / {summary['fp']} / {summary['fn']}"
+          f"  (within {tolerance:g} frames)")
+    print(f"  precision             : {summary['precision']:.3f}")
+    print(f"  recall                : {summary['recall']:.3f}"
+          f"  (visible only: {summary['recall_visible']:.3f})")
+    print(f"  time error (TP)       : median {summary['median_frame_err']:.1f} frames")
+    print(f"  landing error (TP)    : median {summary['median_err_px']:.1f} px"
+          + (f", {summary['median_err_m']:.2f} m" if conv else ""))
+    os.makedirs(out_dir, exist_ok=True)
+    detail = os.path.join(out_dir, "bounce_eval.csv")
+    with open(detail, "w", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(["gt_frame", "pred_frame", "err_px", "err_m", "outcome"])
+        wr.writerows(rows)
+    print(f"  per-bounce detail     : {detail}")
+    return summary
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -368,11 +462,18 @@ def main():
                         help="ball tracker CSV")
     parser.add_argument("--ball-radius", type=float, default=10.0, dest="ball_radius",
                         help="max distance (px) for a ball detection to match the GT")
+    parser.add_argument("--bounce-gt", dest="bounce_gt",
+                        help="GT bounces CSV (annotate.py bounce)")
+    parser.add_argument("--bounce-pred", dest="bounce_pred",
+                        default="outputs/shot_analysis/bounces.csv",
+                        help="bounces CSV (analysis/bounce_detection.py)")
+    parser.add_argument("--bounce-tol", type=float, default=2.0, dest="bounce_tol",
+                        help="max distance (frames) for a bounce to match the GT")
     parser.add_argument("--output", default="outputs/evaluation")
     args = parser.parse_args()
 
-    if not (args.gt or args.court_gt or args.ball_gt):
-        parser.error("nothing to do: pass --gt, --court-gt and/or --ball-gt")
+    if not (args.gt or args.court_gt or args.ball_gt or args.bounce_gt):
+        parser.error("nothing to do: pass --gt, --court-gt, --ball-gt and/or --bounce-gt")
 
     if args.gt:
         evaluate_players(args.gt, args.pred, args.court,
@@ -381,6 +482,9 @@ def main():
         evaluate_court(args.court_gt, args.court_pred, args.output)
     if args.ball_gt:
         evaluate_ball(args.ball_gt, args.ball_pred, args.ball_radius, args.output)
+    if args.bounce_gt:
+        evaluate_bounces(args.bounce_gt, args.bounce_pred, args.bounce_tol, args.court,
+                         args.output)
     print()
 
 

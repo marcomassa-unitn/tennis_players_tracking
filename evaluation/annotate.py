@@ -18,6 +18,10 @@ Three modes:
            with a magnifier around the cursor. Output CSV: frame,visible,x,y.
            Resumes an existing file, skipping frames already labelled.
 
+  bounce — step through the clip and mark every frame where the ball touches the
+           ground, clicking the ball, or as hidden if the contact cannot be seen.
+           Output CSV: frame,visible,x,y. Resumes an existing file.
+
 Usage (from project root):
     python evaluation/annotate.py boxes --video data/Input_video2.mp4 \\
         --step 30 --output outputs/ground_truth/players_clip2_gt.csv
@@ -26,6 +30,8 @@ Usage (from project root):
         --output outputs/ground_truth/input_video2_court_gt.csv
 
     python evaluation/annotate.py ball --video data/Input_video2.mp4 --step 10
+
+    python evaluation/annotate.py bounce --video data/Input_video2.mp4
 
 Keys (boxes mode, inside the OpenCV ROI selector):
     draw with the mouse, ENTER/SPACE = confirm box, c = cancel selection
@@ -190,6 +196,25 @@ MAG_SRC = 40      # half-size (display px) of the magnified area around the curs
 MAG_ZOOM = 4      # magnification factor of the inset
 
 
+def _draw_magnifier(view, disp, pos):
+    """Draw a magnified inset of `disp` around the cursor `pos` on `view`."""
+    if pos is None:
+        return
+    mx, my = pos
+    h, w = disp.shape[:2]
+    x0, y0 = max(0, mx - MAG_SRC), max(0, my - MAG_SRC)
+    x1, y1 = min(w, mx + MAG_SRC), min(h, my + MAG_SRC)
+    if x1 > x0 and y1 > y0:
+        patch = cv2.resize(disp[y0:y1, x0:x1], None, fx=MAG_ZOOM, fy=MAG_ZOOM,
+                           interpolation=cv2.INTER_NEAREST)
+        cx, cy = (mx - x0) * MAG_ZOOM, (my - y0) * MAG_ZOOM
+        cv2.line(patch, (cx - 12, cy), (cx + 12, cy), (0, 255, 0), 1)
+        cv2.line(patch, (cx, cy - 12), (cx, cy + 12), (0, 255, 0), 1)
+        ph, pw = patch.shape[:2]
+        view[40:40 + ph, w - pw - 10:w - 10] = patch
+        cv2.rectangle(view, (w - pw - 10, 40), (w - 10, 40 + ph), (0, 255, 0), 1)
+
+
 def _load_ball_gt(path):
     """{frame: (visible, x, y)} from an existing ball GT CSV (to resume)."""
     if not os.path.exists(path):
@@ -260,20 +285,7 @@ def annotate_ball(video, step, start, output):
             cv2.putText(view, f"frame {fr}  ({done + 1}/{len(frames)})  "
                               "click ball, ENTER = ok, n = not visible, u = back, q = quit",
                         (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            if mouse["pos"] is not None:
-                mx, my = mouse["pos"]
-                h, w = disp.shape[:2]
-                x0, y0 = max(0, mx - MAG_SRC), max(0, my - MAG_SRC)
-                x1, y1 = min(w, mx + MAG_SRC), min(h, my + MAG_SRC)
-                if x1 > x0 and y1 > y0:
-                    patch = cv2.resize(disp[y0:y1, x0:x1], None, fx=MAG_ZOOM, fy=MAG_ZOOM,
-                                       interpolation=cv2.INTER_NEAREST)
-                    cx, cy = (mx - x0) * MAG_ZOOM, (my - y0) * MAG_ZOOM
-                    cv2.line(patch, (cx - 12, cy), (cx + 12, cy), (0, 255, 0), 1)
-                    cv2.line(patch, (cx, cy - 12), (cx, cy + 12), (0, 255, 0), 1)
-                    ph, pw = patch.shape[:2]
-                    view[40:40 + ph, w - pw - 10:w - 10] = patch
-                    cv2.rectangle(view, (w - pw - 10, 40), (w - 10, 40 + ph), (0, 255, 0), 1)
+            _draw_magnifier(view, disp, mouse["pos"])
             cv2.imshow(win, view)
             key = cv2.waitKey(20) & 0xFF
             if key in (13, 10, 32) and mouse["click"] is not None:
@@ -303,6 +315,84 @@ def annotate_ball(video, step, start, output):
     _save_ball_gt(output, labels)
     n_vis = sum(1 for v, _, _ in labels.values() if v)
     print(f"\nSaved {len(labels)} labelled frames ({n_vis} with the ball visible) to {output}")
+
+
+# ── bounce mode ────────────────────────────────────────────────────────────────
+
+def annotate_bounce(video, start, output):
+    """Mark every frame where the ball touches the ground.
+
+    Move with a/d (one frame) and s/w (ten frames). Click the ball and press ENTER
+    on the contact frame, or h if the contact is hidden (by a player, say) and only
+    its frame can be estimated. x removes the mark on this frame, q saves and quits.
+    An existing output file is resumed; the file is the same format as ball mode.
+    """
+    cap = cv2.VideoCapture(video)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video}")
+    n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    labels = _load_ball_gt(output)
+    print(f"{len(labels)} bounces already marked.")
+    print("a/d = -1/+1 frame   s/w = -10/+10 frames")
+    print("click the ball, then ENTER = bounce here   h = bounce here, but hidden")
+    print("x = remove the mark on this frame   q = save and quit\n")
+
+    win = "annotate bounce"
+    cv2.namedWindow(win)
+    mouse = {"pos": None, "click": None}
+
+    def on_mouse(event, x, y, flags, param):
+        mouse["pos"] = (x, y)
+        if event == cv2.EVENT_LBUTTONDOWN:
+            mouse["click"] = (x, y)
+
+    cv2.setMouseCallback(win, on_mouse)
+    moves = {ord("a"): -1, ord("d"): 1, ord("s"): -10, ord("w"): 10}
+    fr = min(start, n_total - 1)
+    shown = None
+    while True:
+        if fr != shown:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fr)
+            ok, frame = cap.read()
+            if not ok:
+                break
+            disp, s = _scaled(frame)
+            mouse["click"] = None
+            shown = fr
+        view = disp.copy()
+        if mouse["click"] is not None:
+            cv2.circle(view, mouse["click"], 7, (0, 0, 255), 1)
+        if fr in labels:
+            vis, x, y = labels[fr]
+            if vis:
+                cv2.circle(view, (int(x * s), int(y * s)), 9, (0, 255, 0), 2)
+        state = f"BOUNCE ({'hidden' if not labels[fr][0] else 'marked'})" if fr in labels else ""
+        cv2.putText(view, f"frame {fr}/{n_total - 1}  marked {len(labels)}  {state}",
+                    (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        _draw_magnifier(view, disp, mouse["pos"])
+        cv2.imshow(win, view)
+        key = cv2.waitKey(20) & 0xFF
+        if key in moves:
+            fr = min(max(fr + moves[key], 0), n_total - 1)
+        elif key in (13, 10, 32) and mouse["click"] is not None:
+            cx, cy = mouse["click"]
+            labels[fr] = (1, cx / s, cy / s)
+            mouse["click"] = None
+            _save_ball_gt(output, labels)
+        elif key == ord("h"):
+            labels[fr] = (0, None, None)
+            _save_ball_gt(output, labels)
+        elif key == ord("x"):
+            labels.pop(fr, None)
+            _save_ball_gt(output, labels)
+        elif key == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    _save_ball_gt(output, labels)
+    n_vis = sum(1 for v, _, _ in labels.values() if v)
+    print(f"\nSaved {len(labels)} bounces ({n_vis} visible) to {output}")
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -337,6 +427,12 @@ def main():
     pl.add_argument("--output", default=None,
                     help="output CSV (default: outputs/ground_truth/ball_<video name>_gt.csv)")
 
+    pn = sub.add_parser("bounce", help="mark the frames where the ball touches the ground")
+    pn.add_argument("--video", default="data/Input_video2.mp4")
+    pn.add_argument("--start", type=int, default=0, help="first frame (default: 0)")
+    pn.add_argument("--output", default=None,
+                    help="output CSV (default: outputs/ground_truth/bounce_<video name>_gt.csv)")
+
     args = parser.parse_args()
     if args.mode == "boxes":
         annotate_boxes(args.video, args.step, args.start, args.output)
@@ -344,6 +440,10 @@ def main():
         stem = os.path.splitext(os.path.basename(args.video))[0]
         output = args.output or os.path.join("outputs", "ground_truth", f"ball_{stem}_gt.csv")
         annotate_ball(args.video, args.step, args.start, output)
+    elif args.mode == "bounce":
+        stem = os.path.splitext(os.path.basename(args.video))[0]
+        output = args.output or os.path.join("outputs", "ground_truth", f"bounce_{stem}_gt.csv")
+        annotate_bounce(args.video, args.start, output)
     else:
         annotate_court(args.video, args.frame, args.output)
 

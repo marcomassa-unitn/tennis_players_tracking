@@ -32,6 +32,7 @@ Use (from project root, after the ball CSV exists):
     python analysis/shot_analysis.py --ball outputs/ball_coordinates/ball_Input_video2.csv
     python analysis/shot_analysis.py --ball outputs/ball_coordinates/ball_Input_video2.csv \\
         --p1-hand right --p2-hand left
+    python analysis/shot_analysis.py --events outputs/shot_analysis/events.csv
     python analysis/shot_analysis.py --self-test        # synthetic, no YOLO
     python analysis/shot_analysis.py --type-self-test   # vs labelled ground truth
 """
@@ -351,8 +352,8 @@ def classify_stroke(ball_cx, player_box, player_side, hand,
 #     fast the ball stops), `reach` (path length / h), `bb` (bowback: vertical-
 #     range fraction travelled back after an interior extreme; ~0 flat, high arc).
 #
-# Thresholds fit against a 23-shot ground truth, on wide plateaus (see
-# --type-self-test: reproduces 23/23, stable for K in 22..30).
+# Thresholds fit against a 23-shot ground truth, on wide plateaus, before the
+# contacts that were really bounces were corrected (see --type-self-test).
 
 # Default thresholds (also the CLI-flag defaults in main()). Plateau centers.
 SHOT_TYPE_PARAMS = {
@@ -715,11 +716,60 @@ def detect_serves(boxes, conv, fps, hits, params=None):
     return sorted(serves)
 
 
+# ── contacts that are really bounces ───────────────────────────────────────────
+#
+# detect_hits keeps the reversals close to a player, and a bounce in front of the
+# receiver is one of them. The events read from the track (bounce_detection.py)
+# tell the two apart, so such a contact moves to the hit that follows the bounce.
+
+HIT_NEAR, BOUNCE_FAR, HIT_FAR, BOUNCE_NEAR = "hit_near", "bounce_far", "hit_far", "bounce_near"
+HIT_OF_PLAYER = {1: HIT_NEAR, 2: HIT_FAR}
+BOUNCE_OF_PLAYER = {1: BOUNCE_NEAR, 2: BOUNCE_FAR}
+
+CONTACT_PARAMS = {
+    "bounce_tol_s": 0.1,     # a contact this close to a bounce on its own side is that bounce
+    "next_hit_s": 0.6,       # the hit comes at most this long after the bounce
+}
+
+
+def move_contacts_off_bounces(hits, events, fps, min_gap_s=0.5, params=None):
+    """Move each hit sitting on a bounce of its own player to the hit after it.
+
+    Without a following hit in `events` the contact stays where it is. Returns the
+    hits and {moved frame: (cx, cy)}, the ball at those contacts: the track used
+    for the shots is often a straight fill there, cutting the corner of the hit.
+    """
+    p = params or CONTACT_PARAMS
+    moved, ball_at = [], {}
+    for f, pid, strength in hits:
+        bounces = events[(events["event"] == BOUNCE_OF_PLAYER[pid])
+                         & ((events["frame"] - f).abs() <= p["bounce_tol_s"] * fps)]
+        if not bounces.empty:
+            t = bounces["frame"].iloc[0]
+            after = events[(events["event"] == HIT_OF_PLAYER[pid]) & (events["frame"] > t)
+                           & (events["frame"] <= t + p["next_hit_s"] * fps)]
+            if not after.empty:
+                hit = after.loc[np.hypot(after["jump_up_ms"], after["jump_side_ms"]).idxmax()]
+                f = int(round(hit["frame"]))
+                ball_at[f] = (float(hit["cx"]), float(hit["cy"]))
+        moved.append((f, pid, strength))
+
+    kept = []
+    for hit in sorted(moved):
+        if not any(k[1] == hit[1] and hit[0] - k[0] < min_gap_s * fps for k in kept):
+            kept.append(hit)
+    return kept, ball_at
+
+
 def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                   vy_min=0.5, acc_thr=1.5, win=4,
                   reversal_look=6, reversal_vy_frac=0.5,
-                  type_params=None):
-    """Detect and classify every shot; return a DataFrame."""
+                  type_params=None, events=None):
+    """Detect and classify every shot; return a DataFrame.
+
+    events : hits and bounces from bounce_detection.py, to correct the contacts
+             that are really bounces. Without them the contacts stay as detected.
+    """
     tp = type_params or SHOT_TYPE_PARAMS
     # Warn on a ball/player frame-range mismatch: non-overlapping ranges mean
     # _nearest_box never matches and the user would just see "No shots detected".
@@ -746,6 +796,9 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         hits = [h for h in hits if not (h[1] == pid and lo <= h[0] <= hi)]
         hits.append((contact, pid, 0.0))
     hits.sort()
+    ball_at = {}
+    if events is not None:
+        hits, ball_at = move_contacts_off_bounces(hits, events, fps, min_gap_s)
 
     n_dropped = 0
     rows = []
@@ -770,6 +823,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         else:
             ball_cx = float(np.nanmedian(cx_win))
             ball_cy = float(np.nanmedian(cy_win))
+        ball_cx, ball_cy = ball_at.get(f, (ball_cx, ball_cy))
 
         feet = _box_feet(box)
         # Player feet in meters — the hitmap marks where the PLAYER struck, not the ball.
@@ -1140,11 +1194,11 @@ def self_test() -> None:
 # User-provided ground truth for the 23 detected shots of Input_video2. A
 # "dropshot/slice" label is ambiguous and counts correct for EITHER.
 _TYPE_GROUND_TRUTH = {
-    84: "flat", 109: "flat", 152: "flat", 188: "flat", 225: "flat",
-    252: "dropshot", 322: "flat", 349: "slice", 386: "lob", 432: "flat",
+    84: "flat", 115: "flat", 152: "flat", 188: "flat", 225: "flat",
+    262: "dropshot", 322: "flat", 349: "slice", 389: "lob", 432: "flat",
     469: "flat", 503: "slice", 554: "flat", 594: "flat", 629: "flat",
-    660: "flat", 696: "flat", 740: "dropshot/slice", 775: "flat", 812: "flat",
-    858: "dropshot/slice", 912: "slice", 950: "flat",
+    660: "flat", 696: "flat", 740: "dropshot/slice", 785: "flat", 828: "flat",
+    861: "dropshot/slice", 912: "slice", 950: "flat",
 }
 _TYPE_TARGET_ACC = 0.90
 
@@ -1177,8 +1231,11 @@ def type_self_test(ball_csv: str = None, players_csv: str = None,
     track = load_ball_track(ball_csv)
     boxes = load_player_boxes(players_csv)
     conv = CourtConverter(court_csv)
+    from analysis.bounce_detection import clip_events
+    events = clip_events(str(base / "ball_coordinates" / "ball_Input_video2.csv"),
+                         boxes, conv, fps)
     # GT was labelled on the default right/right run
-    shots = analyze_shots(track, boxes, conv, fps, {1: "right", 2: "right"})
+    shots = analyze_shots(track, boxes, conv, fps, {1: "right", 2: "right"}, events=events)
 
     if shots.empty or "shot_type" not in shots.columns:
         raise SystemExit("TYPE-SELF-TEST: no shots / no shot_type column produced.")
@@ -1383,6 +1440,9 @@ def main() -> None:
     parser.add_argument("--p2-hand", choices=["right", "left"],
                         default="right", dest="p2_hand",
                         help="dominant hand of player 2 (default right)")
+    parser.add_argument("--events", default=None,
+                        help="events CSV from analysis/bounce_detection.py, to correct "
+                             "the contacts that are really bounces")
     parser.add_argument("--min-gap", type=float, default=0.5, dest="min_gap",
                         help="minimum distance in seconds between two shots")
     # Detection thresholds (px/frame units, tuned on the demo clip).
@@ -1520,7 +1580,8 @@ def main() -> None:
                           acc_thr=args.acc_thr, win=args.win,
                           reversal_look=args.reversal_look,
                           reversal_vy_frac=args.reversal_vy_frac,
-                          type_params=type_params)
+                          type_params=type_params,
+                          events=pd.read_csv(args.events) if args.events else None)
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)

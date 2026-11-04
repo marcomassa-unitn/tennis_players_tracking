@@ -6,8 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **Turn a single, uncalibrated broadcast tennis clip into structured match data:**
-court geometry, metric player trajectories, movement statistics, the ball track
-and a shot-by-shot breakdown (forehand/backhand, flat/slice/dropshot/lob,
+court geometry, metric player trajectories, movement statistics, the ball track,
+its bounces and a shot-by-shot breakdown (forehand/backhand, flat/slice/dropshot/lob,
 serve/smash).
 
 The core is **classical computer vision**. Court detection, player tracking, motion
@@ -68,13 +68,16 @@ the pipeline produces:
 | Ball | found on 90 % of the frames (original detector: 60 %); vs hand-labelled positions: precision 1.00, recall 0.92, centre error 1.2 px |
 | Movement | near player 94.8 m covered (mean 10.6 km/h, p95 29.6 km/h); far player 104.2 m (mean 11.8 km/h, p95 27.4 km/h) |
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
-| Shot mix | 17 flat, 5 slice, 2 dropshot, 1 lob; 17 backhands, 6 forehands, 2 on the body axis (the serve included) |
-| Shot type | **23/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
+| Bounces | 23 found, all on the court; on all four clips with a serve, it lands in a service box (not yet measured against hand labels) |
+| Shot mix | 18 flat, 5 slice, 1 dropshot, 1 lob; 17 backhands, 6 forehands, 2 on the body axis (the serve included) |
+| Shot type | **21/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
 | Self-tests | synthetic stroke test 4/4, synthetic serve/smash test 5/5 with zero false positives |
 
-¹ The shot-type thresholds were tuned on this same rally, so 23/23 shows the
-rules fit the labelled data. It is not an accuracy figure on unseen footage.
-The report's 21/23 refers to an earlier version of the classifier.
+¹ The shot-type thresholds were tuned on this same rally, so this is not an
+accuracy figure on unseen footage. They were tuned before the contacts that were
+really bounces were corrected, and were deliberately not refitted afterwards: the
+two misses are the shots at frames 262 and 861. The report's 21/23 is a different
+result, from an earlier version of the classifier.
 
 | Combined position heatmap | Court-zone occupancy | Shot hitmap |
 |:---:|:---:|:---:|
@@ -173,7 +176,9 @@ flowchart LR
 6. **Shot analysis** ([`analysis/shot_analysis.py`](analysis/shot_analysis.py)).
    Contacts are detected from persistent reversals of the vertical velocity and
    from acceleration peaks on the Savitzky–Golay-smoothed ball track, and are
-   kept only when the ball is near a player. That rejects bounces. The stroke
+   kept only when the ball is near a player. That rejects most bounces, and the
+   ones left, right in front of the receiver, are moved to the hit that follows
+   them using the events of the next step. The stroke
    (forehand/backhand) comes from the ball's side relative to the body axis,
    taking handedness and court side into account. The shot type comes from
    perspective-invariant features of the outgoing trajectory. Serves are found
@@ -184,7 +189,17 @@ flowchart LR
    in the ball track is mistaken for it. Smashes are read from the ball (an
    above-head contact on a descending ball, driven down). Both go in a separate,
    conservative overhead column.
-7. **Evaluation** ([`evaluation/`](evaluation)). A small OpenCV tool annotates
+7. **Bounce detection** ([`analysis/bounce_detection.py`](analysis/bounce_detection.py)).
+   Between two events the ball flies freely, so in the image it follows almost a
+   parabola. The real detections are split into the best sequence of parabolas by
+   dynamic programming, and the point where two of them meet gives the time, between
+   frames if needed, and the landing point. Physics then filters the junctions: the
+   ground only pushes the ball up the image (typically a jump of 9–13 m/s here, at
+   both ends of the court once scaled to metres), and a bounce lies on the court,
+   where the homography is exact. The order of a rally (hit, bounce on the other side,
+   hit, …) picks the final labels, which is what separates a near bounce from the
+   near hit that follows it. Pipeline step 6 runs this first, then the shots.
+8. **Evaluation** ([`evaluation/`](evaluation)). A small OpenCV tool annotates
    ground-truth boxes and court keypoints. The evaluator reports mean and median
    IoU, precision and recall at IoU 0.5, centre error (px), feet error (m), ID
    switches and per-keypoint court error.
@@ -259,12 +274,14 @@ python motion_estimation/block_matching.py --method both
 python evaluation/annotate.py boxes --video data/Input_video2.mp4 --step 30
 python evaluation/annotate.py court --video data/Input_video2.mp4
 python evaluation/annotate.py ball  --video data/Input_video2.mp4 --step 10   # click the ball, n = not visible
+python evaluation/annotate.py bounce --video data/Input_video2.mp4   # a/d move, click + ENTER = bounce, h = hidden
 python evaluation/evaluate_tracking.py --gt <gt_boxes.csv> \
     --pred outputs/player_coordinates/players_Input_video2.csv \
     --court outputs/court_coordinates/Input_video2_court.csv \
     --court-gt <gt_court.csv>
 python evaluation/evaluate_tracking.py --ball-gt outputs/ground_truth/ball_Input_video2_gt.csv \
     --ball-pred outputs/ball_coordinates/ball_Input_video2.csv
+python evaluation/evaluate_tracking.py --bounce-gt outputs/ground_truth/bounce_Input_video2_gt.csv     --bounce-pred outputs/shot_analysis/bounces.csv     --court outputs/court_coordinates/Input_video2_court.csv
 ```
 
 Useful `pipeline.py` flags:
@@ -336,6 +353,9 @@ ruff check .    # lint
 - **Serves need the server in view.** A serve hit during a fade-in, or before
   the server's box is tracked, is not detected. The smash rule is only covered
   by the synthetic test, since none of the clips contains a smash.
+- **Some bounces cannot be seen.** When the ball lands behind a player, or the
+  track has a gap around the landing, no bounce is reported. Landing points are
+  good to a few decimetres at best at 30 fps, so this is no line-calling tool.
 - **Shot types ignore the bounce.** Lob, slice and dropshot are told apart from
   the shape of the outgoing trajectory in the image, not from where and when the
   ball lands. On clips other than the demo rally they are not checked against

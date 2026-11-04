@@ -1,6 +1,6 @@
 import pytest
 
-from evaluation.evaluate_tracking import iou
+from evaluation.evaluate_tracking import bounce_metrics, iou
 
 
 def test_iou_identical_boxes():
@@ -18,3 +18,15 @@ def test_iou_partial_overlap():
 
 def test_iou_degenerate_box():
     assert iou((0, 0, 0, 0), (0, 0, 0, 0)) == 0.0
+
+
+def test_bounce_metrics_pairs_closest_first_and_counts_hidden():
+    gt = {100: (500.0, 400.0), 110: (600.0, 400.0), 200: None, 300: (10.0, 10.0)}
+    pred = [(100.5, 503.0, 404.0), (108.4, 600.0, 400.0), (201.0, 0.0, 0.0), (250.0, 0.0, 0.0)]
+    summary, rows = bounce_metrics(gt, pred, tolerance=2)
+    assert (summary["tp"], summary["fp"], summary["fn"]) == (3, 1, 1)
+    assert summary["precision"] == pytest.approx(0.75)
+    assert summary["recall"] == pytest.approx(0.75)
+    assert summary["recall_visible"] == pytest.approx(2 / 3)
+    assert summary["median_err_px"] == pytest.approx(2.5)
+    assert [r[-1] for r in rows].count("FP") == 1
