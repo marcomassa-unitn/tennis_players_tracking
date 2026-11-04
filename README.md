@@ -216,7 +216,9 @@ flowchart LR
    switches and per-keypoint court error.
 
 The [**live viewer**](live_view.py) replays the clip with player and ball boxes,
-a synced minimap and a running shot tally. At the end it shows the whole-clip
+a synced minimap, a running shot tally and a court following the ball, with its
+bounces numbered as they happen. The ball moves there on its path over the ground,
+from each contact to each bounce, since an airborne ball cannot be projected. At the end it shows the whole-clip
 heatmap, zones and shot hitmap.
 
 ## Quick start

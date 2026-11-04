@@ -2,7 +2,8 @@
 """Display-only live viewer: original clip + boxes + synced top-down minimap.
 
 Draws player/ball boxes on the ORIGINAL clip with a top-down minimap docked
-right (moving in lockstep) and a stats panel below it. Nothing is saved.
+right (moving in lockstep) and a stats panel below it. Between them, when the
+clip's bounces are known, a tall court follows the ball. Nothing is saved.
 
 Reads only what the pipeline already produced for this clip, in its folder under
 outputs/ — never re-runs a tracker or YOLO — so it is fast and every overlay stays
@@ -59,6 +60,11 @@ SCREEN_FRACTION = 0.40   # share of the screen AREA each window covers by defaul
 MAX_RENDER_WIDTH = 1600  # beyond this, compositing gets too slow (14 fps at 1920
                          # px on a laptop); the window stretches the canvas instead
 PANEL_W   = 380          # width (px) of the right column (minimap + stats)
+BALL_W    = 260          # width (px) of the ball column, tall enough for the whole court
+BALL_TRAIL_S = 0.5       # length of the ball's trail
+BALL_MAX_GAP_S = 2.5     # events further apart than this are not one flight
+BALL_RECENT = 10         # bounces and shots kept in the column; numbers overlap beyond
+                         # that, and the closing summary has them all
 MINI_FRAC = 0.50         # minimap's share of the right-column height (stats gets
                          # the rest: 8 category rows + totals + footer need the room)
 FONT      = cv2.FONT_HERSHEY_SIMPLEX
@@ -164,6 +170,36 @@ def load_shot_markers(shots_csv: str, minimap: "Minimap",
         out.append((int(r.frame), pid, cat, minimap._to_px(xm, ym)))
     out.sort(key=lambda t: t[0])
     return out
+
+
+def ball_ground_path(shots, bounces, fps, max_gap_s=BALL_MAX_GAP_S) -> dict:
+    """{frame: (x_m, y_m)}: where the ball is above the court, on every frame.
+
+    Projecting an airborne ball through the homography would throw it off the
+    court. On the ground plane, though, a flight is a straight line at constant
+    speed, so the ball simply goes from each contact to each bounce. Events too far
+    apart belong to different points, and no path is drawn between them.
+    """
+    anchors = {(float(r.frame), float(r.player_x_m), float(r.player_y_m))
+               for r in shots.dropna(subset=["player_x_m", "player_y_m"]).itertuples()}
+    anchors |= {(float(r.frame), float(r.x_m), float(r.y_m)) for r in bounces.itertuples()}
+    anchors = sorted(anchors)
+    path = {}
+    for (f0, x0, y0), (f1, x1, y1) in zip(anchors[:-1], anchors[1:]):
+        if f1 == f0 or f1 - f0 > max_gap_s * fps:
+            continue
+        for f in range(int(np.ceil(f0)), int(np.floor(f1)) + 1):
+            t = (f - f0) / (f1 - f0)
+            path[f] = (x0 + t * (x1 - x0), y0 + t * (y1 - y0))
+    return path
+
+
+def load_bounce_markers(bounces, minimap: "Minimap", bounds) -> list:
+    """[(frame, rally order, (px, py), reliable), ...], skipping off-limits points."""
+    x_lo, x_hi, y_lo, y_hi = bounds
+    return [(r.frame, order, minimap._to_px(r.x_m, r.y_m), bool(r.reliable))
+            for order, r in enumerate(bounces.itertuples(), start=1)
+            if x_lo <= r.x_m <= x_hi and y_lo <= r.y_m <= y_hi]
 
 
 # ── minimap ─────────────────────────────────────────────────────────────────────
@@ -353,6 +389,49 @@ class Minimap:
         return img
 
 
+class BallMap(Minimap):
+    """Tall court following the ball: its path, its bounces in order and the shots."""
+
+    def __init__(self, size: tuple[int, int]):
+        super().__init__(size)
+        self._s = SS          # this column is narrower than the one Minimap scales by
+
+    def render(self, ball_xy, trail, bounces, shot_markers) -> np.ndarray:
+        """Compose one frame; history first, the ball last so it is never hidden.
+
+        ``ball_xy`` = (xm, ym) or None, ``trail`` = recent (xm, ym), oldest first,
+        ``bounces`` = [(order, (px, py), reliable), ...] and ``shot_markers`` =
+        [(pid, category, (px, py)), ...], both accumulated so far.
+        """
+        img = self._base.copy()
+        s = self._s
+        for pid, cat, center in shot_markers:
+            _draw_shot_marker(img, center, pid, _CAT_BGR.get(cat, _CAT_FALLBACK_BGR),
+                              r=int(round(5 * s)), th=max(1, int(round(s))))
+        for order, center, reliable in bounces:
+            cv2.circle(img, center, int(round(9 * s)),
+                       (69, 201, 246) if reliable else (136, 136, 136), -1, cv2.LINE_AA)
+            cv2.circle(img, center, int(round(9 * s)), (255, 255, 255),
+                       max(1, int(round(s))), cv2.LINE_AA)
+            text = str(order)
+            fs = 0.42 * s
+            th = max(1, int(round(1.2 * s)))
+            (tw, tx), _ = cv2.getTextSize(text, FONT, fs, th)
+            cv2.putText(img, text, (center[0] - tw // 2, center[1] + tx // 2), FONT, fs,
+                        (30, 26, 26), th, cv2.LINE_AA)
+        if len(trail) > 1:
+            pts = np.array([self._to_px(*p) for p in trail], np.int32)
+            cv2.polylines(img, [pts], False, (0, 255, 255), max(1, int(round(2 * s))),
+                          cv2.LINE_AA)
+        if ball_xy is not None:
+            center = self._to_px(*ball_xy)
+            cv2.circle(img, center, int(round(6 * s)), (20, 20, 20), -1, cv2.LINE_AA)
+            cv2.circle(img, center, int(round(5 * s)), (0, 255, 255), -1, cv2.LINE_AA)
+        cv2.putText(img, "Ball", (int(round(8 * s)), int(round(20 * s))), FONT, 0.55 * s,
+                    _PANEL_FG, max(1, int(round(1.5 * s))), cv2.LINE_AA)
+        return img
+
+
 # ── stats placeholder ───────────────────────────────────────────────────────────
 
 def render_stats_panel(size: tuple[int, int], counts: dict,
@@ -473,15 +552,17 @@ def draw_label(img: np.ndarray, text: str, anchor: tuple[int, int],
 
 def compose(frame: np.ndarray, minimap: np.ndarray, stats: np.ndarray,
             disp_h: int, panel_w: int, mini_h: int,
-            player_overlays=(), ball_overlay=None) -> np.ndarray:
-    """Assemble [ video | (minimap / stats) ] into one canvas of height disp_h.
+            player_overlays=(), ball_overlay=None, ball_panel=None,
+            ball_w: int = 0) -> np.ndarray:
+    """Assemble [ video | ball | (minimap / stats) ] into one canvas of height disp_h.
 
     Overlays are drawn HERE on the resized video (not the source frame) so label
     strokes stay crisp instead of softening under the source->display downscale.
     ``player_overlays`` = [(pid, x, y, w, h, color), ...] (box + "P#" label),
     ``ball_overlay`` = (x, y, w, h) (box, no label), both in SOURCE-pixel coords,
-    scaled by the frame's resize factor. The minimap/stats panels arrive at SS×
-    and are area-downscaled here for smooth text.
+    scaled by the frame's resize factor. The side panels arrive at SS× and are
+    area-downscaled here for smooth text. With ``ball_panel`` None there is no ball
+    column.
     """
     h0, w0 = frame.shape[:2]
     vw = int(round(w0 * (disp_h / h0)))
@@ -502,13 +583,17 @@ def compose(frame: np.ndarray, minimap: np.ndarray, stats: np.ndarray,
                       int(round(w * sx)), int(round(h * sy)))
         cv2.rectangle(video, (X, Y), (X + W, Y + H), (0, 255, 255), 2, cv2.LINE_AA)
 
-    canvas = np.zeros((disp_h, vw + panel_w, 3), np.uint8)
+    canvas = np.zeros((disp_h, vw + ball_w + panel_w, 3), np.uint8)
     canvas[:, :vw] = video
     # Area-downscale the SS× panels to fit their exact sub-regions (also avoids
     # any assembly shape mismatch).
-    canvas[0:mini_h, vw:vw + panel_w]      = cv2.resize(
+    if ball_panel is not None:
+        canvas[:, vw:vw + ball_w] = cv2.resize(
+            ball_panel, (ball_w, disp_h), interpolation=cv2.INTER_AREA)
+    px = vw + ball_w
+    canvas[0:mini_h, px:px + panel_w]      = cv2.resize(
         minimap, (panel_w, mini_h), interpolation=cv2.INTER_AREA)
-    canvas[mini_h:disp_h, vw:vw + panel_w] = cv2.resize(
+    canvas[mini_h:disp_h, px:px + panel_w] = cv2.resize(
         stats, (panel_w, disp_h - mini_h), interpolation=cv2.INTER_AREA)
     return canvas
 
@@ -769,30 +854,12 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
         disp_h, fps_override, shots_csv=None, max_shot_markers=0,
         render_width=RENDER_WIDTH, window_width=None,
         output_dir=None, screen_fraction=SCREEN_FRACTION) -> None:
-    # Solve the RENDER height so the canvas width (video + PANEL_W) == render_width
+    # Solve the RENDER height so the canvas width (video + side columns) == render_width
     # while the video keeps its aspect ratio. The shown window is a separate,
     # smaller size (canvas area-downscaled once at display time):
-    #   vw + PANEL_W = render_width, vw = src_w*disp_h/src_h
-    #   => disp_h = (render_width - PANEL_W) * src_h / src_w.
+    #   vw + side_w = render_width, vw = src_w*disp_h/src_h
+    #   => disp_h = (render_width - side_w) * src_h / src_w.
     _enable_dpi_awareness()   # before any window exists (see its docstring)
-    probe = cv2.VideoCapture(video)
-    src_w = probe.get(cv2.CAP_PROP_FRAME_WIDTH) or 1920.0
-    src_h = probe.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1080.0
-    probe.release()
-    # Window size from the canvas aspect ratio (video + PANEL_W column), which
-    # itself depends on the render width: render as wide as the window (up to
-    # MAX_RENDER_WIDTH) so text is not upscaled, and iterate to a fixed point.
-    def canvas_aspect(width):
-        return width / ((width - PANEL_W) * src_h / src_w)
-
-    requested_width, base_render = window_width, render_width
-    for _ in range(3):
-        window_width, win_h = _window_size(canvas_aspect(render_width),
-                                           screen_fraction, requested_width)
-        render_width = max(base_render, min(window_width, MAX_RENDER_WIDTH))
-    if render_width and render_width > PANEL_W + 80 and src_w > 0:
-        disp_h = int(round((render_width - PANEL_W) * src_h / src_w))
-
     # --- the summary figures and shots come from the clip's folder; only what is
     # missing is built, from the CSVs. Abort on failure — the summary needs them. ---
     if _analysis_ready(output_dir, shots_csv):
@@ -808,6 +875,31 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
                 "Fix the inputs above and relaunch (the end-of-clip summary needs "
                 "the combined heatmap, zones and shot hitmap).") from e
         print("  Analysis figures ready.")
+
+    # The ball column needs the bounces, and the layout needs to know about it.
+    bounces_csv = os.path.join(output_dir, "shot_analysis", "bounces.csv")
+    has_ball_map = (os.path.exists(bounces_csv) and bool(shots_csv)
+                    and os.path.exists(shots_csv))
+    ball_w = BALL_W if has_ball_map else 0
+    side_w = PANEL_W + ball_w
+
+    probe = cv2.VideoCapture(video)
+    src_w = probe.get(cv2.CAP_PROP_FRAME_WIDTH) or 1920.0
+    src_h = probe.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1080.0
+    probe.release()
+    # Window size from the canvas aspect ratio (video + side columns), which
+    # itself depends on the render width: render as wide as the window (up to
+    # MAX_RENDER_WIDTH) so text is not upscaled, and iterate to a fixed point.
+    def canvas_aspect(width):
+        return width / ((width - side_w) * src_h / src_w)
+
+    requested_width, base_render = window_width, render_width
+    for _ in range(3):
+        window_width, win_h = _window_size(canvas_aspect(render_width),
+                                           screen_fraction, requested_width)
+        render_width = max(base_render, min(window_width, MAX_RENDER_WIDTH))
+    if render_width and render_width > side_w + 80 and src_w > 0:
+        disp_h = int(round((render_width - side_w) * src_h / src_w))
 
     # --- per-frame overlays, indexed by absolute frame number ---
     boxes = load_player_boxes(players_csv)
@@ -849,6 +941,32 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
         print(f"  Shot markers: none (no shots CSV at {shots_csv}); shot overlay "
               "disabled.\n               Run 'python analysis/shot_analysis.py' to "
               "enable it.")
+
+    # --- ball column: path on the court, bounces and shots, in its own coordinates ---
+    ball_map, ball_path, ball_bounces, ball_shots = None, {}, [], []
+    if has_ball_map:
+        import pandas as pd
+        try:
+            bounces = pd.read_csv(bounces_csv)
+            ball_map = BallMap((ball_w * SS, disp_h * SS))
+            ball_path = ball_ground_path(pd.read_csv(shots_csv), bounces,
+                                         fps_override or 30.0)
+            ball_bounces = load_bounce_markers(bounces, ball_map, (x_lo, x_hi, y_lo, y_hi))
+            ball_shots = load_shot_markers(shots_csv, ball_map, (x_lo, x_hi, y_lo, y_hi))
+            print(f"  Ball column : {len(ball_bounces)} bounces from {bounces_csv}")
+        except Exception as e:   # a bad CSV must never break playback
+            print(f"  Ball column : failed to load ({e}); left empty.")
+            ball_map = BallMap((ball_w * SS, disp_h * SS))
+
+    def ball_panel(frame_idx: int):
+        """The ball column at frame_idx, None when the clip has no bounces."""
+        if ball_map is None:
+            return None
+        n = int(BALL_TRAIL_S * (fps_override or 30.0))
+        trail = [ball_path[g] for g in range(frame_idx - n, frame_idx + 1) if g in ball_path]
+        return ball_map.render(ball_path.get(frame_idx), trail,
+                               [b[1:] for b in ball_bounces if b[0] <= frame_idx][-BALL_RECENT:],
+                               [m[1:] for m in ball_shots if m[0] <= frame_idx][-BALL_RECENT:])
 
     # FIXED legend: all categories in shots.csv, computed once so the full key
     # shows from frame 0 (it does NOT build up). None when there are no shots.
@@ -951,7 +1069,7 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             stats = render_stats_panel((PANEL_W * SS, (disp_h - mini_h) * SS),
                                        counts, stat_cats)
             last_canvas = compose(frame, mini, stats, disp_h, PANEL_W, mini_h,
-                                  player_overlays, ball_overlay)
+                                  player_overlays, ball_overlay, ball_panel(idx), ball_w)
             # Downscale the high-res canvas to the window size ONCE here.
             shown_img = _fit_to_screen(last_canvas, window_width)
             cv2.imshow(win, shown_img)
