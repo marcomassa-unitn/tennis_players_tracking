@@ -43,10 +43,11 @@ the one exception: it is small and fast, so it uses a YOLOv8 detector.
   positions, recall rises from 0.64 to 0.92 with no false positives, and the
   centre error falls from 2.0 px to 1.2 px. On a second clip used only for
   testing, recall goes from 0.72 to 0.88.
-- **Perspective-invariant shot classification.** Shot types are read from
-  scale-free trajectory-shape features, so near-side and far-side shots need no
-  separate calibration. It labels all 23 shots of a hand-labelled rally
-  correctly (flat, slice, dropshot, lob).
+- **Shot types from the ball's physics.** Bounces are found to within a fraction
+  of a frame, and the flight to the bounce gives each shot's type: its duration,
+  landing point and height work the same at both ends of the court. It agrees with
+  all 23 shots of a hand-labelled rally (flat, slice, dropshot, lob), and volleys
+  are told by the missing bounce.
   Every contact is also classified as forehand or backhand.
 - **Classical motion estimation, implemented from scratch.** Full-search and
   three-step block matching (SAD), next to Farnebäck and Lucas–Kanade optical
