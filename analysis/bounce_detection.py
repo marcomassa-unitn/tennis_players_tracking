@@ -50,6 +50,7 @@ from analysis.shot_analysis import (
 )
 from utils.court_converter import CourtConverter
 from utils.court_geometry import NET, L_m, W_m
+from utils.paths import clip_paths
 
 BOUNCE_PARAMS = {
     # Segmentation (pixels, for 1080p footage)
@@ -309,24 +310,24 @@ def main() -> None:
     parser.add_argument("--video", default="data/Input_video2.mp4",
                         help="source video; only its name is used, for the default CSVs")
     parser.add_argument("--ball", default=None,
-                        help="ball CSV (defaults to outputs/ball_coordinates/ball_<video name>.csv)")
+                        help="ball CSV (defaults to outputs/<video name>/ball_coordinates/ball_<video name>.csv)")
     parser.add_argument("--players", default=None,
                         help="player tracking CSV (defaults to "
-                             "outputs/player_coordinates/players_<video name>.csv)")
+                             "outputs/<video name>/player_coordinates/players_<video name>.csv)")
     parser.add_argument("--court", default=None,
                         help="court keypoints CSV (defaults to "
-                             "outputs/court_coordinates/<video name>_court.csv)")
+                             "outputs/<video name>/court_coordinates/<video name>_court.csv)")
     parser.add_argument("--fps", type=float, default=30.0)
-    parser.add_argument("--output", default="outputs/shot_analysis")
+    parser.add_argument("--output", default=None,
+                        help="output directory (default: outputs/<video name>/shot_analysis)")
     parser.add_argument("--no-map", action="store_true", dest="no_map",
                         help="do not save the bounce map")
     args = parser.parse_args()
 
-    stem = os.path.splitext(os.path.basename(args.video))[0]
-    ball_csv = args.ball or os.path.join("outputs", "ball_coordinates", f"ball_{stem}.csv")
-    players_csv = args.players or os.path.join("outputs", "player_coordinates",
-                                               f"players_{stem}.csv")
-    court_csv = args.court or os.path.join("outputs", "court_coordinates", f"{stem}_court.csv")
+    paths = clip_paths(args.video)
+    ball_csv = args.ball or paths["ball_csv"]
+    players_csv = args.players or paths["players_csv"]
+    court_csv = args.court or paths["court_csv"]
     if not os.path.exists(ball_csv):
         raise SystemExit(f"Ball CSV not found: {ball_csv}")
 
@@ -335,7 +336,7 @@ def main() -> None:
     events = clip_events(ball_csv, boxes, conv, args.fps)
     bounces = bounces_from_events(events)
 
-    out_dir = Path(args.output)
+    out_dir = Path(args.output or paths["shots_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     events.to_csv(out_dir / "events.csv", index=False)
     path = out_dir / "bounces.csv"

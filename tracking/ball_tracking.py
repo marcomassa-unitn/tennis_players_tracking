@@ -9,7 +9,7 @@ Stage 1 -- detection (needs ultralytics + the YOLOv8 weights; GPU recommended).
     (motion-blurred) balls are only found that way. Duplicates are merged with
     NMS, and every box above CANDIDATE_CONF is kept, with the fraction of its
     pixels that moved since the previous frame and its source ("tile" or
-    "frame"), in outputs/ball_coordinates/ball_candidates_<video name>.csv.
+    "frame"), in outputs/<video name>/ball_coordinates/ball_candidates_<video name>.csv.
 
 Stage 2 -- tracking (CPU, no model needed).
     Still candidates are discarded (as the original motion gate did). Among
@@ -24,7 +24,7 @@ Stage 2 -- tracking (CPU, no model needed).
     filled with a shape-preserving cubic (PCHIP) through the real detections;
     longer gaps and the clip edges are left empty.
 
-Output: outputs/ball_coordinates/ball_<video name>.csv with
+Output: outputs/<video name>/ball_coordinates/ball_<video name>.csv with
 frame, x, y, w, h, cx, cy, area, interpolated.
 
 Also written, from the "frame" candidates only: ball_wholeframe_<video name>.csv,
@@ -36,7 +36,7 @@ Usage (from project root):
     python tracking/ball_tracking.py --video data/Input_video2.mp4             # both stages
     python tracking/ball_tracking.py --video data/Input_video2.mp4 --detect-only   # stage 1 (Colab)
     python tracking/ball_tracking.py --video data/Input_video2.mp4 \\
-        --candidates outputs/ball_coordinates/ball_candidates_Input_video2.csv    # stage 2 only
+        --candidates outputs/Input_video2/ball_coordinates/ball_candidates_Input_video2.csv    # stage 2 only
 """
 
 import argparse
@@ -52,6 +52,7 @@ from scipy.interpolate import PchipInterpolator
 
 # Make the project root importable when this file is run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.paths import OUTPUT_ROOT, clip_paths
 from utils.video import check_full_read, safe_fps
 
 # ── Stage 1: detection ────────────────────────────────────────────────────────
@@ -402,12 +403,9 @@ def render_video(video_path, ball_csv, out_path):
     print(f"Saved annotated video to {out_path}")
 
 
-def default_paths(video, output_dir="outputs"):
-    stem = os.path.splitext(os.path.basename(video))[0]
-    base = os.path.join(output_dir, "ball_coordinates")
-    return (os.path.join(base, f"ball_candidates_{stem}.csv"),
-            os.path.join(base, f"ball_{stem}.csv"),
-            os.path.join(base, f"ball_wholeframe_{stem}.csv"))
+def default_paths(video, output_dir=OUTPUT_ROOT):
+    paths = clip_paths(video, output_dir)
+    return paths["ball_candidates_csv"], paths["ball_csv"], paths["ball_wholeframe_csv"]
 
 
 if __name__ == "__main__":
@@ -425,7 +423,7 @@ if __name__ == "__main__":
     parser.add_argument("--candidates", default=None,
                         help="existing candidates CSV: run stage 2 only (no model needed)")
     parser.add_argument("--csv", default=None,
-                        help="output ball CSV (default: outputs/ball_coordinates/ball_<video>.csv)")
+                        help="output ball CSV (default: outputs/<video name>/ball_coordinates/ball_<video>.csv)")
     parser.add_argument("--video-out", default=None, dest="video_out",
                         help="also write an annotated copy of the video here")
     args = parser.parse_args()

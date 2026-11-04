@@ -7,7 +7,7 @@ evaluation/annotate.py.
 Player tracking (--gt): per-frame best-IoU matching of GT vs predicted
 boxes, mean/median IoU, precision/recall at the IoU threshold, centre
 error (px) and feet-point error (m, via the court homography), and an
-ID-switch count. Per-frame detail goes to outputs/evaluation/player_eval.csv.
+ID-switch count. Per-frame detail goes to the clip's evaluation folder, as player_eval.csv.
 
 Court keypoints (--court-gt): per-label pixel error and metric error
 through the GT homography.
@@ -18,20 +18,20 @@ of the matches, and the error of interpolated fills.
 
 Usage (from project root):
     python evaluation/evaluate_tracking.py \\
-        --gt   outputs/ground_truth/players_clip2_gt.csv \\
-        --pred outputs/player_coordinates/players_Input_video2.csv \\
-        --court outputs/court_coordinates/Input_video2_court.csv \\
-        --court-gt   outputs/ground_truth/input_video2_court_gt.csv \\
-        --court-pred outputs/court_coordinates/Input_video2_court.csv
+        --gt   ground_truth/players_Input_video2_gt.csv \\
+        --pred outputs/Input_video2/player_coordinates/players_Input_video2.csv \\
+        --court outputs/Input_video2/court_coordinates/Input_video2_court.csv \\
+        --court-gt   ground_truth/court_Input_video2_gt.csv \\
+        --court-pred outputs/Input_video2/court_coordinates/Input_video2_court.csv
 
     python evaluation/evaluate_tracking.py \\
-        --ball-gt   outputs/ground_truth/ball_Input_video2_gt.csv \\
-        --ball-pred outputs/ball_coordinates/ball_Input_video2.csv
+        --ball-gt   ground_truth/ball_Input_video2_gt.csv \\
+        --ball-pred outputs/Input_video2/ball_coordinates/ball_Input_video2.csv
 
     python evaluation/evaluate_tracking.py \\
-        --bounce-gt   outputs/ground_truth/bounce_Input_video2_gt.csv \\
-        --bounce-pred outputs/shot_analysis/bounces.csv \\
-        --court       outputs/court_coordinates/Input_video2_court.csv
+        --bounce-gt   ground_truth/bounce_Input_video2_gt.csv \\
+        --bounce-pred outputs/Input_video2/shot_analysis/bounces.csv \\
+        --court       outputs/Input_video2/court_coordinates/Input_video2_court.csv
 """
 
 import argparse
@@ -46,6 +46,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_converter import _REAL_WORLD, CourtConverter
+from utils.paths import clip_paths
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -442,38 +443,43 @@ def main():
     """Parse args and run player and/or court evaluation."""
     parser = argparse.ArgumentParser(
         description="Evaluate player tracking and court detection vs GT")
+    parser.add_argument("--video", default="data/Input_video2.mp4",
+                        help="clip to evaluate: gives the default results to read")
     parser.add_argument("--gt",
                         help="GT player boxes CSV (evaluation/annotate.py boxes)")
-    parser.add_argument("--pred",
-                        default="outputs/player_coordinates/players_Input_video2.csv",
-                        help="tracker output CSV")
+    parser.add_argument("--pred", default=None, help="tracker output CSV")
     parser.add_argument("--court", default=None,
                         help="court CSV used to convert errors to metres")
     parser.add_argument("--iou-thr", type=float, default=0.5, dest="iou_thr")
     parser.add_argument("--court-gt", dest="court_gt",
                         help="GT court keypoints CSV (annotate.py court)")
-    parser.add_argument("--court-pred", dest="court_pred",
-                        default="outputs/court_coordinates/Input_video2_court.csv",
+    parser.add_argument("--court-pred", dest="court_pred", default=None,
                         help="detected court keypoints CSV")
     parser.add_argument("--ball-gt", dest="ball_gt",
                         help="GT ball positions CSV (annotate.py ball)")
-    parser.add_argument("--ball-pred", dest="ball_pred",
-                        default="outputs/ball_coordinates/ball_Input_video2.csv",
+    parser.add_argument("--ball-pred", dest="ball_pred", default=None,
                         help="ball tracker CSV")
     parser.add_argument("--ball-radius", type=float, default=10.0, dest="ball_radius",
                         help="max distance (px) for a ball detection to match the GT")
     parser.add_argument("--bounce-gt", dest="bounce_gt",
                         help="GT bounces CSV (annotate.py bounce)")
-    parser.add_argument("--bounce-pred", dest="bounce_pred",
-                        default="outputs/shot_analysis/bounces.csv",
+    parser.add_argument("--bounce-pred", dest="bounce_pred", default=None,
                         help="bounces CSV (analysis/bounce_detection.py)")
     parser.add_argument("--bounce-tol", type=float, default=2.0, dest="bounce_tol",
                         help="max distance (frames) for a bounce to match the GT")
-    parser.add_argument("--output", default="outputs/evaluation")
+    parser.add_argument("--output", default=None,
+                        help="default: outputs/<video name>/evaluation")
     args = parser.parse_args()
 
     if not (args.gt or args.court_gt or args.ball_gt or args.bounce_gt):
         parser.error("nothing to do: pass --gt, --court-gt, --ball-gt and/or --bounce-gt")
+
+    paths = clip_paths(args.video)
+    args.pred = args.pred or paths["players_csv"]
+    args.court_pred = args.court_pred or paths["court_csv"]
+    args.ball_pred = args.ball_pred or paths["ball_csv"]
+    args.bounce_pred = args.bounce_pred or paths["bounces_csv"]
+    args.output = args.output or paths["eval_dir"]
 
     if args.gt:
         evaluate_players(args.gt, args.pred, args.court,

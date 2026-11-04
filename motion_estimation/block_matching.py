@@ -16,15 +16,20 @@ Usage (from project root):
     python motion_estimation/block_matching.py --method full --frames 3
     python motion_estimation/block_matching.py --video data/Input_video2.mp4 \\
         --method tss --block 16 --range 12 --scale 0.5 --start 40 \\
-        --frames 5 --step 2 --output outputs/motion_estimation
+        --frames 5 --step 2 --output outputs/Input_video2/motion_estimation
 """
 
 import argparse
 import os
+import sys
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.paths import clip_paths
 
 # ── SAD helpers ────────────────────────────────────────────────────────────────
 
@@ -192,11 +197,13 @@ def main():
                         help="Number of frame pairs to process (default: 5)")
     parser.add_argument("--step",   type=int, default=2,
                         help="Distance between processed pairs (default: 2)")
-    parser.add_argument("--output", default="outputs/motion_estimation")
+    parser.add_argument("--output", default=None,
+                        help="default: outputs/<video name>/motion_estimation")
     parser.add_argument("--display", action="store_true",
                         help="Also show results in a window")
     args = parser.parse_args()
 
+    args.output = args.output or clip_paths(args.video)["motion_dir"]
     os.makedirs(args.output, exist_ok=True)
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():

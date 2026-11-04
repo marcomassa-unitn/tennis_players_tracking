@@ -231,16 +231,21 @@ Then do one of the following:
 
 - run [`notebooks/ball_tracking_colab.ipynb`](notebooks/ball_tracking_colab.ipynb)
   on a free Colab GPU and put the resulting `ball_candidates_<clip>.csv` in
-  `outputs/ball_coordinates/`;
+  `outputs/<clip>/ball_coordinates/`;
 - or, with a GPU, put the weights in `models/ball_tracker.pt` and run
   `pip install ultralytics`.
 
 Run the whole pipeline on the demo clip. It's headless and writes everything to
-`outputs/`:
+the clip's own folder, `outputs/Input_video2/`:
 
 ```bash
 python pipeline.py --video data/Input_video2.mp4
 ```
+
+It lists which steps already have results and asks which ones to redo; the rest
+is reused. Redoing a step also offers to redo the steps that read its results.
+Without a terminal, only the missing steps run. Every clip keeps its own results,
+so the viewers open any processed clip without running anything again.
 
 Then watch the result:
 
@@ -263,7 +268,7 @@ python tracking/player_tracking.py --video data/Input_video2.mp4 --no-display
 python display_player_tracking.py  --video data/Input_video2.mp4   # watch the tracker's stages (saves nothing)
 python tracking/ball_tracking.py   --video data/Input_video2.mp4 --detect-only   # GPU: YOLO candidates
 python tracking/ball_tracking.py   --video data/Input_video2.mp4 \
-    --candidates outputs/ball_coordinates/ball_candidates_Input_video2.csv     # CPU: tracking
+    --candidates outputs/Input_video2/ball_coordinates/ball_candidates_Input_video2.csv     # CPU: tracking
 
 # Check the court keypoints: draws them and the reprojected court model on a frame
 # (court_tracking.py also saves this image next to the court CSV)
@@ -283,18 +288,20 @@ python evaluation/annotate.py court --video data/Input_video2.mp4
 python evaluation/annotate.py ball  --video data/Input_video2.mp4 --step 10   # click the ball, n = not visible
 python evaluation/annotate.py bounce --video data/Input_video2.mp4   # a/d move, click + ENTER = bounce, h = hidden
 python evaluation/evaluate_tracking.py --gt <gt_boxes.csv> \
-    --pred outputs/player_coordinates/players_Input_video2.csv \
-    --court outputs/court_coordinates/Input_video2_court.csv \
+    --pred outputs/Input_video2/player_coordinates/players_Input_video2.csv \
+    --court outputs/Input_video2/court_coordinates/Input_video2_court.csv \
     --court-gt <gt_court.csv>
-python evaluation/evaluate_tracking.py --ball-gt outputs/ground_truth/ball_Input_video2_gt.csv \
-    --ball-pred outputs/ball_coordinates/ball_Input_video2.csv
-python evaluation/evaluate_tracking.py --bounce-gt outputs/ground_truth/bounce_Input_video2_gt.csv     --bounce-pred outputs/shot_analysis/bounces.csv     --court outputs/court_coordinates/Input_video2_court.csv
+python evaluation/evaluate_tracking.py --ball-gt ground_truth/ball_Input_video2_gt.csv \
+    --ball-pred outputs/Input_video2/ball_coordinates/ball_Input_video2.csv
+python evaluation/evaluate_tracking.py --video data/Input_video2.mp4     --bounce-gt ground_truth/bounce_Input_video2_gt.csv     --court outputs/Input_video2/court_coordinates/Input_video2_court.csv
 ```
 
 Useful `pipeline.py` flags:
 
 - `--display` shows the OpenCV windows.
-- `--skip-court`, `--skip-tracking`, … reuse CSVs that are already on disk.
+- `--redo 2,6`, `--redo shots`, `--redo all`, `--redo missing` choose the steps
+  to redo without asking.
+- `--skip-court`, `--skip-tracking`, … skip single steps, also without asking.
 - `--flow-frames N` caps the dense optical flow at N frames.
 - `--gt-csv` / `--court-gt-csv` enable the evaluation stage.
 
@@ -322,12 +329,14 @@ python analysis/shot_analysis.py --type-self-test      # labelled demo rally (ne
 ├── analysis/                # player statistics and shot detection/classification
 ├── motion_estimation/       # Farnebäck / Lucas–Kanade, block matching from scratch
 ├── evaluation/              # annotation tool and tracking metrics
-├── utils/                   # court geometry (ITF), pixel→metre homography, video helpers
+├── ground_truth/            # hand-made annotations used by the evaluation
+├── utils/                   # court geometry (ITF), pixel→metre homography, paths, video helpers
 ├── tests/                   # pytest suite (run in CI)
 ├── notebooks/               # Colab notebook to run ball detection on a GPU
 ├── docs/                    # report (PDF + LaTeX) and presentation
 ├── data/                    # demo clip
-└── models/                  # put ball_tracker.pt here
+├── models/                  # put ball_tracker.pt here
+└── outputs/<clip>/          # all the results of a clip, one folder per kind (not in git)
 ```
 
 ## Development

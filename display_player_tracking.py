@@ -8,8 +8,9 @@
                  (red cast shadow, blue on-screen graphics, yellow court lines,
                  grey far off court)
 
-The players CSV is not touched. If the clip has no court keypoints yet, the
-court is detected first and saved, as tracking/court_tracking.py would. Keys in
+The court comes from the clip's folder in outputs/; if it is not there yet it is
+detected first and saved, as tracking/court_tracking.py would. The stages shown
+are computed on the fly and the players CSV is not touched. Keys in
 the window: space / p pause and resume, n next frame while paused, q quit.
 
 Usage (from the project root):
@@ -38,6 +39,7 @@ from live_view import (
 )
 from tracking.court_tracking import CourtTracker
 from tracking.player_tracking import PlayerTracker
+from utils.paths import clip_paths
 
 WINDOW = "Player tracking stages  (space: pause, n: next, q: quit)"
 TILE_W = 960                  # width of each of the four panels (window is scaled)
@@ -121,17 +123,16 @@ def main():
         description="Show the player tracker's processing stages on a clip (nothing is saved)")
     parser.add_argument("--video", default="data/Input_video2.mp4")
     parser.add_argument("--court", default=None,
-                        help="court CSV (default: outputs/court_coordinates/<video name>_court.csv)")
+                        help="court CSV (default: outputs/<video name>/court_coordinates/<video name>_court.csv)")
     args = parser.parse_args()
 
-    stem = os.path.splitext(os.path.basename(args.video))[0]
-    court = args.court or os.path.join("outputs", "court_coordinates", f"{stem}_court.csv")
+    court = args.court or clip_paths(args.video)["court_csv"]
     if not os.path.exists(court) and not args.court:
         # The tracker needs the court; detect it first (this writes the court
         # CSV and its overlay image, as tracking/court_tracking.py would).
         print(f"No court keypoints for {args.video}: detecting the court first...")
         try:
-            CourtTracker(args.video, no_display=True, output_dir="outputs").run()
+            CourtTracker(args.video, no_display=True).run()
         except RuntimeError as exc:
             raise SystemExit(f"Court detection failed: {exc}") from exc
     tracker = PlayerTracker(args.video, os.devnull, court, display=False)

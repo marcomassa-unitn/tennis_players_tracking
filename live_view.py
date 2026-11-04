@@ -4,13 +4,14 @@
 Draws player/ball boxes on the ORIGINAL clip with a top-down minimap docked
 right (moving in lockstep) and a stats panel below it. Nothing is saved.
 
-Reads only CSVs the pipeline already produced — never re-runs a tracker or YOLO
-— so it is fast and every overlay stays frame-synced:
+Reads only what the pipeline already produced for this clip, in its folder under
+outputs/ — never re-runs a tracker or YOLO — so it is fast and every overlay stays
+frame-synced. Summary figures that are missing are built from the CSVs:
 
-    player boxes  <- outputs/player_coordinates/players_<stem>.csv  (player_tracking)
-    ball box      <- outputs/ball_coordinates/ball_<stem>.csv        (ball_tracking; OPTIONAL)
+    player boxes  <- outputs/<video name>/player_coordinates/players_<stem>.csv  (player_tracking)
+    ball box      <- outputs/<video name>/ball_coordinates/ball_<stem>.csv        (ball_tracking; OPTIONAL)
     minimap       <- players CSV projected to metres through the court CSV
-    court CSV     <- outputs/court_coordinates/<stem>_court.csv
+    court CSV     <- outputs/<video name>/court_coordinates/<stem>_court.csv
 
 The ball box is redrawn on the source frame from the ball CSV, so the pre-burned
 annotated video is never needed.
@@ -46,6 +47,7 @@ from analysis.shot_analysis import (
     load_player_boxes,
     shot_category,  # (stroke, shot_type, overhead) -> single category string
 )
+from utils.paths import OUTPUT_ROOT, clip_paths
 
 # ── layout constants ────────────────────────────────────────────────────────────
 # RENDER and WINDOW size are decoupled: the canvas is composed at RENDER_WIDTH so
@@ -118,21 +120,6 @@ def _resolve(path: str) -> str:
             if entry.lower() == name.lower():
                 return os.path.join(folder, entry)
     return path
-
-
-def derive_default_paths(video: str, output: str) -> dict:
-    """Default CSV paths per modality under ``output``, keyed by video stem.
-
-    Mirrors each producer's own default location/naming.
-    """
-    stem = os.path.splitext(os.path.basename(video))[0]
-    return {
-        "players": os.path.join(output, "player_coordinates", f"players_{stem}.csv"),
-        "ball":    os.path.join(output, "ball_coordinates", f"ball_{stem}.csv"),
-        "court":   os.path.join(output, "court_coordinates", f"{stem}_court.csv"),
-        # Shot analysis is per-output (not per-stem): a single shots.csv.
-        "shots":   os.path.join(output, "shot_analysis", "shots.csv"),
-    }
 
 
 # ── data loading ────────────────────────────────────────────────────────────────
@@ -648,6 +635,12 @@ def _center_window(win_name: str, w: int, h: int) -> None:
 
 # ── on-launch analysis generation ────────────────────────────────────────────────
 
+def _analysis_ready(clip_dir, shots_csv) -> bool:
+    """True if the clip's folder holds the summary figures and the shots."""
+    figures = [os.path.join(clip_dir, rel) for _, rel in _SUMMARY_FIGS]
+    return all(os.path.exists(path) for path in [*figures, shots_csv])
+
+
 def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
                                fps, min_area, anchor):
     """Regenerate the three summary figures in-process, headless.
@@ -701,7 +694,7 @@ def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
 # ── end-of-clip summary window ───────────────────────────────────────────────────
 
 # The three figures tiled when the clip ends, with their fixed paths relative to
-# the --output base dir (see player_analysis.py / shot_analysis.py).
+# the clip's folder (see player_analysis.py / shot_analysis.py).
 _SUMMARY_FIGS = [
     ("Combined heatmap", os.path.join("player_analysis", "heatmap_combined.png")),
     ("Court zones",      os.path.join("player_analysis", "zones.png")),
@@ -772,7 +765,7 @@ def _show_summary_window(output_dir: str, window_name: str,
 def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
         disp_h, fps_override, shots_csv=None, max_shot_markers=0,
         render_width=RENDER_WIDTH, window_width=None,
-        output_dir="outputs", screen_fraction=SCREEN_FRACTION) -> None:
+        output_dir=None, screen_fraction=SCREEN_FRACTION) -> None:
     # Solve the RENDER height so the canvas width (video + PANEL_W) == render_width
     # while the video keeps its aspect ratio. The shown window is a separate,
     # smaller size (canvas area-downscaled once at display time):
@@ -797,19 +790,21 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     if render_width and render_width > PANEL_W + 80 and src_w > 0:
         disp_h = int(round((render_width - PANEL_W) * src_h / src_w))
 
-    # --- regenerate the summary figures up front so they always reflect the
-    # CURRENT CSVs (no manual analysis run). Abort on failure — the summary needs
-    # them. ---
-    print("  Generating analysis figures (heatmap, zones, shot hitmap)...")
-    try:
-        _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
-                                   fps_override or 30.0, min_area, anchor)
-    except Exception as e:
-        raise SystemExit(
-            f"Analysis generation failed: {e}\n"
-            "Fix the inputs above and relaunch (the end-of-clip summary needs "
-            "the combined heatmap, zones and shot hitmap).") from e
-    print("  Analysis figures ready.")
+    # --- the summary figures and shots come from the clip's folder; only what is
+    # missing is built, from the CSVs. Abort on failure — the summary needs them. ---
+    if _analysis_ready(output_dir, shots_csv):
+        print(f"  Analysis figures: reusing those in {output_dir}")
+    else:
+        print("  Generating analysis figures (heatmap, zones, shot hitmap)...")
+        try:
+            _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
+                                       fps_override or 30.0, min_area, anchor)
+        except Exception as e:
+            raise SystemExit(
+                f"Analysis generation failed: {e}\n"
+                "Fix the inputs above and relaunch (the end-of-clip summary needs "
+                "the combined heatmap, zones and shot hitmap).") from e
+        print("  Analysis figures ready.")
 
     # --- per-frame overlays, indexed by absolute frame number ---
     boxes = load_player_boxes(players_csv)
@@ -1019,20 +1014,20 @@ def main() -> None:
                     "(+ reserved stats panel).")
     parser.add_argument("--video", default="data/Input_video2.mp4",
                         help="input video (default: data/Input_video2.mp4)")
-    parser.add_argument("--output", default="outputs",
-                        help="base output dir used to derive default CSV paths")
+    parser.add_argument("--output", default=OUTPUT_ROOT,
+                        help="base output dir, holding one folder per video")
     parser.add_argument("--players", default=None,
                         help="player tracking CSV "
-                             "(default: outputs/player_coordinates/players_<stem>.csv)")
+                             "(default: outputs/<video name>/player_coordinates/players_<stem>.csv)")
     parser.add_argument("--ball", default=None,
                         help="ball CSV "
-                             "(default: outputs/ball_coordinates/ball_<stem>.csv; optional)")
+                             "(default: outputs/<video name>/ball_coordinates/ball_<stem>.csv; optional)")
     parser.add_argument("--court", default=None,
                         help="court keypoints CSV "
-                             "(default: outputs/court_coordinates/<stem>_court.csv)")
+                             "(default: outputs/<video name>/court_coordinates/<stem>_court.csv)")
     parser.add_argument("--shots", default=None,
                         help="shot analysis CSV (default: "
-                             "outputs/shot_analysis/shots.csv; optional - when "
+                             "outputs/Input_video2/shot_analysis/shots.csv; optional - when "
                              "present, shots accumulate on the minimap)")
     parser.add_argument("--max-shot-markers", type=int, default=0,
                         dest="max_shot_markers",
@@ -1067,11 +1062,11 @@ def main() -> None:
                         help="playback fps (default: read from the video)")
     args = parser.parse_args()
 
-    defaults = derive_default_paths(args.video, args.output)
-    players_csv = _resolve(args.players or defaults["players"])
-    court_csv   = _resolve(args.court   or defaults["court"])
-    ball_csv    = _resolve(args.ball    or defaults["ball"])
-    shots_csv   = _resolve(args.shots   or defaults["shots"])
+    defaults = clip_paths(args.video, args.output)
+    players_csv = _resolve(args.players or defaults["players_csv"])
+    court_csv   = _resolve(args.court   or defaults["court_csv"])
+    ball_csv    = _resolve(args.ball    or defaults["ball_csv"])
+    shots_csv   = _resolve(args.shots   or defaults["shots_csv"])
 
     # Players + court are required; ball and shots CSVs are optional (see run()).
     if not os.path.exists(args.video):
@@ -1094,7 +1089,7 @@ def main() -> None:
     run(args.video, players_csv, court_csv, ball_csv,
         args.min_area, args.anchor, args.height, args.fps,
         shots_csv, args.max_shot_markers, args.render_width, args.window_width,
-        args.output, args.screen_fraction)
+        defaults["clip_dir"], args.screen_fraction)
 
 
 if __name__ == "__main__":

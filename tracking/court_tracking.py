@@ -20,7 +20,7 @@
 
 The 8 labelled singles keypoints (TL, TR, BL, BR, STL, STR, SBL, SBR) are then
 projected from the fitted model and saved to
-outputs/court_coordinates/<video name>_court.csv, together with an overlay image
+outputs/<video name>/court_coordinates/<video name>_court.csv, together with an overlay image
 (<video name>_court.png) to check the result by eye.
 """
 
@@ -37,6 +37,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_geometry import _REAL_WORLD, ALLEY, SVC_B, SVC_T, L_m, W_m
 from utils.court_overlay import MODEL_SEGMENTS, draw_court_overlay
+from utils.paths import clip_paths
 from utils.video import safe_fps
 
 # ── Court model (metres, origin at the far-left singles corner) ───────────────
@@ -364,10 +365,8 @@ class CourtTracker:
         """Detect the court, write the 8 keypoints to CSV plus an overlay image,
         and (unless no_display) play the video with the court drawn on it.
         Returns the keypoint dict."""
-        stem = os.path.splitext(os.path.basename(self.video_path))[0]
-        out_dir = os.path.join(self.output_dir, "court_coordinates")
-        os.makedirs(out_dir, exist_ok=True)
-        csv_path = os.path.join(out_dir, f"{stem}_court.csv")
+        csv_path = clip_paths(self.video_path, self.output_dir)["court_csv"]
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
 
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():

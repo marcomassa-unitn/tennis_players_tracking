@@ -24,10 +24,10 @@ Three modes:
 
 Usage (from project root):
     python evaluation/annotate.py boxes --video data/Input_video2.mp4 \\
-        --step 30 --output outputs/ground_truth/players_clip2_gt.csv
+        --step 30 --output ground_truth/players_Input_video2_gt.csv
 
     python evaluation/annotate.py court --video data/Input_video2.mp4 \\
-        --output outputs/ground_truth/input_video2_court_gt.csv
+        --output ground_truth/court_Input_video2_gt.csv
 
     python evaluation/annotate.py ball --video data/Input_video2.mp4 --step 10
 
@@ -42,8 +42,13 @@ Keys (boxes mode, inside the OpenCV ROI selector):
 import argparse
 import csv
 import os
+import sys
+from pathlib import Path
 
 import cv2
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.paths import ground_truth_path
 
 DISPLAY_W = 1280  # display width; clicks are divided back to source coords
 
@@ -409,15 +414,15 @@ def main():
     pb.add_argument("--start", type=int, default=30,
                     help="first frame to annotate (default: 30, after the "
                          "background warm-up)")
-    pb.add_argument("--output",
-                    default="outputs/ground_truth/players_clip2_gt.csv")
+    pb.add_argument("--output", default=None,
+                    help="output CSV (default: ground_truth/players_<video name>_gt.csv)")
 
     pc = sub.add_parser("court", help="annotate court keypoints")
     pc.add_argument("--video", default="data/Input_video2.mp4")
     pc.add_argument("--frame", type=int, default=0,
                     help="frame to annotate (default: 0)")
-    pc.add_argument("--output",
-                    default="outputs/ground_truth/input_video2_court_gt.csv")
+    pc.add_argument("--output", default=None,
+                    help="output CSV (default: ground_truth/court_<video name>_gt.csv)")
 
     pl = sub.add_parser("ball", help="annotate the ball centre on sampled frames")
     pl.add_argument("--video", default="data/Input_video2.mp4")
@@ -425,27 +430,25 @@ def main():
                     help="annotate every N-th frame (default: 10)")
     pl.add_argument("--start", type=int, default=0, help="first frame (default: 0)")
     pl.add_argument("--output", default=None,
-                    help="output CSV (default: outputs/ground_truth/ball_<video name>_gt.csv)")
+                    help="output CSV (default: ground_truth/ball_<video name>_gt.csv)")
 
     pn = sub.add_parser("bounce", help="mark the frames where the ball touches the ground")
     pn.add_argument("--video", default="data/Input_video2.mp4")
     pn.add_argument("--start", type=int, default=0, help="first frame (default: 0)")
     pn.add_argument("--output", default=None,
-                    help="output CSV (default: outputs/ground_truth/bounce_<video name>_gt.csv)")
+                    help="output CSV (default: ground_truth/bounce_<video name>_gt.csv)")
 
     args = parser.parse_args()
+    kinds = {"boxes": "players", "court": "court", "ball": "ball", "bounce": "bounce"}
+    output = args.output or ground_truth_path(kinds[args.mode], args.video)
     if args.mode == "boxes":
-        annotate_boxes(args.video, args.step, args.start, args.output)
+        annotate_boxes(args.video, args.step, args.start, output)
     elif args.mode == "ball":
-        stem = os.path.splitext(os.path.basename(args.video))[0]
-        output = args.output or os.path.join("outputs", "ground_truth", f"ball_{stem}_gt.csv")
         annotate_ball(args.video, args.step, args.start, output)
     elif args.mode == "bounce":
-        stem = os.path.splitext(os.path.basename(args.video))[0]
-        output = args.output or os.path.join("outputs", "ground_truth", f"bounce_{stem}_gt.csv")
         annotate_bounce(args.video, args.start, output)
     else:
-        annotate_court(args.video, args.frame, args.output)
+        annotate_court(args.video, args.frame, output)
 
 
 if __name__ == "__main__":

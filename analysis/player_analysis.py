@@ -11,15 +11,14 @@ net.
 
     python analysis/player_analysis.py
     python analysis/player_analysis.py \\
-        --players outputs/player_coordinates/players_Input_video2.csv \\
-        --court   outputs/court_coordinates/Input_video2_court.csv \\
+        --players outputs/Input_video2/player_coordinates/players_Input_video2.csv \\
+        --court   outputs/Input_video2/court_coordinates/Input_video2_court.csv \\
         --fps     30 \\
-        --output  outputs/player_analysis \\
+        --output  outputs/Input_video2/player_analysis \\
         --stride  3
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -50,6 +49,7 @@ from utils.court_geometry import (
     L_m,
     W_m,
 )
+from utils.paths import clip_paths
 
 # Player colour convention, kept identical across every figure so colour -> player
 # is unambiguous: P1 = warm (red), P2 = cool (blue). Paired with the heatmap
@@ -506,17 +506,17 @@ def main() -> None:
     parser.add_argument(
         "--players", default=None,
         help="CSV with player tracking (defaults to "
-             "outputs/player_coordinates/players_<video name>.csv)",
+             "outputs/<video name>/player_coordinates/players_<video name>.csv)",
     )
     parser.add_argument(
         "--court", default=None,
         help="CSV with court coordinates FROM THE SAME video as the players "
-             "(defaults to outputs/court_coordinates/<video name>_court.csv)",
+             "(defaults to outputs/<video name>/court_coordinates/<video name>_court.csv)",
     )
     parser.add_argument("--fps",      type=float, default=30.0,
                         help="Frames per second of the source video (default: 30)")
-    parser.add_argument("--output",   default="outputs/player_analysis",
-                        help="Output directory (default: outputs/player_analysis)")
+    parser.add_argument("--output",   default=None,
+                        help="Output directory (default: outputs/<video name>/player_analysis)")
     parser.add_argument("--min-area", type=int, default=500, dest="min_area",
                         help="Filter out detections with area < N pixels (default: 500)")
     parser.add_argument("--anchor", choices=["feet", "centroid"], default="feet",
@@ -535,15 +535,11 @@ def main() -> None:
     # Derive CSV paths from the video stem when not given, matching the naming of
     # player_tracking.py (players_<stem>.csv) and court_tracking.py
     # (<stem>_court.csv), so a different --video reads its own tracking output.
-    video_stem = os.path.splitext(os.path.basename(args.video))[0]
-    if args.players is None:
-        args.players = os.path.join("outputs", "player_coordinates",
-                                    f"players_{video_stem}.csv")
-    if args.court is None:
-        args.court = os.path.join("outputs", "court_coordinates",
-                                  f"{video_stem}_court.csv")
+    paths = clip_paths(args.video)
+    args.players = args.players or paths["players_csv"]
+    args.court = args.court or paths["court_csv"]
 
-    out_dir = Path(args.output)
+    out_dir = Path(args.output or paths["analysis_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading: {args.players}  (anchor: {args.anchor})")

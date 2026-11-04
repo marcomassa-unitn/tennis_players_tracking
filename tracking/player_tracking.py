@@ -22,7 +22,7 @@
 5. Short gaps (<= MAX_GAP_S) are filled by linear interpolation and flagged in
    the `interpolated` column.
 
-Output: outputs/player_coordinates/players_<video name>.csv with
+Output: outputs/<video name>/player_coordinates/players_<video name>.csv with
 frame, player_id, x, y, w, h, cx, cy, area, interpolated (full-resolution px).
 """
 
@@ -41,6 +41,7 @@ from tracking.court_tracking import line_pixel_mask
 from utils.court_converter import CourtConverter
 from utils.court_geometry import NET, RUNOFF_BEHIND, RUNOFF_SIDE, L_m, W_m
 from utils.court_overlay import MODEL_SEGMENTS
+from utils.paths import clip_paths
 from utils.video import check_full_read, safe_fps
 
 # ── Processing scale ──────────────────────────────────────────────────────────
@@ -658,19 +659,17 @@ if __name__ == "__main__":
         description="Two-player tracking: whole-clip median background + court-half identities")
     parser.add_argument("--video", default="data/Input_video2.mp4")
     parser.add_argument("--court", default=None,
-                        help="court CSV (default: outputs/court_coordinates/<video name>_court.csv)")
+                        help="court CSV (default: outputs/<video name>/court_coordinates/<video name>_court.csv)")
     parser.add_argument("--csv", default=None,
                         help="output CSV path (defaults to "
-                             "outputs/player_coordinates/players_<video name>.csv)")
+                             "outputs/<video name>/player_coordinates/players_<video name>.csv)")
     parser.add_argument("--no-display", action="store_true",
                         help="run headless (no OpenCV windows)")
     args = parser.parse_args()
 
-    video_stem = os.path.splitext(os.path.basename(args.video))[0]
-    if args.csv is None:
-        args.csv = os.path.join("outputs", "player_coordinates", f"players_{video_stem}.csv")
-    if args.court is None:
-        args.court = os.path.join("outputs", "court_coordinates", f"{video_stem}_court.csv")
+    paths = clip_paths(args.video)
+    args.csv = args.csv or paths["players_csv"]
+    args.court = args.court or paths["court_csv"]
 
     os.makedirs(os.path.dirname(args.csv) or ".", exist_ok=True)
     PlayerTracker(args.video, args.csv, args.court, display=not args.no_display).run()

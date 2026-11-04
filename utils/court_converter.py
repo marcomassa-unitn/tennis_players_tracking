@@ -16,7 +16,7 @@ class CourtConverter:
 
     Usage
     -----
-        converter = CourtConverter("outputs/court_coordinates/match1_court.csv")
+        converter = CourtConverter("outputs/match1/court_coordinates/match1_court.csv")
         x_m, y_m = converter.to_meters(850, 600)
 
         # batch — e.g. all ball positions from ball_tracking

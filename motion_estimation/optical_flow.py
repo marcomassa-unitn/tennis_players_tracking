@@ -7,7 +7,7 @@ Two methods:
     against positional speed (displacement of the projected feet point).
   - Lucas-Kanade pyramidal sparse flow on Shi-Tomasi corners (trail demo).
 
-Outputs (default outputs/motion_estimation/):
+Outputs (default outputs/Input_video2/motion_estimation/):
   - flow_speeds.csv        frame, player, flow vector, flow vs positional speed
   - flow_hsv_*.png         dense flow (hue = direction, value = magnitude)
   - flow_arrows_*.png      flow arrows on a sparse grid
@@ -16,9 +16,9 @@ Outputs (default outputs/motion_estimation/):
 Usage (from project root):
     python motion_estimation/optical_flow.py
     python motion_estimation/optical_flow.py --video data/Input_video2.mp4 \\
-        --players outputs/player_coordinates/players_Input_video2.csv \\
-        --court outputs/court_coordinates/Input_video2_court.csv \\
-        --frames 200 --output outputs/motion_estimation
+        --players outputs/Input_video2/player_coordinates/players_Input_video2.csv \\
+        --court outputs/Input_video2/court_coordinates/Input_video2_court.csv \\
+        --frames 200 --output outputs/Input_video2/motion_estimation
 """
 
 import argparse
@@ -33,6 +33,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_converter import CourtConverter
+from utils.paths import clip_paths
 
 FB_PARAMS = dict(pyr_scale=0.5, levels=3, winsize=15,
                  iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
@@ -163,10 +164,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Optical-flow motion estimation on tracked players")
     parser.add_argument("--video",   default="data/Input_video2.mp4")
-    parser.add_argument("--players",
-                        default="outputs/player_coordinates/players_Input_video2.csv")
-    parser.add_argument("--court",
-                        default="outputs/court_coordinates/Input_video2_court.csv")
+    parser.add_argument("--players", default=None,
+                        help="default: outputs/<video name>/player_coordinates/players_<video name>.csv")
+    parser.add_argument("--court", default=None,
+                        help="default: outputs/<video name>/court_coordinates/<video name>_court.csv")
     parser.add_argument("--fps",     type=float, default=30.0)
     parser.add_argument("--scale",   type=float, default=0.5,
                         help="Downscale factor for Farneback (default: 0.5)")
@@ -175,12 +176,17 @@ def main():
     parser.add_argument("--vis-every", type=int, default=150, dest="vis_every",
                         help="Save flow visualizations every N frames "
                              "(default: 150)")
-    parser.add_argument("--output",  default="outputs/motion_estimation")
+    parser.add_argument("--output",  default=None,
+                        help="default: outputs/<video name>/motion_estimation")
     parser.add_argument("--no-lk",   action="store_true",
                         help="Skip the Lucas-Kanade demo")
     parser.add_argument("--display", action="store_true")
     args = parser.parse_args()
 
+    paths = clip_paths(args.video)
+    args.players = args.players or paths["players_csv"]
+    args.court = args.court or paths["court_csv"]
+    args.output = args.output or paths["motion_dir"]
     os.makedirs(args.output, exist_ok=True)
 
     boxes = load_player_boxes(args.players)

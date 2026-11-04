@@ -6,15 +6,19 @@ Stages, in order:
     court detection -> player tracking -> player analysis ->
     motion estimation -> ball tracking -> shot analysis -> evaluation
 
-All intermediate paths derive from --video and --output, so a typical run is
-just `python pipeline.py --video data/Input_video2.mp4`.
+Every result goes to the clip's own folder, outputs/<video name>/ (utils/paths.py),
+so a typical run is just `python pipeline.py --video data/Input_video2.mp4`. It
+shows which steps already have results and asks which ones to redo; everything
+else is reused from that folder.
 
 Headless by default (no OpenCV windows). --display enables interactive
 windows; --no-display explicitly forces headless. Every step runs in its own try/except so one failure (missing
 model, bad path) is reported and skipped, never aborting the run; the end
 summary lists succeeded/skipped/failed steps.
 
-Any step is skippable via --skip-* (reusing a CSV already on disk). Steps
+--redo answers that question up front (--redo 2,6, --redo shots, --redo all,
+--redo missing) and any --skip-* flag turns it off. Without a terminal to ask on,
+only the missing steps run, so nothing is overwritten by accident. Steps
 call the underlying module code directly -- no subprocess. Class-based
 modules (court/player/ball trackers) are instantiated; function-based modules
 (player_analysis, optical_flow, block_matching, shot_analysis) run via their
@@ -26,12 +30,15 @@ import argparse
 import contextlib
 import os
 import sys
+import time
 
 # Put this file's directory on sys.path so tracking/, utils/, ... resolve as
 # namespace packages regardless of the cwd.
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+from utils.paths import OUTPUT_ROOT, clip_paths
 
 DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "models", "ball_tracker.pt")
 
@@ -76,32 +83,110 @@ def _resolve_fps(video):
 
 
 # --------------------------------------------------------------------------- #
-# Path derivation
+# Choosing what to redo
 # --------------------------------------------------------------------------- #
-def derive_paths(video, output):
-    """Map of every intermediate artifact path, keyed off the video stem."""
-    output = output.rstrip("/\\") or "outputs"
-    stem = os.path.splitext(os.path.basename(video))[0]          # e.g. Input_video2
+# The steps that can be redone, in order. Evaluation is not one of them: it only
+# runs when a ground truth is passed.
+REDO_STEPS = ("court", "tracking", "analysis", "motion", "ball", "shots")
 
-    # Each artifact is named after the stem in its own per-modality subfolder,
-    # matching each module's standalone default (e.g. player_coordinates/,
-    # ball_coordinates/, court_coordinates/).
+# Steps that read each step's results, and go stale when it is redone.
+READ_BY = {
+    "court": ("tracking", "analysis", "motion", "shots"),
+    "tracking": ("analysis", "motion", "shots"),
+    "ball": ("shots",),
+}
+
+
+def step_result(name, p):
+    """The file that tells a step has already run on this clip."""
     return {
-        "video": video,
-        "output": output,
-        "stem": stem,
-        "court_csv": os.path.join(output, "court_coordinates", f"{stem}_court.csv"),
-        "players_csv": os.path.join(output, "player_coordinates", f"players_{stem}.csv"),
-        "ball_csv": os.path.join(output, "ball_coordinates", f"ball_{stem}.csv"),
-        "ball_candidates_csv": os.path.join(output, "ball_coordinates",
-                                            f"ball_candidates_{stem}.csv"),
-        "ball_wholeframe_csv": os.path.join(output, "ball_coordinates",
-                                            f"ball_wholeframe_{stem}.csv"),
-        "analysis_dir": os.path.join(output, "player_analysis"),
-        "motion_dir": os.path.join(output, "motion_estimation"),
-        "shots_dir": os.path.join(output, "shot_analysis"),
-        "eval_dir": os.path.join(output, "evaluation"),
-    }
+        "court": p["court_csv"],
+        "tracking": p["players_csv"],
+        "analysis": os.path.join(p["analysis_dir"], "heatmap_combined.png"),
+        "motion": os.path.join(p["motion_dir"], "flow_speeds.csv"),
+        "ball": p["ball_csv"],
+        "shots": p["shots_csv"],
+    }[name]
+
+
+def missing_steps(p):
+    """The steps with no result yet on this clip."""
+    return {name for name in REDO_STEPS if not os.path.exists(step_result(name, p))}
+
+
+def parse_steps(text, missing):
+    """Steps named in `text`: numbers or names, or all / none / missing.
+
+    Empty text means the missing ones. Raises ValueError on anything else.
+    """
+    words = text.replace(",", " ").lower().split()
+    if not words or words == ["missing"]:
+        return set(missing)
+    if words == ["all"]:
+        return set(REDO_STEPS)
+    if words == ["none"]:
+        return set()
+    chosen = set()
+    for word in words:
+        if word.isdigit() and 1 <= int(word) <= len(REDO_STEPS):
+            chosen.add(REDO_STEPS[int(word) - 1])
+        elif word in REDO_STEPS:
+            chosen.add(word)
+        else:
+            raise ValueError(f"unknown step: {word}")
+    return chosen
+
+
+def stale_steps(chosen):
+    """Steps not in `chosen` that read the results of one that is, in run order."""
+    readers = {step for name in chosen for step in READ_BY.get(name, ())}
+    return [name for name in REDO_STEPS if name in readers - chosen]
+
+
+def _print_status(p):
+    print(f"\nClip: {p['stem']}   ({p['clip_dir']})")
+    for number, name in enumerate(REDO_STEPS, start=1):
+        path = step_result(name, p)
+        state = (time.strftime("done     %d/%m %H:%M", time.localtime(os.path.getmtime(path)))
+                 if os.path.exists(path) else "missing")
+        print(f"  {number} {name:9s} {state}")
+
+
+def ask_steps(p):
+    """Show what the clip already has and ask what to redo."""
+    _print_status(p)
+    missing = missing_steps(p)
+    while True:
+        answer = input("Redo which steps? (e.g. 2,6 / all / none; "
+                       "Enter = only the missing ones): ")
+        try:
+            chosen = parse_steps(answer, missing)
+            break
+        except ValueError as exc:
+            print(f"  {exc}")
+    stale = stale_steps(chosen)
+    if stale:
+        answer = input(f"{', '.join(stale)} read those results: redo them too? [Y/n]: ")
+        if answer.strip().lower() not in ("n", "no"):
+            chosen |= set(stale)
+    return chosen
+
+
+def choose_steps(p, args, interactive):
+    """Set args.skip_* from what has to be redone, unless a --skip-* flag was given."""
+    if any(getattr(args, f"skip_{name}") for name in REDO_STEPS):
+        return
+    if args.redo is not None:
+        chosen = parse_steps(args.redo, missing_steps(p))
+        stale = stale_steps(chosen)
+        if stale:
+            print(f"Note: {', '.join(stale)} will keep results based on the old data.")
+    elif interactive:
+        chosen = ask_steps(p)
+    else:
+        chosen = missing_steps(p)
+    for name in REDO_STEPS:
+        setattr(args, f"skip_{name}", name not in chosen)
 
 
 # --------------------------------------------------------------------------- #
@@ -158,7 +243,7 @@ def step_tracking(p, args, produced):
 def step_analysis(p, args, produced):
     print("\n=== Step 3: Player Analysis ===")
     if args.skip_analysis:
-        print("Skipped (--skip-analysis).")
+        print("Skipped: keeping the results in the clip's folder.")
         return
     if not os.path.exists(p["players_csv"]):
         print(f"Skipped: players CSV not found ({p['players_csv']}).")
@@ -186,7 +271,7 @@ def step_analysis(p, args, produced):
 def step_motion(p, args, produced):
     print("\n=== Step 4: Motion Estimation ===")
     if args.skip_motion:
-        print("Skipped (--skip-motion).")
+        print("Skipped: keeping the results in the clip's folder.")
         return
     if not os.path.exists(p["players_csv"]):
         print(f"Skipped: players CSV not found ({p['players_csv']}).")
@@ -227,7 +312,7 @@ def step_motion(p, args, produced):
 def step_ball(p, args, produced):
     print("\n=== Step 5: Ball Tracking ===")
     if args.skip_ball:
-        print("Skipped (--skip-ball).")
+        print("Skipped: keeping the results in the clip's folder.")
         return
     from tracking import ball_tracking
 
@@ -260,7 +345,7 @@ def step_ball(p, args, produced):
 def step_shots(p, args, produced):
     print("\n=== Step 6: Shot Analysis ===")
     if args.skip_shots:
-        print("Skipped (--skip-shots).")
+        print("Skipped: keeping the results in the clip's folder.")
         return
     if not os.path.exists(p["players_csv"]):
         print(f"Skipped: players CSV not found ({p['players_csv']}).")
@@ -293,7 +378,7 @@ def step_shots(p, args, produced):
         "--fps", str(args.fps),
         "--p1-hand", args.p1_hand,
         "--p2-hand", args.p2_hand,
-        "--events", os.path.join(p["shots_dir"], "events.csv"),
+        "--events", p["events_csv"],
         "--real-ball", p["ball_csv"],
         "--output", p["shots_dir"],
     ]
@@ -344,8 +429,8 @@ def build_parser():
         description="Unified tennis players tracking pipeline.")
     parser.add_argument("--video", default="data/Input_video2.mp4",
                         help="input video")
-    parser.add_argument("--output", default="outputs/",
-                        help="base output directory")
+    parser.add_argument("--output", default=OUTPUT_ROOT,
+                        help="base output directory, holding one folder per video")
     parser.add_argument("--fps", type=float, default=None,
                         help="video frame rate (default: auto-read from the "
                              "input video, falling back to 30)")
@@ -356,7 +441,10 @@ def build_parser():
     parser.add_argument("--no-display", action="store_true", dest="no_display",
                         help="force headless / batch mode (the default)")
 
-    # Step skips.
+    # What to redo: asked at launch unless one of these is given.
+    parser.add_argument("--redo", default=None,
+                        help="steps to redo without asking: numbers or names (2,6 or "
+                             "tracking,shots), all, none or missing. The rest is reused")
     parser.add_argument("--skip-court", action="store_true", dest="skip_court",
                         help="skip court detection (reuse existing CSV if present)")
     parser.add_argument("--skip-tracking", action="store_true", dest="skip_tracking",
@@ -420,14 +508,15 @@ def main():
     if args.fps is None:
         args.fps = _resolve_fps(args.video)
 
-    p = derive_paths(args.video, args.output)
+    p = clip_paths(args.video, args.output)
     produced = {}
 
     print("Tennis players tracking pipeline")
     print(f"  video : {p['video']}")
-    print(f"  output: {p['output']}")
+    print(f"  output: {p['clip_dir']}")
     print(f"  fps   : {args.fps}")
     print(f"  mode  : {'headless' if args.no_display else 'display'}")
+    choose_steps(p, args, sys.stdin.isatty())
 
     # Each step runs in isolation: any failure (including SystemExit from a
     # sub-module's argparse) is recorded and we continue. A step that returns

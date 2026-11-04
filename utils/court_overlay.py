@@ -30,6 +30,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_converter import CourtConverter
 from utils.court_geometry import _REAL_WORLD, ALLEY, CL_X, SVC_B, SVC_T, L_m, W_m
+from utils.paths import clip_paths
 
 # Painted lines of the court in metres (origin at the far-left singles corner).
 # Shared with tracking/court_tracking.py, which fits exactly this model.
@@ -144,15 +145,14 @@ def main():
                     "on a video frame, to check the keypoints and the homography.")
     parser.add_argument("--video", default="data/Input_video2.mp4")
     parser.add_argument("--court", default=None,
-                        help="court CSV (default: outputs/court_coordinates/<video name>_court.csv)")
+                        help="court CSV (default: outputs/<video name>/court_coordinates/<video name>_court.csv)")
     parser.add_argument("--frame", type=int, default=None,
                         help="frame to draw on (default: first non-black frame)")
     parser.add_argument("--output", default=None,
                         help="image path (default: next to the court CSV, <video name>_court.png)")
     args = parser.parse_args()
 
-    stem = os.path.splitext(os.path.basename(args.video))[0]
-    court = args.court or os.path.join("outputs", "court_coordinates", f"{stem}_court.csv")
+    court = args.court or clip_paths(args.video)["court_csv"]
     if not os.path.exists(court):
         raise SystemExit(f"Court CSV not found: {court}\n"
                          f"Run: python tracking/court_tracking.py --video {args.video} --no-display")
