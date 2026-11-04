@@ -56,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.court_converter import CourtConverter
 
 # Court dimensions shared via utils/court_geometry.
-from utils.court_geometry import _FT, NET, SVC_T, L_m, W_m
+from utils.court_geometry import _FT, NET, L_m, W_m
 from utils.paths import clip_paths
 
 # ── loading ────────────────────────────────────────────────────────────────────
@@ -675,6 +675,43 @@ def _metric_heights(boxes, conv, pid):
     return np.array(frames), b[:, 3] / np.maximum(ppm, 1e-6), feet_m
 
 
+def _raised_phases(frames, rel, fps, peak, min_raised_s, params=None):
+    """Phases with the box raised by the arm and racket, as (start, end, contact) indices.
+
+    `rel` is the box height over the player's usual height. Dips up to max_dip_s are
+    bridged; a phase must last min_raised_s and reach `peak`. The contact is its last
+    peak, when the racket is at full stretch.
+    """
+    p = params or SERVE_PARAMS
+    min_len = max(2, int(round(min_raised_s * fps)))
+    max_dip = max(1, int(round(p["max_dip_s"] * fps)))
+    phases, start, last = [], None, None
+    for k, (f, up) in enumerate(zip(frames, rel >= p["raised_min"])):
+        if not up:
+            continue
+        if start is not None and f - frames[last] <= max_dip + 1:
+            last = k
+            continue
+        if start is not None:
+            phases.append((start, last))
+        start = last = k
+    if start is not None:
+        phases.append((start, last))
+
+    found = []
+    for a, b in phases:
+        if frames[b] - frames[a] + 1 < min_len or rel[a:b + 1].max() < peak:
+            continue
+        seg = rel[a:b + 1]
+        top = seg.max() * (1 - p["peak_tol"])
+        peaks = [k for k in range(len(seg))
+                 if seg[k] >= top
+                 and (k == 0 or seg[k] >= seg[k - 1])
+                 and (k == len(seg) - 1 or seg[k] >= seg[k + 1])]
+        found.append((a, b, a + peaks[-1]))
+    return found
+
+
 def detect_serves(boxes, conv, fps, hits, params=None):
     """Serves as [(contact_frame, pid, phase_start_frame), ...].
 
@@ -683,38 +720,14 @@ def detect_serves(boxes, conv, fps, hits, params=None):
     """
     p = params or SERVE_PARAMS
     min_len = max(2, int(round(p["min_raised_s"] * fps)))
-    max_dip = max(1, int(round(p["max_dip_s"] * fps)))
     serves = []
     for pid in (1, 2):
         frames, hm, feet_m = _metric_heights(boxes, conv, pid)
         if len(frames) < min_len:
             continue
         rel = hm / np.nanmedian(hm)
-        raised = rel >= p["raised_min"]
-        # Raised phases: runs of raised frames, bridging dips up to max_dip frames.
-        phases, start, last = [], None, None
-        for k, (f, up) in enumerate(zip(frames, raised)):
-            if not up:
-                continue
-            if start is not None and f - frames[last] <= max_dip + 1:
-                last = k
-                continue
-            if start is not None:
-                phases.append((start, last))
-            start = last = k
-        if start is not None:
-            phases.append((start, last))
-
-        for a, b in phases:
-            if frames[b] - frames[a] + 1 < min_len or rel[a:b + 1].max() < p["raised_peak"]:
-                continue
-            seg = rel[a:b + 1]
-            top = seg.max() * (1 - p["peak_tol"])
-            peaks = [k for k in range(len(seg))
-                     if seg[k] >= top
-                     and (k == 0 or seg[k] >= seg[k - 1])
-                     and (k == len(seg) - 1 or seg[k] >= seg[k + 1])]
-            contact_k = a + peaks[-1]
+        for a, _, contact_k in _raised_phases(frames, rel, fps, p["raised_peak"],
+                                              p["min_raised_s"], p):
             contact, phase_start = int(frames[contact_k]), int(frames[a])
             # A phase cut by the end of the clip has no real peak.
             if frames[-1] - contact < p["min_tail_s"] * fps:
@@ -745,6 +758,53 @@ def detect_serves(boxes, conv, fps, hits, params=None):
         if not kept or serve[2] - kept[-1][0] > p["quiet_s"] * fps:
             kept.append(serve)
     return kept
+
+
+# ── smashes from the striker's motion ──────────────────────────────────────────
+#
+# A smash is often hit out of sight: the ball of a high lob leaves the picture, so
+# no reversal is seen. The striker shows it, though, with the arm-up motion of a
+# serve played from inside the court. An arm raised at the net is not enough (a
+# player reacts to a passing ball too), so the ball must then leave from the
+# striker's side and cross the net.
+
+SMASH_PARAMS = {
+    "raised_peak": 1.5,      # the arm-up motion of a serve reaches this; groundstrokes do not
+    "min_raised_s": 0.3,     # raised this long up to the contact: tracking the ball with the arm
+    "max_net_m": 9.0,        # played inside the court
+    "ball_back_s": 0.4,      # the ball is seen again within this time, on the striker's side...
+    "cross_s": 1.0,          # ...and has crossed the net this long after the contact
+    "same_hit_s": 0.3,       # a detected hit this close is the smash itself
+}
+
+
+def _ball_leaves_striker(contact, pid, real_ball, conv, fps, params=None):
+    """True if the ball shows up on the striker's side after `contact` and crosses the net."""
+    p = params or SMASH_PARAMS
+    seen = real_ball[real_ball["frame"].between(contact, contact + p["cross_s"] * fps)]
+    if seen.empty or seen["frame"].iloc[0] > contact + p["ball_back_s"] * fps:
+        return False
+    y_m = conv.to_meters_batch(seen[["cx", "cy"]].to_numpy(float))[:, 1]
+    on_own_side = y_m > NET if pid == 1 else y_m < NET
+    return bool(on_own_side[0] and not on_own_side[-1])
+
+
+def detect_smashes(boxes, conv, fps, real_ball, serves=(), params=None):
+    """Smashes as [(contact_frame, pid), ...], from the striker's motion and the ball."""
+    p = params or SMASH_PARAMS
+    smashes = []
+    for pid in (1, 2):
+        frames, hm, feet_m = _metric_heights(boxes, conv, pid)
+        if not len(frames):
+            continue
+        rel = hm / np.nanmedian(hm)
+        for _, _, k in _raised_phases(frames, rel, fps, p["raised_peak"], p["min_raised_s"]):
+            contact = int(frames[k])
+            if (abs(feet_m[k, 1] - NET) <= p["max_net_m"]
+                    and not any(c == contact for c, _, _ in serves)
+                    and _ball_leaves_striker(contact, pid, real_ball, conv, fps, p)):
+                smashes.append((contact, pid))
+    return sorted(smashes)
 
 
 # ── contacts that are really bounces ───────────────────────────────────────────
@@ -797,13 +857,17 @@ def move_contacts_off_bounces(hits, events, fps, min_gap_s=0.5, params=None):
 # Once a shot's bounce is known its type comes from the flight itself, which is
 # physics rather than image shape. A rally ball crosses in under a second; of the
 # slower ones a dropshot lands short, a lob flies high, and a slice floats low.
-# A volley is told by what came before: the ball never touched the ground.
+# A volley is told by what came before: the ball never touched the ground. A
+# dropshot stays one even when played in the air.
 
 FLIGHT_PARAMS = {
     "slow_flight_s": 1.05,   # a longer flight is no longer a rally ball
     "drop_depth_m": 4.5,     # a dropshot lands this close to the net...
     "lob_apex_m": 2.0,       # ...a lob flies above this height (the net is 0.91 m)
     "late_bounce_s": 0.1,    # a bounce may follow the next contact by this much
+    "volley_net_m": 9.0,     # a volley is played at most this far from the net, about
+                             # halfway between the service line and the baseline
+    "reversal_s": 0.4,       # time around a volley to see the ball come and go
 }
 
 
@@ -848,20 +912,35 @@ def classify_flight(flight, params=None):
     return "lob" if flight["apex_m"] >= p["lob_apex_m"] else "slice"
 
 
-def is_volley(contact, pid, y_m, previous, events, fps, params=None):
-    """True for a shot played inside the service line, before the ball bounced.
+def _speed_to_opponent(real_ball, first, last, pid, conv, fps):
+    """Ball speed (m/s) towards the opponent's side between two frames, NaN if unseen."""
+    seen = real_ball[real_ball["frame"].between(first, last)]
+    if len(seen) < 2:
+        return np.nan
+    y_m = conv.to_meters_batch(seen[["cx", "cy"]].to_numpy(float))[:, 1]
+    speed = (y_m[-1] - y_m[0]) * fps / (seen["frame"].iloc[-1] - seen["frame"].iloc[0])
+    return -speed if pid == 1 else speed
 
-    `previous` is the shot before, (frame, player, ...) or None. The service line
+
+def is_volley(contact, pid, y_m, previous, events, real_ball, conv, fps, params=None):
+    """True for a shot played inside the court, before the ball bounced.
+
+    `previous` is the shot before, (frame, player, ...) or None. The position
     matters: a bounce hidden behind a player at the baseline also leaves no bounce
-    in `events`, and nobody volleys from there.
+    in `events`, and nobody volleys from there. The ball must also come towards the
+    striker and go back, or there was no contact: a ball passing by leaves no bounce
+    either.
     """
     p = params or FLIGHT_PARAMS
-    if previous is None or previous[1] == pid or abs(y_m - NET) >= NET - SVC_T:
+    if previous is None or previous[1] == pid or abs(y_m - NET) > p["volley_net_m"]:
         return False
     landed = events[(events["event"] == BOUNCE_OF_PLAYER[pid])
                     & (events["frame"] > previous[0])
                     & (events["frame"] <= contact + p["late_bounce_s"] * fps)]
-    return landed.empty
+    reach = p["reversal_s"] * fps
+    before = _speed_to_opponent(real_ball, contact - reach, contact - 2, pid, conv, fps)
+    after = _speed_to_opponent(real_ball, contact + 2, contact + reach, pid, conv, fps)
+    return landed.empty and before < 0 < after
 
 
 def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
@@ -900,11 +979,19 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         lo, hi = phase_start - 0.5 * fps, contact + 0.3 * fps
         hits = [h for h in hits if not (h[1] == pid and lo <= h[0] <= hi)]
         hits.append((contact, pid, 0.0))
+    smash_frames = set()
+    if real_ball is not None:
+        for contact, pid in detect_smashes(boxes, conv, fps, real_ball, serves):
+            near = SMASH_PARAMS["same_hit_s"] * fps
+            hits = [h for h in hits if not (h[1] == pid and abs(h[0] - contact) <= near)]
+            hits.append((contact, pid, 0.0))
+            smash_frames.add(contact)
     hits.sort()
     ball_at = {}
     if events is not None:
         hits, ball_at = move_contacts_off_bounces(hits, events, fps, min_gap_s)
 
+    flight_known = events is not None and real_ball is not None
     n_dropped = 0
     rows = []
     for k, (f, pid, _strength) in enumerate(hits):
@@ -912,16 +999,17 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         if box is None:
             continue
         is_serve = f in serve_starts
+        is_smash = f in smash_frames
         # ±2-frame median ball position (denoise)
         sel = track.loc[max(track.index.min(), f - 2): f + 2]
         # An all-NaN window (ball never seen here) would give nanmedian = NaN and
-        # poison classify_stroke / to_meters; skip and count instead. A serve is
-        # kept anyway: it is found from the server's motion, and the far
-        # player's toss is often not detected.
+        # poison classify_stroke / to_meters; skip and count instead. A serve or a
+        # smash is kept anyway: it is found from the striker's motion, and the ball
+        # is often not detected there.
         cx_win = sel["cx"].values
         cy_win = sel["cy"].values
         if np.all(np.isnan(cx_win)) or np.all(np.isnan(cy_win)):
-            if not is_serve:
+            if not (is_serve or is_smash):
                 n_dropped += 1
                 continue
             ball_cx = ball_cy = np.nan
@@ -937,7 +1025,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         # Player feet in meters — the hitmap marks where the PLAYER struck, not the ball.
         player_x_m, player_y_m = conv.to_meters(*feet)
         side = "near" if player_y_m > NET else "far"
-        stroke = ("unknown" if np.isnan(ball_cx)
+        stroke = ("unknown" if np.isnan(ball_cx) or is_smash
                   else classify_stroke(ball_cx, box, side, hands[pid]))
 
         # Shot type from outgoing shape; contact frame `f` -> array-index `i`
@@ -946,21 +1034,22 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         feats = _shot_type_features(track, conv, i, fps, tp["k"], tp["w30"])
         shot_type = classify_shot_type(feats, side, tp)
         flight = None
-        if events is not None and real_ball is not None:
+        if flight_known:
             next_contact = hits[k + 1][0] if k + 1 < len(hits) else np.inf
             flight = shot_flight(f, pid, (player_x_m, player_y_m), next_contact,
                                  events, real_ball, conv, fps)
         if flight is not None:
             shot_type = classify_flight(flight)
-        if events is not None and not is_serve and is_volley(
-                f, pid, player_y_m, hits[k - 1] if k else None, events, fps):
+        if (flight_known and not (is_serve or is_smash) and shot_type != "dropshot"
+                and is_volley(f, pid, player_y_m, hits[k - 1] if k else None,
+                              events, real_ball, conv, fps)):
             shot_type = "volley"
 
         # Overhead (serve/smash): separate column; wrapped so short/missing data
         # yields "" rather than raising. Serves are already known; the ball-based
         # classifier is only asked about smashes.
-        if is_serve:
-            overhead = "serve"
+        if is_serve or is_smash:
+            overhead = "serve" if is_serve else "smash"
         else:
             try:
                 in_feats = _incoming_ball_features(track, conv, i, fps)

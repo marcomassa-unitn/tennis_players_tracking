@@ -16,6 +16,7 @@ from analysis.shot_analysis import (
     analyze_shots,
     classify_flight,
     detect_serves,
+    detect_smashes,
     is_volley,
     move_contacts_off_bounces,
 )
@@ -65,20 +66,6 @@ def _bounce_at(frame, event):
     return pd.DataFrame({"frame": [float(frame)], "event": [event]})
 
 
-def test_a_shot_inside_the_service_line_before_the_bounce_is_a_volley():
-    no_bounce = _bounce_at(90, BOUNCE_FAR)            # on the other side
-    assert is_volley(120, 1, NET + 3.0, (90, 2), no_bounce, 30.0)
-
-
-def test_not_a_volley_after_a_bounce_or_from_the_back():
-    bounced = _bounce_at(110, BOUNCE_NEAR)
-    assert not is_volley(120, 1, NET + 3.0, (90, 2), bounced, 30.0)
-    empty = _bounce_at(10, BOUNCE_NEAR)
-    assert not is_volley(120, 1, L_m, (90, 2), empty, 30.0)          # hidden bounce
-    assert not is_volley(120, 1, NET + 3.0, (90, 1), empty, 30.0)    # own shot before
-    assert not is_volley(120, 1, NET + 3.0, None, empty, 30.0)
-
-
 @pytest.fixture
 def conv(tmp_path):
     path = tmp_path / "court.csv"
@@ -86,10 +73,11 @@ def conv(tmp_path):
     return CourtConverter(str(path))
 
 
-def _server_boxes(conv, pid, first, last, contact):
-    """One player at their baseline, box raised up to a peak at `contact`."""
+def _server_boxes(conv, pid, first, last, contact, y_m=None):
+    """One player at their baseline or `y_m`, box raised up to a peak at `contact`."""
     m_to_px = np.linalg.inv(conv._H)
-    u, v, w = m_to_px @ np.array([W_m / 2, L_m + 0.3 if pid == 1 else -0.3, 1.0])
+    y_m = (L_m + 0.3 if pid == 1 else -0.3) if y_m is None else y_m
+    u, v, w = m_to_px @ np.array([W_m / 2, y_m, 1.0])
     feet = (u / w, v / w)
     heights = {f: 200.0 for f in range(first, last + 1)}
     heights.update({f: 280.0 for f in range(contact - 20, contact)})
@@ -120,3 +108,60 @@ def test_a_serve_is_placed_where_the_server_stood_before_the_jump(conv):
     serve = shots[shots["overhead"] == "serve"].iloc[0]
     assert serve["frame"] == 67
     assert serve["player_y_m"] == pytest.approx(L_m + 0.3, abs=0.05)
+
+
+def _ball_from(conv, frames, y_from, y_to):
+    """Detections of a ball going straight from `y_from` to `y_to` (metres)."""
+    m_to_px = np.linalg.inv(conv._H)
+    rows = []
+    for i, f in enumerate(frames):
+        y = y_from + (y_to - y_from) * i / (len(frames) - 1)
+        u, v, w = m_to_px @ np.array([W_m / 2, y, 1.0])
+        rows.append((f, u / w, v / w))
+    return pd.DataFrame(rows, columns=["frame", "cx", "cy"])
+
+
+def test_a_smash_hit_out_of_sight_is_found_from_the_motion_and_the_ball(conv):
+    boxes = _server_boxes(conv, 2, 0, 150, 80, y_m=6.0)
+    ball = _ball_from(conv, range(84, 100), 7.0, 20.0)
+    assert detect_smashes(boxes, conv, 30.0, ball) == [(80, 2)]
+
+
+def test_an_arm_raised_while_the_ball_is_elsewhere_is_no_smash(conv):
+    boxes = _server_boxes(conv, 2, 0, 150, 80, y_m=11.0)
+    ball = _ball_from(conv, range(84, 100), 20.0, 15.0)   # already past, on the other side
+    assert detect_smashes(boxes, conv, 30.0, ball) == []
+
+
+def test_the_same_motion_from_the_baseline_is_no_smash(conv):
+    boxes = _server_boxes(conv, 2, 0, 150, 80)
+    ball = _ball_from(conv, range(84, 100), 1.0, 20.0)
+    assert detect_smashes(boxes, conv, 30.0, ball) == []
+
+
+def _comes_and_goes(conv, contact):
+    """A ball reaching a near player at `contact`, then going back over the net."""
+    return pd.concat([_ball_from(conv, range(contact - 20, contact), 6.0, 15.0),
+                      _ball_from(conv, range(contact, contact + 20), 15.0, 6.0)])
+
+
+def test_a_ball_taken_in_the_air_inside_the_court_is_a_volley(conv):
+    no_bounce = _bounce_at(90, BOUNCE_FAR)            # on the other side
+    ball = _comes_and_goes(conv, 120)
+    assert is_volley(120, 1, NET + 3.0, (90, 2), no_bounce, ball, conv, 30.0)
+
+
+def test_not_a_volley_after_a_bounce_or_from_the_back(conv):
+    ball = _comes_and_goes(conv, 120)
+    bounced = _bounce_at(110, BOUNCE_NEAR)
+    assert not is_volley(120, 1, NET + 3.0, (90, 2), bounced, ball, conv, 30.0)
+    empty = _bounce_at(10, BOUNCE_NEAR)
+    assert not is_volley(120, 1, L_m, (90, 2), empty, ball, conv, 30.0)        # hidden bounce
+    assert not is_volley(120, 1, NET + 3.0, (90, 1), empty, ball, conv, 30.0)  # own shot before
+    assert not is_volley(120, 1, NET + 3.0, None, empty, ball, conv, 30.0)
+
+
+def test_a_ball_passing_by_is_no_volley(conv):
+    ball = _ball_from(conv, range(100, 140), 6.0, 22.0)
+    empty = _bounce_at(10, BOUNCE_NEAR)
+    assert not is_volley(120, 1, NET + 3.0, (90, 2), empty, ball, conv, 30.0)

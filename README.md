@@ -186,8 +186,9 @@ flowchart LR
    flight to the bounce of the next step: a flight under 1.05 s is flat; a slower
    ball is a dropshot if it lands within 4.5 m of the net, a lob if it flies above
    2 m, and a slice if it floats lower. The height is the ball's distance in the
-   image from the point below it on the court. A shot played inside the service
-   line with no bounce since the opponent's shot is a volley. Shots with no bounce found fall back
+   image from the point below it on the court. A shot played from inside the
+   court with no bounce since the opponent's shot, with the ball coming and going
+   back, is a volley. Shots with no bounce found fall back
    on perspective-invariant features of the outgoing trajectory. Serves are found
    from the server's motion rather than from the ball: a player standing at their
    own baseline, after a quiet spell with no opponent shot, whose box (in metres
@@ -195,9 +196,10 @@ flowchart LR
    The last peak is taken as the contact, so neither the toss release nor a gap
    in the ball track is mistaken for it. The serve is placed where the server stood
    before jumping, since feet in the air project to the wrong spot on the court.
-   Smashes are read from the ball (an
-   above-head contact on a descending ball, driven down). Both go in a separate,
-   conservative overhead column.
+   Smashes are often hit out of sight, the ball of a high lob having left the
+   picture, so they are also found from the motion: the arm-up of a serve from inside
+   the court, followed by the ball leaving the striker's side and crossing the net.
+   Both go in a separate, conservative overhead column.
 7. **Bounce detection** ([`analysis/bounce_detection.py`](analysis/bounce_detection.py)).
    Between two events the ball flies freely, so in the image it follows almost a
    parabola. The real detections are split into the best sequence of parabolas by
@@ -369,8 +371,8 @@ ruff check .    # lint
 - **Thresholds are tuned on one camera setup.** The shot-type defaults were fit
   on the demo rally.
 - **Serves need the server in view.** A serve hit during a fade-in, or before
-  the server's box is tracked, is not detected. The smash rule is only covered
-  by the synthetic test, since none of the clips contains a smash.
+  the server's box is tracked, is not detected. Smashes have only been checked on
+  one real example.
 - **Some bounces cannot be seen.** When the ball passes behind a player around
   the landing, or the track has a gap there, no bounce is reported: these are the
   2 bounces missed on the demo rally. The median landing error is 0.14–0.25 m but
@@ -379,8 +381,7 @@ ruff check .    # lint
   not checked against labels. Shots with no bounce found use the older rules on
   the trajectory shape, which were tuned on the demo rally and are less reliable.
   A slow topspin ball can also fly above 2 m and be called a lob. Volleys were
-  only checked by eye; overheads taken in the air count as volleys, and half-volleys
-  are not recognised.
+  only checked by eye, and a false shot can pass as one.
 
 ## Report and presentation
 
