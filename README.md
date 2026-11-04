@@ -68,7 +68,7 @@ the pipeline produces:
 | Ball | found on 90 % of the frames (original detector: 60 %); vs hand-labelled positions: precision 1.00, recall 0.92, centre error 1.2 px |
 | Movement | near player 94.8 m covered (mean 10.6 km/h, p95 29.6 km/h); far player 104.2 m (mean 11.8 km/h, p95 27.4 km/h) |
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
-| Bounces | 23 found, all on the court; on all four clips with a serve, it lands in a service box (not yet measured against hand labels) |
+| Bounces | vs 25 hand-labelled bounces: precision 1.00, recall 0.92, median time error 0.2 frames, median landing error 0.25 m; on a second clip (14 bounces, thresholds not tuned on it) 1.00, 1.00, 0.2 frames, 0.14 m |
 | Shot mix | 18 flat, 5 slice, 1 dropshot, 1 lob; 17 backhands, 6 forehands, 2 on the body axis (the serve included) |
 | Shot type | **21/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
 | Self-tests | synthetic stroke test 4/4, synthetic serve/smash test 5/5 with zero false positives |
@@ -353,9 +353,10 @@ ruff check .    # lint
 - **Serves need the server in view.** A serve hit during a fade-in, or before
   the server's box is tracked, is not detected. The smash rule is only covered
   by the synthetic test, since none of the clips contains a smash.
-- **Some bounces cannot be seen.** When the ball lands behind a player, or the
-  track has a gap around the landing, no bounce is reported. Landing points are
-  good to a few decimetres at best at 30 fps, so this is no line-calling tool.
+- **Some bounces cannot be seen.** When the ball passes behind a player around
+  the landing, or the track has a gap there, no bounce is reported: these are the
+  2 bounces missed on the demo rally. The median landing error is 0.14–0.25 m but
+  reaches about 1 m at the far end, so this is no line-calling tool.
 - **Shot types ignore the bounce.** Lob, slice and dropshot are told apart from
   the shape of the outgoing trajectory in the image, not from where and when the
   ball lands. On clips other than the demo rally they are not checked against
