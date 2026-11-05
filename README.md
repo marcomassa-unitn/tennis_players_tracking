@@ -248,8 +248,9 @@ GPU. Download the trained weights from the
 Then do one of the following:
 
 - run [`notebooks/ball_tracking_colab.ipynb`](notebooks/ball_tracking_colab.ipynb)
-  on a free Colab GPU and put the resulting `ball_candidates_<clip>.csv` in
-  `outputs/<clip>/ball_coordinates/`;
+  on a free Colab GPU, or [`notebooks/ball_tracking_kaggle.ipynb`](notebooks/ball_tracking_kaggle.ipynb)
+  on Kaggle, where a saved version keeps running with the computer off. Then put the
+  resulting `ball_candidates_<clip>.csv` in `outputs/<clip>/ball_coordinates/`;
 - or, with a GPU, put the weights in `models/ball_tracker.pt` and run
   `pip install ultralytics`.
 
@@ -350,7 +351,7 @@ python analysis/shot_analysis.py --type-self-test      # labelled demo rally (ne
 ├── ground_truth/            # hand-made annotations used by the evaluation
 ├── utils/                   # court geometry (ITF), pixel→metre homography, paths, video helpers
 ├── tests/                   # pytest suite (run in CI)
-├── notebooks/               # Colab notebook to run ball detection on a GPU
+├── notebooks/               # Colab and Kaggle notebooks to run ball detection on a GPU
 ├── docs/                    # report (PDF + LaTeX) and presentation
 ├── data/                    # demo clip
 ├── models/                  # put ball_tracker.pt here
