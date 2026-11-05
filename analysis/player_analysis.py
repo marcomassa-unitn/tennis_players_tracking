@@ -302,15 +302,14 @@ def _save_zone_outputs(player_data: dict, zone_df: pd.DataFrame,
     zone_df.to_csv(csv_path, index=False)
     print(f"  Saved: {csv_path}")
 
-    pids = sorted(player_data.keys())
-    fig, axes = plt.subplots(1, len(pids), figsize=(4.2 * len(pids), 9))
+    # One court for both players: identities come from the court half, so each
+    # keeps to their own side. Each is scaled to their own busiest zone.
+    fig, ax = plt.subplots(figsize=(4.6, 9))
     fig.patch.set_facecolor("#1a1a2e")
-    if len(pids) == 1:
-        axes = [axes]
-
-    for ax, pid in zip(axes, pids):
-        _draw_court(ax)
-        ax.set_ylim(*_COURT_YLIM)
+    _draw_court(ax)
+    ax.set_ylim(*_COURT_YLIM)
+    pids = sorted(player_data.keys())
+    for pid in pids:
         sub_df = zone_df[zone_df["player_id"] == pid]
         pct = dict(zip(sub_df["zone"], sub_df["percent"]))
         max_pct = max(pct.values()) if pct else 1.0
@@ -318,21 +317,25 @@ def _save_zone_outputs(player_data: dict, zone_df: pd.DataFrame,
         for zid, _, y0, y1 in _ZONE_BANDS:
             for side, _ in _SIDES:
                 p = pct.get(f"{zid}-{side}", 0.0)
+                if p <= 0.05:
+                    continue
                 x0, x1 = _SIDE_X[side]
-                alpha = 0.75 * p / max_pct
                 outside = zid.endswith("-out") or side in ("OL", "OR")
                 ax.add_patch(plt.Rectangle(
                     (x0, y0), x1 - x0, y1 - y0,
-                    facecolor=_COLORS[pid], alpha=alpha,
+                    facecolor=_COLORS[pid], alpha=0.75 * p / max_pct,
                     edgecolor="white", linewidth=0.4,
                     linestyle=":" if outside else "-",
                 ))
-                if p > 0.05:
-                    ax.text((x0 + x1) / 2, (y0 + y1) / 2, f"{p:.1f}%",
-                            ha="center", va="center", color="white",
-                            fontsize=7, fontweight="bold")
-        ax.set_title(f"Zones – Player {pid}", color="white",
-                     fontsize=11, pad=4)
+                ax.text((x0 + x1) / 2, (y0 + y1) / 2, f"{p:.1f}%",
+                        ha="center", va="center", color="white",
+                        fontsize=8, fontweight="bold")
+    ax.set_title("Court zones (share of each player's time)", color="white",
+                 fontsize=11, pad=4)
+    ax.legend(handles=[plt.Rectangle((0, 0), 1, 1, color=_COLORS[pid], label=f"Player {pid}")
+                       for pid in pids],
+              loc="upper center", bbox_to_anchor=(0.5, 0.02), ncol=len(pids), fontsize=9,
+              framealpha=0.6, facecolor="#333", edgecolor="none", labelcolor="white")
 
     path = out_dir / "zones.png"
     _save_fig(fig, path)
