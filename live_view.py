@@ -46,7 +46,8 @@ from analysis import player_analysis
 from analysis.shot_analysis import (
     SHOT_CATEGORY_COLORS,  # hex per category — identical palette to shot_hitmap.png
     load_player_boxes,
-    shot_category,  # (stroke, shot_type, overhead) -> single category string
+    shot_category,  # (shot_type, overhead) -> colour category
+    shot_side,  # (stroke, overhead) -> letter in the marker
 )
 from utils.paths import OUTPUT_ROOT, clip_paths
 
@@ -101,7 +102,7 @@ _LEG_X     = 6               # left inset of the legend column (px)
 _LEG_TOP   = 14              # baseline y of the first row (px)
 _LEG_GAP   = 6              # gap between a symbol and its label (px)
 # Stable category order so legend/stats rows never reshuffle as shots accumulate.
-_LEG_ORDER = ["forehand", "backhand", "slice", "dropshot",
+_LEG_ORDER = ["groundstroke", "slice", "dropshot",
               "lob", "volley", "serve", "smash", "unknown"]
 
 # On-VIDEO player box colours, matching player_tracking._draw_players (P1 green,
@@ -163,11 +164,11 @@ def load_shot_markers(shots_csv: str, minimap: "Minimap",
         xm, ym = float(xm), float(ym)
         if not (x_lo <= xm <= x_hi and y_lo <= ym <= y_hi):
             continue
-        cat = shot_category(getattr(r, "stroke", None),
-                            getattr(r, "shot_type", None),
-                            getattr(r, "overhead", ""))
+        overhead = getattr(r, "overhead", "")
+        cat = shot_category(getattr(r, "shot_type", None), overhead)
+        side = shot_side(getattr(r, "stroke", None), overhead)
         pid = int(getattr(r, "player_id", 0))
-        out.append((int(r.frame), pid, cat, minimap._to_px(xm, ym)))
+        out.append((int(r.frame), pid, cat, side, minimap._to_px(xm, ym)))
     out.sort(key=lambda t: t[0])
     return out
 
@@ -229,16 +230,16 @@ _CAT_FALLBACK_BGR = (127, 127, 127)   # grey, mirrors shot_analysis' fallback
 
 # Shot marker geometry: hollow and ~1 px larger than the 6-px FILLED player dot,
 # so it frames the spot without dwarfing it.
-_SHOT_MARKER_R = 7    # hollow shot-marker "radius" (px)
+_SHOT_MARKER_R = 9    # hollow shot-marker "radius" (px), room for the side letter
 _SHOT_MARKER_TH = 2   # hollow stroke thickness (px)
 # sqrt(3)/2 — half-base offset of an equilateral up-triangle of circumradius r.
 _TRI_H = 0.866
 
 
-def _draw_shot_marker(img, center, pid, color_bgr,
-                      r: int = _SHOT_MARKER_R, th: int = _SHOT_MARKER_TH) -> None:
+def _draw_shot_marker(img, center, pid, color_bgr, r: int = _SHOT_MARKER_R,
+                      th: int = _SHOT_MARKER_TH, side: str = "") -> None:
     """Hollow, category-coloured marker; SHAPE encodes the player (P1 circle,
-    P2 up-triangle, as in shot_hitmap.png).
+    P2 up-triangle, as in shot_hitmap.png) and the letter ``side`` the stroke side.
 
     A near-black ring 1 px wider is stroked under it so it stays legible on the
     green court and over the white lines.
@@ -254,6 +255,11 @@ def _draw_shot_marker(img, center, pid, color_bgr,
     else:   # P1 and any unknown id -> hollow circle
         cv2.circle(img, (px, py), r + 1, outline, th, cv2.LINE_AA)
         cv2.circle(img, (px, py), r, color_bgr, th, cv2.LINE_AA)
+    if side:
+        fs = r / 22.0
+        (tw, tx), _ = cv2.getTextSize(side, FONT, fs, th)
+        cv2.putText(img, side, (px - tw // 2, py + tx // 2), FONT, fs, (255, 255, 255), th,
+                    cv2.LINE_AA)
 
 
 class Minimap:
@@ -331,10 +337,10 @@ class Minimap:
         th = max(2, S(1.5))               # heavier strokes (thickness-1 looked thin)
 
         rows = [c for c in _LEG_ORDER if c in present_cats]
-        n = len(rows) + 2 + 1   # categories + 2 shape-key rows + 1 header
+        n = len(rows) + 3 + 1   # categories + 3 key rows + 1 header
         # Backdrop sized to the column; clamped to the panel just in case.
         x0, y0 = leg_x - S(3), leg_top - S(12)
-        x1 = x0 + S(112)
+        x1 = x0 + S(132)
         y1 = y0 + n * row_h + S(4)
         x1, y1 = min(x1, self.w - 1), min(y1, self.h - 1)
         ov = img[y0:y1, x0:x1].copy()
@@ -360,13 +366,15 @@ class Minimap:
             cv2.putText(img, lbl, (lbl_x, y), FONT, leg_fs, _PANEL_FG, th,
                         cv2.LINE_AA)
             y += row_h
+        cv2.putText(img, "F fore  B back", (leg_x, y), FONT, leg_fs, _PANEL_FG, th,
+                    cv2.LINE_AA)
 
     def render(self, positions: dict, shot_markers=None,
                present_cats=None) -> np.ndarray:
         """Compose one BGR minimap frame.
 
         ``positions`` = {pid: (xm, ym)} live dots; ``shot_markers`` =
-        [(pid, category, (px, py)), ...] accumulated so far; ``present_cats``
+        [(pid, category, side, (px, py)), ...] accumulated so far; ``present_cats``
         drives the in-minimap legend. Markers are stamped FIRST (history layer)
         and live dots LAST (present layer), so a dot is never hidden; markers are
         hollow so an overlapping dot still shows its ring. Legend stamped last to
@@ -379,10 +387,10 @@ class Minimap:
         mk_r, mk_th = int(round(_SHOT_MARKER_R * s)), max(1, int(round(_SHOT_MARKER_TH * s)))
         dot_r = int(round(6 * s))
         if shot_markers:
-            for pid, cat, center in shot_markers:
+            for pid, cat, side, center in shot_markers:
                 _draw_shot_marker(img, center, pid,
                                   _CAT_BGR.get(cat, _CAT_FALLBACK_BGR),
-                                  r=mk_r, th=mk_th)
+                                  r=mk_r, th=mk_th, side=side)
         for pid, (xm, ym) in positions.items():
             cv2.circle(img, self._to_px(xm, ym), dot_r,
                        _DOT_BGR.get(pid, (255, 255, 255)), -1, cv2.LINE_AA)
@@ -403,13 +411,13 @@ class BallMap(Minimap):
 
         ``ball_xy`` = (xm, ym) or None, ``trail`` = recent (xm, ym), oldest first,
         ``bounces`` = [(order, (px, py), reliable), ...] and ``shot_markers`` =
-        [(pid, category, (px, py)), ...], both accumulated so far.
+        [(pid, category, side, (px, py)), ...], both accumulated so far.
         """
         img = self._base.copy()
         s = self._s
-        for pid, cat, center in shot_markers:
+        for pid, cat, side, center in shot_markers:
             _draw_shot_marker(img, center, pid, _CAT_BGR.get(cat, _CAT_FALLBACK_BGR),
-                              r=int(round(5 * s)), th=max(1, int(round(s))))
+                              r=int(round(8 * s)), th=max(1, int(round(s))), side=side)
         for order, center, reliable in bounces:
             cv2.circle(img, center, int(round(9 * s)),
                        (69, 201, 246) if reliable else (136, 136, 136), -1, cv2.LINE_AA)
@@ -437,12 +445,13 @@ class BallMap(Minimap):
 # ── stats placeholder ───────────────────────────────────────────────────────────
 
 def render_stats_panel(size: tuple[int, int], counts: dict,
-                       cats: list, ended: bool = False) -> np.ndarray:
+                       cats: list, ended: bool = False, sides=None) -> np.ndarray:
     """Live per-player shot tally, two columns (P1 | P2).
 
     ``counts`` = {pid: {category: n}}; ``cats`` is the fixed ordered category list
-    so rows never reshuffle. Each column lists one counter per category then the
-    per-player total; the footer shows rally length = total shots by both players.
+    so rows never reshuffle; ``sides`` = {pid: {"F": n, "B": n}}. Each column lists
+    one counter per category, the forehands and backhands, then the per-player
+    total; the footer shows rally length = total shots by both players.
     ``ended`` switches the title to FINAL and adds the "press q" footer.
     """
     w, h = size
@@ -477,7 +486,7 @@ def render_stats_panel(size: tuple[int, int], counts: dict,
     # shrinks text rather than colliding.
     top = S(86)                                  # first counter baseline
     foot = S(48)                                 # footer band reserved at bottom
-    n_rows = len(cats) + 1                        # categories + the "total" row
+    n_rows = len(cats) + 2                        # categories + sides + the "total" row
     avail = (h - foot) - top
     pitch = int(np.clip(avail / max(1, n_rows), S(13), S(24)))
     row_fs = float(np.clip(pitch / s / 24.0 * 0.5, 0.40, 0.52))  # native font, tracks pitch
@@ -494,6 +503,11 @@ def render_stats_panel(size: tuple[int, int], counts: dict,
             cv2.putText(panel, f"{cat}: {n}", (col_x[pid] + S(18), y), FONT,
                         fs(row_fs), _PANEL_FG, th_body, cv2.LINE_AA)
         y += pitch
+    for pid in (1, 2):
+        side = (sides or {}).get(pid, {})
+        cv2.putText(panel, f"F: {side.get('F', 0)}   B: {side.get('B', 0)}",
+                    (col_x[pid] + S(18), y), FONT, fs(row_fs), _PANEL_FG, th_body, cv2.LINE_AA)
+    y += pitch
 
     # per-player total flows after the last category (n_rows reserved its slot),
     # then a thin rule separates it from the footer band.
@@ -972,7 +986,7 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
 
     # FIXED legend: all categories in shots.csv, computed once so the full key
     # shows from frame 0 (it does NOT build up). None when there are no shots.
-    legend_cats = {cat for _f, _pid, cat, _c in shot_markers} or None
+    legend_cats = {m[2] for m in shot_markers} or None
     # Ordered category list for the stats columns (only types that occur).
     stat_cats = [c for c in _LEG_ORDER if legend_cats and c in legend_cats]
 
@@ -1023,11 +1037,12 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
     # shot_markers is frame-sorted, so one advancing pointer (next_shot) reveals
     # each marker as its frame is reached and keeps it shown to clip end
     # (O(total shots), not per frame).
-    active_markers = []     # [(pid, cat, center), ...] — frames already crossed
+    active_markers = []     # [(pid, cat, side, center), ...] — frames already crossed
     next_shot = 0
     # Per-player tally, bumped exactly when a shot is revealed so the panel
     # counters stay in step with the markers.
     counts = {1: {}, 2: {}}
+    sides = {1: {}, 2: {}}
     last_canvas = None      # final composite to freeze on after the clip
     try:
         while True:
@@ -1056,10 +1071,12 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             # Reveal every shot whose frame has been reached (it then persists),
             # bumping that player's per-category counter as its marker appears.
             while next_shot < len(shot_markers) and shot_markers[next_shot][0] <= idx:
-                _f, _pid, _cat, _center = shot_markers[next_shot]
-                active_markers.append((_pid, _cat, _center))
+                _f, _pid, _cat, _side, _center = shot_markers[next_shot]
+                active_markers.append((_pid, _cat, _side, _center))
                 pc = counts.setdefault(_pid, {})
                 pc[_cat] = pc.get(_cat, 0) + 1
+                ps = sides.setdefault(_pid, {})
+                ps[_side] = ps.get(_side, 0) + 1
                 next_shot += 1
             # Optional clutter cap: keep only the most recent N markers (0 = all).
             shown = (active_markers[-max_shot_markers:]
@@ -1069,7 +1086,7 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
             # and area-downscale in compose() for smooth text.
             mini = minimap.render(minimap_positions(idx), shown, legend_cats)
             stats = render_stats_panel((PANEL_W * SS, (disp_h - mini_h) * SS),
-                                       counts, stat_cats)
+                                       counts, stat_cats, sides=sides)
             last_canvas = compose(frame, mini, stats, disp_h, PANEL_W, mini_h,
                                   player_overlays, ball_overlay, ball_panel(idx), ball_w)
             # Downscale the high-res canvas to the window size ONCE here.
@@ -1106,7 +1123,7 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
                                    if max_shot_markers else active_markers),
                                   legend_cats)
             stats = render_stats_panel((PANEL_W * SS, (disp_h - mini_h) * SS),
-                                       counts, stat_cats, ended=True)
+                                       counts, stat_cats, ended=True, sides=sides)
             # Reuse the last video frame in last_canvas's left part; only the
             # panels are re-stamped (area-downscaled, same as compose).
             final = last_canvas.copy()

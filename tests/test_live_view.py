@@ -3,7 +3,15 @@ import pandas as pd
 import pytest
 
 from analysis.impact_comparison import _trail
-from live_view import PANEL_W, BallMap, ball_ground_path, compose, load_bounce_markers
+from live_view import (
+    PANEL_W,
+    BallMap,
+    ball_ground_path,
+    compose,
+    load_bounce_markers,
+    load_shot_markers,
+    render_stats_panel,
+)
 
 FPS = 30.0
 
@@ -59,7 +67,7 @@ def test_bounces_keep_their_rally_order_when_one_is_off_limits():
 def test_the_ball_column_sits_between_the_video_and_the_panels():
     ball_map = BallMap((520, 1080))
     panel = ball_map.render((4.0, 6.0), [(4.0, 10.0), (4.0, 6.0)], [(1, (100, 200), True)],
-                            [(1, "forehand", (120, 700))])
+                            [(1, "groundstroke", "F", (120, 700))])
     assert panel.shape == (1080, 520, 3)
     frame = np.zeros((1080, 1920, 3), np.uint8)
     side = np.zeros((540, 760, 3), np.uint8)
@@ -75,3 +83,18 @@ def test_the_trail_stops_where_the_path_is_interrupted():
     assert _trail(path, 7, 10) == [(5.0, 0.0), (6.0, 0.0), (7.0, 0.0)]
     assert _trail(path, 7, 2) == [(6.0, 0.0), (7.0, 0.0)]
     assert _trail(path, 4, 10) == []
+
+
+def test_a_shot_marker_keeps_its_type_and_side(tmp_path):
+    path = tmp_path / "shots.csv"
+    pd.DataFrame({"frame": [10, 20], "player_id": [1, 2], "stroke": ["backhand", "unknown"],
+                  "shot_type": ["dropshot", "slice"], "overhead": [None, "smash"],
+                  "player_x_m": [4.0, 4.0], "player_y_m": [20.0, 5.0]}).to_csv(path, index=False)
+    markers = load_shot_markers(str(path), BallMap((260, 540)), (-5, 15, -8, 32))
+    assert [m[:4] for m in markers] == [(10, 1, "dropshot", "B"), (20, 2, "smash", "")]
+
+
+def test_the_stats_panel_counts_sides_apart_from_the_total():
+    counts = {1: {"groundstroke": 2}, 2: {}}
+    panel = render_stats_panel((760, 540), counts, ["groundstroke"], sides={1: {"F": 1, "B": 1}})
+    assert panel.shape == (540, 760, 3)

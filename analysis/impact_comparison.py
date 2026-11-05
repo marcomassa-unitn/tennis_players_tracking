@@ -22,7 +22,7 @@ import pandas as pd
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from analysis.shot_analysis import shot_category
+from analysis.shot_analysis import shot_category, shot_side
 from live_view import SS, BallMap, ball_ground_path, load_bounce_markers
 from utils.paths import clip_paths
 
@@ -36,9 +36,9 @@ TITLES = (("Before", "shots at the player's feet"), ("After", "impact on the fli
 
 
 def _markers(shots, ball_map, x, y):
-    """[(frame, pid, category, (px, py)), ...] for the shots, placed at columns x, y."""
-    return [(int(r.frame), int(r.player_id), shot_category(r.stroke, r.shot_type, r.overhead),
-             ball_map._to_px(getattr(r, x), getattr(r, y)))
+    """[(frame, pid, category, side, (px, py)), ...] for the shots, at columns x, y."""
+    return [(int(r.frame), int(r.player_id), shot_category(r.shot_type, r.overhead),
+             shot_side(r.stroke, r.overhead), ball_map._to_px(getattr(r, x), getattr(r, y)))
             for r in shots.dropna(subset=[x, y]).itertuples()]
 
 

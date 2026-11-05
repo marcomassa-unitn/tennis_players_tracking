@@ -1221,8 +1221,7 @@ def print_summary(shots: pd.DataFrame, hands: dict) -> None:
 # (slice/dropshot/lob/serve) wins, else the forehand/backhand stroke. Marker
 # SHAPE encodes the player (P1 = circle, P2 = triangle).
 SHOT_CATEGORY_COLORS = {
-    "forehand": "#2ca02c",   # green
-    "backhand": "#ff7f0e",   # orange
+    "groundstroke": "#2ca02c",   # green
     "slice":    "#9467bd",   # purple
     "dropshot": "#d62728",   # red
     "lob":      "#8c564b",   # brown
@@ -1237,24 +1236,34 @@ _PLAYER_MARKERS = {1: "o", 2: "^"}
 _PLAYER_MARKER_FALLBACK = "s"
 
 
-def shot_category(stroke, shot_type, overhead=""):
+def shot_category(shot_type, overhead=""):
     """Colour category for a shot: overhead (serve/smash) wins, else a special
-    shot_type (slice/dropshot/lob/volley/serve), else the forehand/backhand stroke."""
+    shot_type (slice/dropshot/lob/volley/serve), else a plain groundstroke."""
     ov = (str(overhead) if overhead is not None else "").strip().lower()
     if ov in ("serve", "smash"):
         return ov
     st = (str(shot_type) if shot_type is not None else "").strip().lower()
     if st in _SPECIAL_SHOT_TYPES:
         return st
-    sk = (str(stroke) if stroke is not None else "").strip().lower()
-    return sk if sk else "unknown"
+    return "groundstroke" if st == "flat" else "unknown"
+
+
+def shot_side(stroke, overhead=""):
+    """Letter drawn in a shot's marker: F forehand, B backhand, ? not known.
+
+    Any shot can be played on either side, except a serve or a smash: those get none.
+    """
+    ov = (str(overhead) if overhead is not None else "").strip().lower()
+    if ov in ("serve", "smash"):
+        return ""
+    return {"forehand": "F", "backhand": "B"}.get(str(stroke).strip().lower(), "?")
 
 
 def save_shot_hitmap(shots: pd.DataFrame, out_dir,
                      title: str = "Shot hitmap (player position)") -> None:
-    """Plot each shot at the PLAYER's feet (meters) on the minimap, coloured by
-    combined category, marker shape per player. Reuses player_analysis's court
-    drawing."""
+    """Plot each shot at the PLAYER's feet (meters) on the minimap: colour for the
+    type of shot, letter for its side, marker shape per player. Reuses
+    player_analysis's court drawing."""
     out_dir = Path(out_dir)
     if shots is None or shots.empty:
         print("  Hitmap skipped: no shots.")
@@ -1286,14 +1295,15 @@ def save_shot_hitmap(shots: pd.DataFrame, out_dir,
         ym = getattr(r, "player_y_m", float("nan"))
         if xm is None or ym is None or np.isnan(xm) or np.isnan(ym):
             continue
-        cat = shot_category(getattr(r, "stroke", None),
-                            getattr(r, "shot_type", None),
-                            getattr(r, "overhead", ""))
+        overhead = getattr(r, "overhead", "")
+        cat = shot_category(getattr(r, "shot_type", None), overhead)
         color = SHOT_CATEGORY_COLORS.get(cat, _CATEGORY_FALLBACK_COLOR)
         pid = int(getattr(r, "player_id", 0))
         marker = _PLAYER_MARKERS.get(pid, _PLAYER_MARKER_FALLBACK)
-        ax.scatter(xm, ym, c=color, marker=marker, s=150,
+        ax.scatter(xm, ym, c=color, marker=marker, s=210,
                    edgecolors="white", linewidths=0.9, zorder=5, alpha=0.95)
+        ax.text(xm, ym, shot_side(getattr(r, "stroke", None), overhead), color="white",
+                fontsize=7, fontweight="bold", ha="center", va="center", zorder=6)
         if cat not in present_cats:
             present_cats.append(cat)
         if pid not in present_players:
@@ -1316,6 +1326,10 @@ def save_shot_hitmap(shots: pd.DataFrame, out_dir,
                           linestyle="", markerfacecolor="white",
                           markeredgecolor="black", markersize=10, label=f"P{p}")
                    for p in sorted(present_players)]
+    plr_handles += [Line2D([0], [0], marker=f"${letter}$", linestyle="",
+                           markerfacecolor="white", markeredgecolor="white",
+                           markersize=7, label=label)
+                    for letter, label in (("F", "forehand"), ("B", "backhand"))]
 
     leg1 = ax.legend(handles=cat_handles, title="Shot type",
                      loc="upper left", bbox_to_anchor=(1.02, 1.0),

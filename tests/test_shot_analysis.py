@@ -20,6 +20,8 @@ from analysis.shot_analysis import (
     impact_point,
     is_volley,
     move_contacts_off_bounces,
+    shot_category,
+    shot_side,
     stroke_from_impact,
 )
 from utils.court_converter import CourtConverter
@@ -196,3 +198,26 @@ def test_no_impact_out_of_reach_or_before_the_bounce():
 ])
 def test_stroke_side_on_the_court(impact_x, side, hand, expected):
     assert stroke_from_impact(impact_x, 4.0, side, hand) == expected
+
+
+@pytest.mark.parametrize("shot_type, overhead, category", [
+    ("flat", "", "groundstroke"),
+    ("slice", "", "slice"),
+    ("volley", None, "volley"),
+    ("flat", "serve", "serve"),
+    ("slice", "smash", "smash"),
+    ("unknown", "", "unknown"),
+])
+def test_the_colour_tells_the_type_of_shot(shot_type, overhead, category):
+    assert shot_category(shot_type, overhead) == category
+
+
+@pytest.mark.parametrize("stroke, overhead, letter", [
+    ("forehand", "", "F"),
+    ("backhand", None, "B"),
+    ("unknown", "", "?"),
+    ("forehand", "serve", ""),
+    ("backhand", "smash", ""),
+])
+def test_the_letter_tells_the_side(stroke, overhead, letter):
+    assert shot_side(stroke, overhead) == letter

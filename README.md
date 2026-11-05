@@ -48,7 +48,8 @@ the one exception: it is small and fast, so it uses a YOLOv8 detector.
   landing point and height work the same at both ends of the court. It agrees with
   all 23 shots of a hand-labelled rally (flat, slice, dropshot, lob), and volleys
   are told by the missing bounce.
-  Every contact is also classified as forehand or backhand.
+  Every contact is also classified as forehand or backhand; in the hitmap the
+  colour gives the type of shot and the letter (F, B) its side.
 - **Classical motion estimation, implemented from scratch.** Full-search and
   three-step block matching (SAD), next to Farnebäck and Lucas–Kanade optical
   flow.
