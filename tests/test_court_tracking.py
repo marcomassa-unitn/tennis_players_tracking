@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import pytest
 
-from tracking.court_tracking import detect_court, keypoints_from_homography
+from tracking.court_tracking import CourtTracker, detect_court, keypoints_from_homography
 from utils.court_geometry import _REAL_WORLD
 from utils.court_overlay import MODEL_SEGMENTS
 
@@ -48,3 +48,9 @@ def test_black_frame_has_no_court():
     H_fit, ratio = detect_court(np.zeros((H, W, 3), np.uint8))
     assert H_fit is None
     assert ratio == 0.0
+
+
+def test_no_folder_is_created_for_a_video_that_cannot_be_opened(tmp_path):
+    with pytest.raises(RuntimeError, match="Cannot open video"):
+        CourtTracker("data/nope.mp4", no_display=True, output_dir=str(tmp_path)).run()
+    assert list(tmp_path.iterdir()) == []

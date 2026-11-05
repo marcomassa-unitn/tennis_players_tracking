@@ -671,5 +671,6 @@ if __name__ == "__main__":
     args.csv = args.csv or paths["players_csv"]
     args.court = args.court or paths["court_csv"]
 
+    tracker = PlayerTracker(args.video, args.csv, args.court, display=not args.no_display)
     os.makedirs(os.path.dirname(args.csv) or ".", exist_ok=True)
-    PlayerTracker(args.video, args.csv, args.court, display=not args.no_display).run()
+    tracker.run()
