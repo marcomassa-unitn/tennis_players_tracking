@@ -366,7 +366,6 @@ class CourtTracker:
         and (unless no_display) play the video with the court drawn on it.
         Returns the keypoint dict."""
         csv_path = clip_paths(self.video_path, self.output_dir)["court_csv"]
-        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
 
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
@@ -381,6 +380,7 @@ class CourtTracker:
                     "The clip needs a fixed broadcast view of the whole court.")
 
             keypoints = keypoints_from_homography(H)
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             with open(csv_path, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["label", "x", "y"])

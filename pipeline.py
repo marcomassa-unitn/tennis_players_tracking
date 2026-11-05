@@ -499,6 +499,8 @@ STEPS = [
 
 def main():
     args = build_parser().parse_args()
+    if not os.path.exists(args.video):
+        raise SystemExit(f"Video not found: {args.video}")
 
     # No flags -> display False -> headless. --display opts in; --no-display
     # always forces headless.

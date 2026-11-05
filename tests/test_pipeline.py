@@ -3,7 +3,7 @@ from argparse import Namespace
 
 import pytest
 
-from pipeline import REDO_STEPS, choose_steps, missing_steps, parse_steps, stale_steps
+from pipeline import REDO_STEPS, choose_steps, main, missing_steps, parse_steps, stale_steps
 from utils.paths import clip_paths
 
 
@@ -91,3 +91,11 @@ def test_declining_keeps_only_the_chosen_step(clip, monkeypatch):
     args = _args()
     choose_steps(clip, args, interactive=True)
     assert _redone(args) == {"tracking"}
+
+
+def test_a_missing_video_stops_the_pipeline_before_any_folder(tmp_path, monkeypatch):
+    out = tmp_path / "outputs"
+    monkeypatch.setattr("sys.argv", ["pipeline", "--video", "data/nope.mp4", "--output", str(out)])
+    with pytest.raises(SystemExit, match="Video not found"):
+        main()
+    assert not out.exists()

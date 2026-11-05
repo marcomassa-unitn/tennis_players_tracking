@@ -204,10 +204,10 @@ def main():
     args = parser.parse_args()
 
     args.output = args.output or clip_paths(args.video)["motion_dir"]
-    os.makedirs(args.output, exist_ok=True)
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {args.video}")
+    os.makedirs(args.output, exist_ok=True)
 
     methods = ["tss", "full"] if args.method == "both" else [args.method]
     runner = {"tss": three_step_search, "full": full_search}

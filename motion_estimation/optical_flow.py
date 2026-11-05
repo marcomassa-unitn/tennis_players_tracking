@@ -187,7 +187,6 @@ def main():
     args.players = args.players or paths["players_csv"]
     args.court = args.court or paths["court_csv"]
     args.output = args.output or paths["motion_dir"]
-    os.makedirs(args.output, exist_ok=True)
 
     boxes = load_player_boxes(args.players)
     conv = CourtConverter(args.court)
@@ -195,6 +194,7 @@ def main():
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {args.video}")
+    os.makedirs(args.output, exist_ok=True)
 
     print(f"Farneback dense flow on {args.video} (scale {args.scale})")
     rows = []
