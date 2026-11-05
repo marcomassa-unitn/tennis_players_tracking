@@ -41,10 +41,7 @@ from analysis.shot_analysis import (
     _ball_near_player,
     _nearest_box,
     _px_per_metre,
-    ball_track_for_shots,
-    detect_hits,
-    detect_serves,
-    load_ball_track,
+    clip_serves,
     load_player_boxes,
     load_real_detections,
 )
@@ -257,8 +254,7 @@ def detect_events(ball, boxes, conv, fps, serves=(), params=None):
 
 def clip_events(ball_csv, boxes, conv, fps, params=None):
     """detect_events on a clip's ball CSV, finding its serves first."""
-    hits = detect_hits(load_ball_track(ball_track_for_shots(ball_csv)), boxes, fps)
-    serves = detect_serves(boxes, conv, fps, hits)
+    serves = clip_serves(ball_csv, boxes, conv, fps)
     return detect_events(load_real_detections(ball_csv), boxes, conv, fps, serves, params)
 
 

@@ -34,8 +34,7 @@ Use (from project root, after the ball CSV exists):
     python analysis/shot_analysis.py --ball outputs/Input_video2/ball_coordinates/ball_Input_video2.csv
     python analysis/shot_analysis.py --ball outputs/Input_video2/ball_coordinates/ball_Input_video2.csv \\
         --p1-hand right --p2-hand left
-    python analysis/shot_analysis.py --events outputs/Input_video2/shot_analysis/events.csv \\
-        --real-ball outputs/Input_video2/ball_coordinates/ball_Input_video2.csv
+    python analysis/shot_analysis.py --events outputs/Input_video2/shot_analysis/events.csv
     python analysis/shot_analysis.py --self-test        # synthetic, no YOLO
     python analysis/shot_analysis.py --type-self-test   # vs labelled ground truth
 """
@@ -118,14 +117,13 @@ def load_real_detections(ball_csv: str) -> pd.DataFrame:
     return df[["frame", "cx", "cy"]].sort_values("frame").reset_index(drop=True)
 
 
-def ball_track_for_shots(ball_csv: str) -> str:
-    """The ball CSV that shot detection should read for `ball_csv`.
+def ball_track_for_serves(ball_csv: str) -> str:
+    """The ball CSV that the serve checks read for `ball_csv`.
 
-    Shot detection was designed and validated on the track of the original
-    single-pass, whole-frame detector. The default ball track now comes from a
-    denser multi-scale detector and a different tracker, which changes the
-    timing of the contact candidates, so the whole-frame track written next to
-    it (ball_wholeframe_<video>.csv) is used when it exists.
+    Serves were designed and validated with the hits of the original single-pass,
+    whole-frame detector, so the track rebuilt with its rules next to the ball CSV
+    (ball_wholeframe_<video>.csv) is used when it exists. All other shots are read
+    from the denser ball track.
     """
     folder, name = os.path.split(ball_csv)
     if name.startswith("ball_") and not name.startswith(("ball_wholeframe_", "ball_candidates_")):
@@ -428,7 +426,8 @@ def _shot_type_features(track, conv, i: int, fps: float,
 
     cyo = cy[i:i + k + 1]
     cxo = cx[i:i + k + 1]
-    hc = np.nanmedian(h[max(0, i - 3):i + 4])    # local scale proxy
+    near = h[max(0, i - 3):i + 4]
+    hc = np.nanmedian(near) if np.isfinite(near).any() else np.nan   # local scale proxy
 
     # scale-free pixel pace
     spx = np.hypot(np.diff(cxo), np.diff(cyo))
@@ -760,6 +759,12 @@ def detect_serves(boxes, conv, fps, hits, params=None):
     return kept
 
 
+def clip_serves(ball_csv, boxes, conv, fps, params=None):
+    """detect_serves on a clip, with the hits its checks were validated on."""
+    hits = detect_hits(load_ball_track(ball_track_for_serves(ball_csv)), boxes, fps)
+    return detect_serves(boxes, conv, fps, hits, params)
+
+
 # ── smashes from the striker's motion ──────────────────────────────────────────
 #
 # A smash is often hit out of sight: the ball of a high lob leaves the picture, so
@@ -810,21 +815,26 @@ def detect_smashes(boxes, conv, fps, real_ball, serves=(), params=None):
 # ── contacts that are really bounces ───────────────────────────────────────────
 #
 # detect_hits keeps the reversals close to a player, and a bounce in front of the
-# receiver is one of them. The events read from the track (bounce_detection.py)
-# tell the two apart, so such a contact moves to the hit that follows the bounce.
+# receiver is one of them, as is the ball rising after it or dropping just before.
+# The events read from the track (bounce_detection.py) tell these from a hit, so
+# such a contact moves to the hit that follows the bounce.
 
 HIT_NEAR, BOUNCE_FAR, HIT_FAR, BOUNCE_NEAR = "hit_near", "bounce_far", "hit_far", "bounce_near"
 HIT_OF_PLAYER = {1: HIT_NEAR, 2: HIT_FAR}
 BOUNCE_OF_PLAYER = {1: BOUNCE_NEAR, 2: BOUNCE_FAR}
 
 CONTACT_PARAMS = {
-    "bounce_tol_s": 0.1,     # a contact this close to a bounce on its own side is that bounce
+    "before_bounce_s": 0.4,  # a contact this long before a bounce on its own side, or...
+    "after_bounce_s": 0.25,  # ...this long after it, is that bounce
     "next_hit_s": 0.6,       # the hit comes at most this long after the bounce
+    "leaving_s": 0.8,        # time after a contact to see where the ball is going
+    "fill_margin_s": 0.3,    # a missing shot is at least this far from the shots around it
+    "max_fill_s": 4.0,       # further apart, two shots of one player are two points
 }
 
 
 def move_contacts_off_bounces(hits, events, fps, min_gap_s=0.5, params=None):
-    """Move each hit sitting on a bounce of its own player to the hit after it.
+    """Move each hit around a bounce of its own player to the hit after it.
 
     Without a following hit in `events` the contact stays where it is. Returns the
     hits and {moved frame: (cx, cy)}, the ball at those contacts: the track used
@@ -834,7 +844,8 @@ def move_contacts_off_bounces(hits, events, fps, min_gap_s=0.5, params=None):
     moved, ball_at = [], {}
     for f, pid, strength in hits:
         bounces = events[(events["event"] == BOUNCE_OF_PLAYER[pid])
-                         & ((events["frame"] - f).abs() <= p["bounce_tol_s"] * fps)]
+                         & (events["frame"] - f <= p["before_bounce_s"] * fps)
+                         & (f - events["frame"] <= p["after_bounce_s"] * fps)]
         if not bounces.empty:
             t = bounces["frame"].iloc[0]
             after = events[(events["event"] == HIT_OF_PLAYER[pid]) & (events["frame"] > t)
@@ -850,6 +861,54 @@ def move_contacts_off_bounces(hits, events, fps, min_gap_s=0.5, params=None):
         if not any(k[1] == hit[1] and hit[0] - k[0] < min_gap_s * fps for k in kept):
             kept.append(hit)
     return kept, ball_at
+
+
+def drop_unanswered_bounces(hits, real_ball, conv, fps, keep=(), params=None):
+    """Drop a last shot of a rally that does not send the ball to the opponent.
+
+    It is the ball bouncing once the point is over. A reply proves a contact, however
+    the ball looked at first: a soft high ball seems to go backwards in the image.
+    NaN (ball unseen) is no reason to drop either; `keep` holds frames never dropped.
+    """
+    p = params or CONTACT_PARAMS
+    kept = []
+    for k, (f, pid, strength) in enumerate(hits):
+        answered = k + 1 < len(hits) and hits[k + 1][0] - f <= p["max_fill_s"] * fps
+        speed = _speed_to_opponent(real_ball, f + 2, f + p["leaving_s"] * fps, pid, conv, fps)
+        if answered or f in keep or not speed < 0:
+            kept.append((f, pid, strength))
+    return kept
+
+
+def fill_missing_hits(hits, events, real_ball, fps, params=None):
+    """Add the shot that must exist between two shots of one player.
+
+    The opponent played where the ball turned back at their end of the court, or at
+    a hit event of theirs close to that. With the ball unseen, at their strongest hit
+    event. Returns the hits and {added frame: (cx, cy)}, the ball at those contacts.
+    """
+    p = params or CONTACT_PARAMS
+    margin = p["fill_margin_s"] * fps
+    filled, ball_at = list(hits), {}
+    for (f0, pid, _), (f1, next_pid, _) in zip(hits[:-1], hits[1:]):
+        if pid != next_pid or f1 - f0 > p["max_fill_s"] * fps:
+            continue
+        opponent = 3 - pid
+        found = events[(events["event"] == HIT_OF_PLAYER[opponent])
+                       & events["frame"].between(f0 + margin, f1 - margin)]
+        seen = real_ball[real_ball["frame"].between(f0 + margin, f1 - margin)]
+        turn = None
+        if not seen.empty:
+            turn = seen.loc[seen["cy"].idxmin() if opponent == 2 else seen["cy"].idxmax()]
+            found = found[(found["frame"] - turn["frame"]).abs() <= margin]
+        if not found.empty:
+            turn = found.loc[np.hypot(found["jump_up_ms"], found["jump_side_ms"]).idxmax()]
+        if turn is None:
+            continue
+        f = int(round(turn["frame"]))
+        filled.append((f, opponent, 0.0))
+        ball_at[f] = (float(turn["cx"]), float(turn["cy"]))
+    return sorted(filled), ball_at
 
 
 # ── impact point from the ball's flight ────────────────────────────────────────
@@ -993,13 +1052,16 @@ def is_volley(contact, pid, y_m, previous, events, real_ball, conv, fps, params=
 def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                   vy_min=0.5, acc_thr=1.5, win=4,
                   reversal_look=6, reversal_vy_frac=0.5,
-                  type_params=None, events=None, real_ball=None):
+                  type_params=None, events=None, real_ball=None, serves=None):
     """Detect and classify every shot; return a DataFrame.
 
     events    : hits and bounces from bounce_detection.py, to correct the contacts
                 that are really bounces. Without them the contacts stay as detected.
     real_ball : real detections of the ball (load_real_detections). With `events`,
-                the type of a shot with a known bounce comes from its flight.
+                the type of a shot with a known bounce comes from its flight, a
+                contact must send the ball towards the opponent, and a shot missing
+                between two of the same player is added.
+    serves    : from clip_serves; found from the hits on `track` when not given.
     """
     tp = type_params or SHOT_TYPE_PARAMS
     # Warn on a ball/player frame-range mismatch: non-overlapping ranges mean
@@ -1020,7 +1082,8 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
     # Serves come from the server's motion (detect_serves). The server's own
     # "shots" during the toss are the toss release, not contacts: replace them
     # with the serve contact.
-    serves = detect_serves(boxes, conv, fps, hits)
+    if serves is None:
+        serves = detect_serves(boxes, conv, fps, hits)
     serve_starts = {c: start for c, _, start in serves}
     for contact, pid, phase_start in serves:
         lo, hi = phase_start - 0.5 * fps, contact + 0.3 * fps
@@ -1039,6 +1102,12 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         hits, ball_at = move_contacts_off_bounces(hits, events, fps, min_gap_s)
 
     flight_known = events is not None and real_ball is not None
+    if flight_known:
+        hits = drop_unanswered_bounces(hits, real_ball, conv, fps,
+                                       {*serve_starts, *smash_frames})
+        hits, added = fill_missing_hits(hits, events, real_ball, fps)
+        ball_at.update(added)
+
     previous = None         # the last shot kept: (frame, player, impact)
     n_dropped = 0
     rows = []
@@ -1504,7 +1573,7 @@ def type_self_test(ball_csv: str = None, players_csv: str = None,
     """
     paths = clip_paths("Input_video2",
                        str(Path(__file__).resolve().parent.parent / "outputs"))
-    ball_csv = ball_csv or ball_track_for_shots(paths["ball_csv"])
+    ball_csv = ball_csv or paths["ball_csv"]
     players_csv = players_csv or paths["players_csv"]
     court_csv = court_csv or paths["court_csv"]
 
@@ -1520,11 +1589,11 @@ def type_self_test(ball_csv: str = None, players_csv: str = None,
     boxes = load_player_boxes(players_csv)
     conv = CourtConverter(court_csv)
     from analysis.bounce_detection import clip_events
-    real_csv = paths["ball_csv"]
-    events = clip_events(real_csv, boxes, conv, fps)
+    events = clip_events(ball_csv, boxes, conv, fps)
     # GT was labelled on the default right/right run
     shots = analyze_shots(track, boxes, conv, fps, {1: "right", 2: "right"}, events=events,
-                          real_ball=load_real_detections(real_csv))
+                          real_ball=load_real_detections(ball_csv),
+                          serves=clip_serves(ball_csv, boxes, conv, fps))
 
     if shots.empty or "shot_type" not in shots.columns:
         raise SystemExit("TYPE-SELF-TEST: no shots / no shot_type column produced.")
@@ -1732,9 +1801,6 @@ def main() -> None:
     parser.add_argument("--events", default=None,
                         help="events CSV from analysis/bounce_detection.py, to correct "
                              "the contacts that are really bounces")
-    parser.add_argument("--real-ball", default=None, dest="real_ball",
-                        help="ball CSV with the real detections (ball_<video name>.csv); "
-                             "with --events, shot types come from the flight to the bounce")
     parser.add_argument("--min-gap", type=float, default=0.5, dest="min_gap",
                         help="minimum distance in seconds between two shots")
     # Detection thresholds (px/frame units, tuned on the demo clip).
@@ -1849,9 +1915,9 @@ def main() -> None:
     # track, so they are only picked up when --ball is not overridden.
     paths = clip_paths(args.video)
     if args.ball is None:
-        args.ball = ball_track_for_shots(paths["ball_csv"])
+        args.ball = paths["ball_csv"]
         if args.events is None and os.path.exists(paths["events_csv"]):
-            args.events, args.real_ball = paths["events_csv"], paths["ball_csv"]
+            args.events = paths["events_csv"]
     args.players = args.players or paths["players_csv"]
     args.court = args.court or paths["court_csv"]
     args.output = args.output or paths["shots_dir"]
@@ -1874,8 +1940,8 @@ def main() -> None:
                           reversal_vy_frac=args.reversal_vy_frac,
                           type_params=type_params,
                           events=pd.read_csv(args.events) if args.events else None,
-                          real_ball=(load_real_detections(args.real_ball)
-                                     if args.real_ball else None))
+                          real_ball=load_real_detections(args.ball) if args.events else None,
+                          serves=clip_serves(args.ball, boxes, conv, args.fps))
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)

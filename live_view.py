@@ -779,7 +779,7 @@ def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
             "summary by removing this requirement.")
     sa_dir = Path(output_dir) / "shot_analysis"
     sa_dir.mkdir(parents=True, exist_ok=True)
-    track = sa.load_ball_track(sa.ball_track_for_shots(ball_csv))
+    track = sa.load_ball_track(ball_csv)
     boxes = sa.load_player_boxes(players_csv)
     conv = CourtConverter(court_csv)
     # Same shots as the pipeline: contacts and types rely on the bounces.
@@ -789,7 +789,8 @@ def _generate_analysis_figures(players_csv, court_csv, ball_csv, output_dir,
     bounces.to_csv(sa_dir / "bounces.csv", index=False)
     save_bounce_map(bounces, sa_dir)                       # -> bounce_map.png
     shots = sa.analyze_shots(track, boxes, conv, fps, hand_map, events=events,
-                             real_ball=sa.load_real_detections(ball_csv))
+                             real_ball=sa.load_real_detections(ball_csv),
+                             serves=sa.clip_serves(ball_csv, boxes, conv, fps))
     shots.to_csv(sa_dir / "shots.csv", index=False)
     sa.save_shot_hitmap(shots, sa_dir)                     # -> shot_hitmap.png
 

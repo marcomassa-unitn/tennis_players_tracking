@@ -71,7 +71,7 @@ the pipeline produces:
 | Movement | near player 94.8 m covered (mean 10.6 km/h, p95 29.6 km/h); far player 104.2 m (mean 11.8 km/h, p95 27.4 km/h) |
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
 | Bounces | vs 25 hand-labelled bounces: precision 1.00, recall 0.92, median time error 0.2 frames, median landing error 0.25 m; on a second clip (14 bounces, thresholds not tuned on it) 1.00, 1.00, 0.2 frames, 0.14 m |
-| Shot mix | 17 flat, 4 slice, 3 dropshot, 1 lob; 16 backhands, 7 forehands, 2 on the body axis (the serve included) |
+| Shot mix | 18 flat, 4 slice, 2 dropshot, 1 lob; 17 backhands, 7 forehands, 1 serve |
 | Shot type | **23/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
 | Self-tests | synthetic stroke test 4/4, synthetic serve/smash test 5/5 with zero false positives |
 
@@ -186,7 +186,9 @@ flowchart LR
    from acceleration peaks on the Savitzky–Golay-smoothed ball track, and are
    kept only when the ball is near a player. That rejects most bounces, and the
    ones left, right in front of the receiver, are moved to the hit that follows
-   them using the events of the next step. The stroke
+   them using the events of the next step. A contact must then send the ball towards
+   the opponent, and when one player seems to strike twice in a row the opponent's shot
+   in between is added, from the events or from where the ball turned back. The stroke
    (forehand/backhand) comes from the ball's side relative to the body axis,
    taking handedness and court side into account. The shot type comes from the
    flight to the bounce of the next step: a flight under 1.05 s is flat; a slower
@@ -373,12 +375,6 @@ ruff check .    # lint
 - **Distances include detection jitter.** They are summed frame by frame from
   the feet point, so the few centimetres of frame-to-frame jitter (more at the
   far end, where one pixel spans more court) inflate them.
-- **Shot analysis still reads the original ball track.** Contact detection was
-  designed and validated on the track of the original whole-frame detector.
-  On the denser new track, it sometimes takes the bounce just before a shot
-  for the contact. Shot analysis therefore reads `ball_wholeframe_<clip>.csv`,
-  which is rebuilt from the same detection run with the original rules.
-  Redesigning contact detection for the new track is future work.
 - **Ball speeds are approximate.** The homography models the ground plane, while
   the ball is airborne at contact. The metre-based shot thresholds may need
   retuning for a different camera; the scale-free ones do not.

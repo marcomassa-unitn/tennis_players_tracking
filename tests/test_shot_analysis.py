@@ -17,6 +17,8 @@ from analysis.shot_analysis import (
     classify_flight,
     detect_serves,
     detect_smashes,
+    drop_unanswered_bounces,
+    fill_missing_hits,
     impact_point,
     is_volley,
     move_contacts_off_bounces,
@@ -221,3 +223,46 @@ def test_the_colour_tells_the_type_of_shot(shot_type, overhead, category):
 ])
 def test_the_letter_tells_the_side(stroke, overhead, letter):
     assert shot_side(stroke, overhead) == letter
+
+
+def test_a_contact_just_before_or_after_a_bounce_moves_to_the_hit():
+    events = _events((100.0, 500, 300, 10.0, 0.5, BOUNCE_FAR),
+                     (112.0, 530, 280, 3.0, 9.0, HIT_FAR))
+    for contact in (92, 106):
+        assert move_contacts_off_bounces([(contact, 2, 1.0)], events, 30.0)[0] == [(112, 2, 1.0)]
+    assert move_contacts_off_bounces([(80, 2, 1.0)], events, 30.0)[0] == [(80, 2, 1.0)]
+
+
+def test_the_shot_between_two_of_one_player_comes_from_the_events():
+    events = _events((60.4, 700, 200, 3.0, 9.0, HIT_FAR))
+    ball = pd.DataFrame({"frame": [50, 60, 70], "cx": [1.0, 2.0, 3.0], "cy": [300.0, 100.0, 300.0]})
+    hits, ball_at = fill_missing_hits([(30, 1, 1.0), (90, 1, 1.0)], events, ball, 30.0)
+    assert hits == [(30, 1, 1.0), (60, 2, 0.0), (90, 1, 1.0)]
+    assert ball_at == {60: (700.0, 200.0)}
+
+
+def test_without_an_event_the_shot_is_where_the_ball_turned_back():
+    ball = pd.DataFrame({"frame": [50, 60, 70], "cx": [1.0, 2.0, 3.0], "cy": [300.0, 100.0, 300.0]})
+    hits, _ = fill_missing_hits([(30, 1, 1.0), (90, 1, 1.0)], _events(), ball, 30.0)
+    assert (60, 2, 0.0) in hits
+
+
+def test_two_shots_far_apart_are_two_points_and_a_rally_needs_no_filling():
+    ball = pd.DataFrame({"frame": [100], "cx": [1.0], "cy": [100.0]})
+    apart = [(30, 1, 1.0), (300, 1, 1.0)]
+    assert fill_missing_hits(apart, _events(), ball, 30.0)[0] == apart
+    rally = [(30, 1, 1.0), (90, 2, 1.0)]
+    assert fill_missing_hits(rally, _events(), ball, 30.0)[0] == rally
+
+
+def test_a_last_shot_going_nowhere_is_a_bounce_after_the_point(conv):
+    back = _ball_from(conv, range(100, 120), 3.0, 1.0)      # towards the far player himself
+    hits = [(50, 1, 1.0), (100, 2, 1.0)]
+    assert drop_unanswered_bounces(hits, back, conv, 30.0) == [(50, 1, 1.0)]
+    assert drop_unanswered_bounces(hits, back, conv, 30.0, keep={100}) == hits
+
+
+def test_a_reply_proves_the_contact(conv):
+    back = _ball_from(conv, range(100, 120), 3.0, 1.0)
+    hits = [(100, 2, 1.0), (140, 1, 1.0)]
+    assert drop_unanswered_bounces(hits, back, conv, 30.0)[0] == (100, 2, 1.0)

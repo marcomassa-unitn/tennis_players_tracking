@@ -371,7 +371,7 @@ def step_shots(p, args, produced):
 
     argv = [
         "shot_analysis",
-        "--ball", shot_analysis.ball_track_for_shots(p["ball_csv"]),
+        "--ball", p["ball_csv"],
         "--players", p["players_csv"],
         "--court", p["court_csv"],
         "--video", p["video"],
@@ -379,7 +379,6 @@ def step_shots(p, args, produced):
         "--p1-hand", args.p1_hand,
         "--p2-hand", args.p2_hand,
         "--events", p["events_csv"],
-        "--real-ball", p["ball_csv"],
         "--output", p["shots_dir"],
     ]
     if args.no_display:
