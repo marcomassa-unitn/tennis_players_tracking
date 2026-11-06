@@ -236,7 +236,7 @@ The [**live viewer**](live_view.py) replays the clip with player and ball boxes,
 a synced minimap, a running shot tally and a court following the ball, with its
 bounces numbered as they happen. The ball moves there on its path over the ground,
 from each contact to each bounce, since an airborne ball cannot be projected. At the end it shows the whole-clip
-heatmap, zones and shot hitmap.
+heatmap, zones, shot hitmap and bounces.
 
 ## Quick start
 
@@ -376,22 +376,27 @@ ruff check .    # lint
 - **Static camera assumed.** Replays and camera cuts must be trimmed beforehand.
 - **Players stay in their half.** Identities come from the court half, which
   holds in singles play; a player crossing the net (rare) would swap IDs.
-- **Distances include detection jitter.** They are summed frame by frame from
-  the feet point, so the few centimetres of frame-to-frame jitter (more at the
-  far end, where one pixel spans more court) inflate them.
+- **Player positions are noisy.** They come from the bottom edge of the box, which
+  moves with shadows, raised feet and jumps. At the far end one pixel spans about 8 cm of
+  court, so the far player's dot jumps on the minimap, and distances, summed frame by
+  frame, come out too long.
 - **Ball speeds are approximate.** The homography models the ground plane, while
   the ball is airborne at contact. The metre-based shot thresholds may need
   retuning for a different camera; the scale-free ones do not.
 - **The ball detector depends on the court.** On hard courts in blue or purple it
-  offers the moving ball on 80–90 % of the frames; on a green indoor court only
-  50–60 %. The motion candidates bring the ball to about two thirds of the frames there, against
+  offers the moving ball on 80–90 % of the frames; on a green indoor court only 50–60 %.
+  The motion candidates bring the ball to about two thirds of the frames there, against
   80–95 % elsewhere, with a few false detections: fewer bounces and flights are measured,
   and more shots rely on the older rules. The motion candidates assume a fixed camera.
+- **Shots need the ball.** When the ball is lost around a contact, the shot is placed
+  where it comes back, sometimes 20 frames late, and its type suffers. A shot with no
+  trace of the ball is missed, and a reversal near a player can pass for a shot.
 - **Thresholds are tuned on one camera setup.** The shot-type defaults were fit
   on the demo rally.
 - **Serves need the server in view.** A serve hit during a fade-in, or before
-  the server's box is tracked, is not detected. Smashes have only been checked on
-  one real example.
+  the server's box is tracked, is not detected. A clip starting during a rally with a
+  player standing on the baseline can open with a false serve. Smashes have only been
+  checked on one real example.
 - **Some bounces cannot be seen.** When the ball passes behind a player around
   the landing, or the track has a gap there, no bounce is reported: that is the
   bounce missed on the demo rally. The median landing error is 0.12–0.23 m but
@@ -401,6 +406,20 @@ ruff check .    # lint
   the trajectory shape, which were tuned on the demo rally and are less reliable.
   A slow topspin ball can also fly above 2 m and be called a lob. Volleys were
   only checked by eye, and a false shot can pass as one.
+
+## Future work
+
+- **Train the ball detector on motion rather than on raw frames.** The difference from
+  the background shows the ball as a small bright dot whatever the colour of the court,
+  while the detector reads colour images and loses it on courts unlike its usual ones.
+  The motion candidates already use this without any training; a detector retrained on
+  the background difference, or on several consecutive frames as TrackNet does, should
+  do better. It needs labelled frames, and the colour image may still help to tell the
+  ball from a racket.
+- **Smooth the player positions.** A median and a low-order filter over the clip remove
+  almost all the impossible jumps with no delay, and would correct distances and speeds.
+- **Detect the shots from the events alone.** Contacts still start from the reversals
+  of the ball; with a more complete track the junctions of the flight could replace them.
 
 ## Report and presentation
 
