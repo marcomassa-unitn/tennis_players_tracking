@@ -53,9 +53,9 @@ def test_parse_steps_rejects_unknown_steps(text):
 
 
 def test_stale_steps_lists_what_reads_the_results():
-    assert stale_steps({"tracking"}) == ["analysis", "motion", "shots"]
+    assert stale_steps({"tracking"}) == ["analysis", "motion", "ball", "shots"]
     assert stale_steps({"ball"}) == ["shots"]
-    assert stale_steps({"court", "motion"}) == ["tracking", "analysis", "shots"]
+    assert stale_steps({"court", "motion"}) == ["tracking", "analysis", "ball", "shots"]
     assert stale_steps({"shots"}) == []
 
 
@@ -82,7 +82,7 @@ def test_the_question_offers_the_steps_reading_the_results(clip, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
     args = _args()
     choose_steps(clip, args, interactive=True)
-    assert _redone(args) == {"tracking", "analysis", "motion", "shots"}
+    assert _redone(args) == {"tracking", "analysis", "motion", "ball", "shots"}
 
 
 def test_declining_keeps_only_the_chosen_step(clip, monkeypatch):

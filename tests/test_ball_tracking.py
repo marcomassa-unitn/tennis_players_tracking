@@ -3,11 +3,14 @@ import pandas as pd
 
 from tracking.ball_tracking import (
     MAX_GAP_S,
+    ball_sized_blobs,
     drop_outliers,
+    drop_short_blob_runs,
     fill_gaps,
     tile_origins,
     track_candidates,
     wholeframe_track,
+    within_reach,
 )
 
 FPS = 30
@@ -97,3 +100,44 @@ def test_tiles_cover_the_frame_with_overlap():
     xs = sorted({x for x, _ in origins})
     assert xs[0] == 0 and xs[-1] + 640 == 1920
     assert all(b - a <= 640 - 48 for a, b in zip(xs, xs[1:]))
+
+
+def _frame_with(*rects):
+    frame = np.zeros((200, 300, 3), np.uint8)
+    for x, y, w, h in rects:
+        frame[y:y + h, x:x + w] = 255
+    return frame
+
+
+def test_only_ball_sized_blobs_are_kept():
+    background = _frame_with()
+    frame = _frame_with((50, 50, 4, 4),        # a ball
+                        (150, 50, 30, 30),     # a person
+                        (250, 150, 1, 2),      # noise
+                        (50, 150, 40, 2))      # a court line
+    assert ball_sized_blobs(frame, background) == [(50, 50, 54, 54)]
+
+
+def test_a_blurred_ball_is_a_blob_too():
+    assert ball_sized_blobs(_frame_with((50, 50, 12, 3)), _frame_with()) == [(50, 50, 62, 53)]
+
+
+def test_a_blob_within_reach_of_a_player_is_their_racket():
+    player = [(100.0, 100.0, 40.0, 100.0)]
+    assert within_reach(120, 150, player)
+    assert within_reach(50, 120, player)        # an arm's length to the side
+    assert not within_reach(20, 120, player)
+    assert not within_reach(120, 260, player)   # well below the feet
+
+
+def test_a_stray_blob_on_the_path_is_dropped_and_a_series_is_kept():
+    box = (10.0, 20.0, 14.0, 24.0)
+    track = {1: (1.0, 1.0, 5.0, 5.0), 2: (2.0, 2.0, 6.0, 6.0), 3: (3.0, 3.0, 7.0, 7.0),
+             20: box, 40: box, 41: box, 42: box}
+    blobs = {(20, 10.0, 20.0), (40, 10.0, 20.0), (41, 10.0, 20.0), (42, 10.0, 20.0)}
+    assert sorted(drop_short_blob_runs(track, blobs)) == [1, 2, 3, 40, 41, 42]
+
+
+def test_a_short_run_of_the_detector_stays():
+    track = {5: (1.0, 1.0, 5.0, 5.0)}
+    assert drop_short_blob_runs(track, set()) == track

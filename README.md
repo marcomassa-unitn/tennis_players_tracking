@@ -40,9 +40,9 @@ the one exception: it is small and fast, so it uses a YOLOv8 detector.
 - **Ball tracking measured against hand-labelled positions.** A fine-tuned
   YOLOv8x runs on full-resolution tiles, and the ball is chosen as the best
   physically plausible path through the candidates. Against hand-labelled ball
-  positions, recall rises from 0.64 to 0.92 with no false positives, and the
+  positions, recall rises from 0.64 to 0.93 with no false positives, and the
   centre error falls from 2.0 px to 1.2 px. On a second clip, recall goes
-  from 0.72 to 0.91.
+  from 0.72 to 0.95.
 - **Shot types from the ball's physics.** Bounces are found to within a fraction
   of a frame, and the flight to the bounce gives each shot's type: its duration,
   landing point and height work the same at both ends of the court. It agrees with
@@ -67,7 +67,7 @@ the pipeline produces:
 |---|---|
 | Court | 98 % of the court model on detected line pixels; fitted lines within ≈1 px of the painted ones |
 | Players | both players detected on 100 % of the frames, identities fixed by court half |
-| Ball | found on 91 % of the frames (original detector: 60 %); vs hand-labelled positions: precision 1.00, recall 0.92, centre error 1.2 px |
+| Ball | found on 92 % of the frames (original detector: 60 %); vs hand-labelled positions: precision 1.00, recall 0.93, centre error 1.2 px |
 | Movement | near player 94.8 m covered (mean 10.6 km/h, p95 29.6 km/h); far player 104.2 m (mean 11.8 km/h, p95 27.4 km/h) |
 | Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
 | Bounces | vs 25 hand-labelled bounces: precision 1.00, recall 0.96, median time error 0.2 frames, median landing error 0.23 m; on a second clip (14 bounces) 1.00, 1.00, 0.2 frames, 0.12 m |
@@ -161,6 +161,10 @@ flowchart LR
    frame at native resolution, plus the whole frame. On the whole frame alone
    the ~15 px ball would shrink to ~5 px. Every candidate is kept with its
    confidence, its source and how much it moved since the previous frame.
+   **Motion:** ball-sized blobs in the difference from the clip's median background
+   join the candidates. They do not depend on how the ball looks, so they fill in
+   where the detector does not see it, as on a court unlike its usual ones. Blobs only
+   count over the court and out of a player's reach, and alone they must form a series.
    **Tracking:** still candidates (balls held by ball kids) are discarded. The
    ball is then the best path through the remaining candidates over the whole
    clip, found by dynamic programming. Confident candidates earn points, while
@@ -175,12 +179,12 @@ flowchart LR
    | Ball vs hand-labelled positions | Precision | Recall | Centre error |
    |---|---|---|---|
    | Original detector (whole frame only), Input_video2 | 1.00 | 0.64 | 2.0 px |
-   | **Current**, Input_video2 (101 labelled frames) | **1.00** | **0.92** | **1.2 px** |
+   | **Current**, Input_video2 (101 labelled frames) | **1.00** | **0.93** | **1.2 px** |
    | Original detector, input_video | 0.97 | 0.72 | 2.1 px |
-   | **Current**, input_video (43 frames) | **0.95** | **0.91** | **1.3 px** |
+   | **Current**, input_video (43 frames) | **0.95** | **0.95** | **1.5 px** |
 
    On the other test clips, the share of frames with a real detection rises from
-   44–48 % to 82–87 %.
+   44–48 % to 88–91 %.
 6. **Shot analysis** ([`analysis/shot_analysis.py`](analysis/shot_analysis.py)).
    Contacts are detected from persistent reversals of the vertical velocity and
    from acceleration peaks on the Savitzky–Golay-smoothed ball track, and are
@@ -381,8 +385,9 @@ ruff check .    # lint
   retuning for a different camera; the scale-free ones do not.
 - **The ball detector depends on the court.** On hard courts in blue or purple it
   offers the moving ball on 80–90 % of the frames; on a green indoor court only
-  50–60 %, so the ball is followed on about half of the frames and fewer bounces and
-  flights are measured there.
+  50–60 %. The motion candidates bring the ball to 59–77 % of the frames there, against
+  80–95 % elsewhere, with a few false detections: fewer bounces and flights are measured,
+  and more shots rely on the older rules. The motion candidates assume a fixed camera.
 - **Thresholds are tuned on one camera setup.** The shot-type defaults were fit
   on the demo rally.
 - **Serves need the server in view.** A serve hit during a fade-in, or before

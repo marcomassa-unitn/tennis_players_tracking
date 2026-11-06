@@ -791,7 +791,7 @@ def _ball_leaves_striker(contact, pid, real_ball, conv, fps, params=None):
         return False
     y_m = conv.to_meters_batch(seen[["cx", "cy"]].to_numpy(float))[:, 1]
     on_own_side = y_m > NET if pid == 1 else y_m < NET
-    return bool(on_own_side[0] and not on_own_side[-1])
+    return bool(on_own_side[0] and not on_own_side.all())
 
 
 def detect_smashes(boxes, conv, fps, real_ball, serves=(), params=None):

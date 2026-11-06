@@ -27,10 +27,15 @@ Stage 2 -- tracking (CPU, no model needed).
 Output: outputs/<video name>/ball_coordinates/ball_<video name>.csv with
 frame, x, y, w, h, cx, cy, area, interpolated.
 
+Stage 2 also adds candidates of its own, on the CPU, once the players and the court
+are known: ball-sized blobs in the difference from the clip's median background.
+They do not depend on how the ball looks, so they fill in where the detector does
+not see it, and the path through the candidates keeps those that fly like a ball.
+
 Also written, from the "frame" candidates only: ball_wholeframe_<video name>.csv,
 the track of the original single-pass detector (whole frame, conf >= 0.65,
-motion gate, highest confidence, straight-line fills). Shot analysis was
-designed and validated on that track and still uses it; see the README.
+motion gate, highest confidence, straight-line fills). The serve checks were
+validated on it and still use it.
 
 Usage (from project root):
     python tracking/ball_tracking.py --video data/Input_video2.mp4             # both stages
@@ -52,6 +57,9 @@ from scipy.interpolate import PchipInterpolator
 
 # Make the project root importable when this file is run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from tracking.player_tracking import _median_stack
+from utils.court_converter import CourtConverter
+from utils.court_geometry import L_m, W_m
 from utils.paths import OUTPUT_ROOT, clip_paths
 from utils.video import check_full_read, safe_fps
 
@@ -77,6 +85,21 @@ SPIKE_SPEED_PX = 80        # a detection this fast in and out...
 SPIKE_DETOUR = 3.0         # ...on a path this much longer than its neighbours' gap
                            # is a one-frame false positive
 MAX_GAP_S = 0.33           # gaps up to this long are filled; longer ones stay empty
+
+# ── Motion candidates (pixel values for 1080p, scaled with the frame height) ──
+BG_FRAMES = 41             # frames of the median background, evenly spread over the clip
+DIFF_THRESH = 30           # colour difference from the background counting as foreground
+BLOB_MIN_AREA = 6          # px: a ball, not noise...
+BLOB_MAX_AREA = 260        # ...and not a person
+BLOB_MAX_ELONGATION = 5.0  # a blurred ball is a short streak, a line is not
+BLOB_MIN_MOTION = 0.2      # fraction of the blob changed since the previous frame
+BLOB_CONF = 0.35           # the confidence a blob counts for in the path
+BLOB_REACH = 0.6           # player heights around a player where a blob is their racket
+COURT_SIDE_M = 3.0         # blobs count over the court, this far beyond the sidelines...
+COURT_BACK_M = 3.0         # ...and the near baseline...
+COURT_FAR_M = 1.0          # ...and the far one: boards start right behind it
+MIN_BLOB_RUN = 3           # blobs alone must follow each other this many times...
+BLOB_RUN_GAP = 2           # ...at most this many frames apart
 
 CANDIDATE_COLUMNS = ["frame", "x1", "y1", "x2", "y2", "conf", "motion", "source"]
 WHOLEFRAME_CONF = 0.65     # the original detector's confidence threshold
@@ -177,6 +200,105 @@ class BallDetector:
             wr.writerows(rows)
         print(f"Saved {len(rows)} candidates to {out_csv}")
         return idx
+
+
+# ══════════════════════════ Motion candidates (CPU) ═══════════════════════════
+
+def clip_background(video_path, n=BG_FRAMES):
+    """Median of frames spread over the clip: the empty court, since everyone moves."""
+    cap = cv2.VideoCapture(video_path)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frames = []
+    for f in np.linspace(0, max(total - 1, 0), n).astype(int):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(f))
+        ok, img = cap.read()
+        if ok:
+            frames.append(img)
+    cap.release()
+    return _median_stack(frames)
+
+
+def ball_sized_blobs(frame, background, frame_height=1080):
+    """Boxes (x1, y1, x2, y2) of the ball-sized blobs differing from the background."""
+    s2 = (frame_height / 1080) ** 2
+    mask = (cv2.absdiff(frame, background).max(axis=2) >= DIFF_THRESH).astype(np.uint8)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    boxes = []
+    for x, y, w, h, area in stats[1:n]:
+        if (BLOB_MIN_AREA * s2 <= area <= BLOB_MAX_AREA * s2
+                and max(w, h) <= BLOB_MAX_ELONGATION * max(1, min(w, h))):
+            boxes.append((int(x), int(y), int(x + w), int(y + h)))
+    return boxes
+
+
+def court_pixels(conv):
+    """Pixel limits (x0, x1, y0, y1) of the court and the run-off where blobs count."""
+    m_to_px = np.linalg.inv(conv._H)
+    corners = [(-COURT_SIDE_M, -COURT_FAR_M), (W_m + COURT_SIDE_M, -COURT_FAR_M),
+               (-COURT_SIDE_M, L_m + COURT_BACK_M), (W_m + COURT_SIDE_M, L_m + COURT_BACK_M)]
+    pts = []
+    for x, y in corners:
+        u, v, w = m_to_px @ np.array([x, y, 1.0])
+        pts.append((u / w, v / w))
+    pts = np.array(pts)
+    return pts[:, 0].min(), pts[:, 0].max(), pts[:, 1].min(), pts[:, 1].max()
+
+
+def within_reach(cx, cy, players):
+    """True if (cx, cy) is on a player or within reach of them: their racket, say."""
+    for x, y, w, h in players:
+        reach = BLOB_REACH * h
+        if x - reach <= cx <= x + w + reach and y - reach <= cy <= y + 1.2 * h:
+            return True
+    return False
+
+
+def motion_candidates(video_path, players_csv, court_csv):
+    """Candidates (CANDIDATE_COLUMNS) from the difference with the median background."""
+    players = pd.read_csv(players_csv)
+    boxes = {f: g[["x", "y", "w", "h"]].to_numpy(float) for f, g in players.groupby("frame")}
+    x0, x1, y0, y1 = court_pixels(CourtConverter(court_csv))
+    background = clip_background(video_path)
+
+    rows = []
+    cap = cv2.VideoCapture(video_path)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+    previous, f = None, 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        for box in ball_sized_blobs(frame, background, height):
+            cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            if not (x0 <= cx <= x1 and y0 <= cy <= y1) or within_reach(cx, cy, boxes.get(f, ())):
+                continue
+            motion = motion_fraction(previous, gray, box)
+            if motion >= BLOB_MIN_MOTION:
+                rows.append((f, *box, BLOB_CONF, motion, "motion"))
+        previous, f = gray, f + 1
+    cap.release()
+    return pd.DataFrame(rows, columns=CANDIDATE_COLUMNS)
+
+
+def drop_short_blob_runs(track, blobs):
+    """Remove the blobs of `track` not part of a run of detections.
+
+    A ball leaves a series; a stray blob that happens to fit the path does not.
+    `blobs` holds the (frame, x1, y1) of the motion candidates.
+    """
+    frames = sorted(track)
+    track = dict(track)
+    start = 0
+    for i in range(1, len(frames) + 1):
+        if i == len(frames) or frames[i] - frames[i - 1] > BLOB_RUN_GAP:
+            run = frames[start:i]
+            if len(run) < MIN_BLOB_RUN:
+                for f in run:
+                    if (f, track[f][0], track[f][1]) in blobs:
+                        del track[f]
+            start = i
+    return track
 
 
 # ═════════════════════════════ Stage 2: tracking ══════════════════════════════
@@ -344,8 +466,12 @@ def write_ball_csv(rows, out_csv):
                          w * h, interp])
 
 
-def track_from_candidates(candidates_csv, video_path, out_csv, wholeframe_csv=None):
-    """Stage 2: candidates CSV -> ball CSV (and the whole-frame track, if asked)."""
+def track_from_candidates(candidates_csv, video_path, out_csv, wholeframe_csv=None,
+                          players_csv=None, court_csv=None):
+    """Stage 2: candidates CSV -> ball CSV (and the whole-frame track, if asked).
+
+    With the clip's players and court, motion candidates join the detector's.
+    """
     cap = cv2.VideoCapture(video_path)
     fps = safe_fps(cap.get(cv2.CAP_PROP_FPS))
     n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -354,7 +480,14 @@ def track_from_candidates(candidates_csv, video_path, out_csv, wholeframe_csv=No
     cands = pd.read_csv(candidates_csv)
     n_frames = max(n_frames, int(cands.frame.max()) + 1 if len(cands) else 0)
 
-    track = track_candidates(cands, n_frames, fps, height)
+    merged, blobs = cands, set()
+    if players_csv and court_csv and os.path.exists(players_csv) and os.path.exists(court_csv):
+        extra = motion_candidates(video_path, players_csv, court_csv)
+        print(f"  {len(extra)} motion candidates added to {len(cands)} from the detector")
+        blobs = set(zip(extra.frame, extra.x1.astype(float), extra.y1.astype(float)))
+        merged = pd.concat([cands, extra], ignore_index=True).sort_values("frame", kind="stable")
+
+    track = drop_short_blob_runs(track_candidates(merged, n_frames, fps, height), blobs)
     clean = drop_outliers(track, height)
     rows = fill_gaps(clean, fps)
     write_ball_csv(rows, out_csv)
@@ -429,6 +562,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cand_csv, ball_csv, wholeframe_csv = default_paths(args.video)
+    clip = clip_paths(args.video)
     if args.csv:
         ball_csv = args.csv
         wholeframe_csv = os.path.join(os.path.dirname(args.csv) or ".",
@@ -442,6 +576,7 @@ if __name__ == "__main__":
                              "only with --candidates <csv>.")
         BallDetector(args.model).detect_candidates(args.video, cand_csv)
     if not args.detect_only:
-        track_from_candidates(cand_csv, args.video, ball_csv, wholeframe_csv)
+        track_from_candidates(cand_csv, args.video, ball_csv, wholeframe_csv,
+                              clip["players_csv"], clip["court_csv"])
         if args.video_out:
             render_video(args.video, ball_csv, args.video_out)

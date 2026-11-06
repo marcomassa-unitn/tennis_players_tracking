@@ -91,8 +91,8 @@ REDO_STEPS = ("court", "tracking", "analysis", "motion", "ball", "shots")
 
 # Steps that read each step's results, and go stale when it is redone.
 READ_BY = {
-    "court": ("tracking", "analysis", "motion", "shots"),
-    "tracking": ("analysis", "motion", "shots"),
+    "court": ("tracking", "analysis", "motion", "ball", "shots"),
+    "tracking": ("analysis", "motion", "ball", "shots"),
     "ball": ("shots",),
 }
 
@@ -338,7 +338,8 @@ def step_ball(p, args, produced):
         detector.detect_candidates(p["video"], cands)
 
     ball_tracking.track_from_candidates(cands, p["video"], p["ball_csv"],
-                                        p["ball_wholeframe_csv"])
+                                        p["ball_wholeframe_csv"],
+                                        p["players_csv"], p["court_csv"])
     produced["ball_csv"] = p["ball_csv"]
 
 

@@ -266,3 +266,10 @@ def test_a_reply_proves_the_contact(conv):
     back = _ball_from(conv, range(100, 120), 3.0, 1.0)
     hits = [(100, 2, 1.0), (140, 1, 1.0)]
     assert drop_unanswered_bounces(hits, back, conv, 30.0)[0] == (100, 2, 1.0)
+
+
+def test_a_smash_still_counts_if_a_stray_point_shows_up_on_the_striker_side_at_the_end(conv):
+    boxes = _server_boxes(conv, 2, 0, 150, 80, y_m=6.0)
+    ball = pd.concat([_ball_from(conv, range(84, 100), 7.0, 20.0),
+                      _ball_from(conv, range(100, 104), 5.0, 5.0)])
+    assert detect_smashes(boxes, conv, 30.0, ball) == [(80, 2)]
