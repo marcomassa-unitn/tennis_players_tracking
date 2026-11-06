@@ -78,9 +78,8 @@ the pipeline produces:
 ¹ The three flight thresholds were chosen looking at this same rally, so 23/23
 shows the rules fit the labelled data. It is not an accuracy figure on unseen
 footage. On the other clips there are no labels: the 1.05 s split falls in a gap
-(1.04–1.10 s) that holds on all five clips, and the lobs found there were checked
-by eye. The report's 21/23 is a different result, from an earlier version of the
-classifier.
+(1.04–1.10 s) that held on the five clips measured, and the lobs found there were
+checked by eye.
 
 | Combined position heatmap | Court-zone occupancy | Shot hitmap |
 |:---:|:---:|:---:|
@@ -357,7 +356,6 @@ python analysis/shot_analysis.py --type-self-test      # labelled demo rally (ne
 ├── utils/                   # court geometry (ITF), pixel→metre homography, paths, video helpers
 ├── tests/                   # pytest suite (run in CI)
 ├── notebooks/               # Colab and Kaggle notebooks to run ball detection on a GPU
-├── docs/                    # report (PDF + LaTeX) and presentation
 ├── data/                    # demo clip
 ├── models/                  # put ball_tracker.pt here
 └── outputs/<clip>/          # all the results of a clip, one folder per kind (not in git)
@@ -420,14 +418,6 @@ ruff check .    # lint
   almost all the impossible jumps with no delay, and would correct distances and speeds.
 - **Detect the shots from the events alone.** Contacts still start from the reversals
   of the ball; with a more complete track the junctions of the flight could replace them.
-
-## Report and presentation
-
-The [academic report](docs/report.pdf) covers the methodology, related work and
-results in detail. It describes the original court detector (Hough
-intersections and a coverage profile for the far baseline), which has since been
-replaced by the court-model fitting described above. There is also an [HTML presentation](docs/presentation.html)
-(download it and open it in a browser).
 
 ## Authors
 
