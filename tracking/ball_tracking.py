@@ -67,7 +67,7 @@ MIN_TRACK_CONF = 0.15      # candidates below this are ignored by the tracker
 MIN_MOTION = 0.05          # ...and so are still ones (balls held by ball kids or in
                            # pockets): at least this fraction of the box must move
 MAX_SPEED_PX = 150         # per frame: farther candidates cannot be the same ball
-CONF_BIAS = 0.3            # a node is worth conf + MOTION_BONUS * motion - CONF_BIAS
+CONF_BIAS = 0.15           # a node is worth conf + MOTION_BONUS * motion - CONF_BIAS
 MOTION_BONUS = 0.2
 SPEED_COST = 0.004         # path cost per px/frame of speed between linked nodes...
 SKIP_COST = 0.1            # ...plus this per frame skipped between them
