@@ -273,3 +273,36 @@ def test_a_smash_still_counts_if_a_stray_point_shows_up_on_the_striker_side_at_t
     ball = pd.concat([_ball_from(conv, range(84, 100), 7.0, 20.0),
                       _ball_from(conv, range(100, 104), 5.0, 5.0)])
     assert detect_smashes(boxes, conv, 30.0, ball) == [(80, 2)]
+
+
+def _standing(conv, pid, y_m, last=150, h=200.0):
+    """A player standing at `y_m` for the whole clip, in the middle of the court."""
+    m_to_px = np.linalg.inv(conv._H)
+    u, v, w = m_to_px @ np.array([W_m / 2, y_m, 1.0])
+    return {f: {pid: (u / w - 45, v / w - h, 90.0, h)} for f in range(last + 1)}
+
+
+def test_the_first_shot_from_the_baseline_is_a_serve_whatever_the_motion(conv):
+    boxes = _standing(conv, 2, -0.3)        # no raised box at all, as at the far end
+    assert [s[:2] for s in detect_serves(boxes, conv, 30.0, [(40, 2, 1.0)])] == [(40, 2)]
+
+
+def test_a_first_shot_from_far_behind_the_line_is_a_rally_shot(conv):
+    boxes = _standing(conv, 1, L_m + 3.0)   # a clip starting during a rally
+    assert detect_serves(boxes, conv, 30.0, [(40, 1, 1.0)]) == []
+
+
+def test_a_shot_from_inside_the_court_or_in_a_rally_is_no_serve(conv):
+    assert detect_serves(_standing(conv, 1, L_m - 3.0), conv, 30.0, [(40, 1, 1.0)]) == []
+    boxes = _standing(conv, 1, L_m + 0.3)
+    hits = [(10, 2, 1.0), (40, 1, 1.0)]     # the player on the baseline answers a shot
+    assert (40, 1) not in [s[:2] for s in detect_serves(boxes, conv, 30.0, hits)]
+
+
+def test_a_short_raised_phase_at_the_start_of_the_clip_still_gives_the_contact(conv):
+    boxes = _standing(conv, 1, L_m + 0.3)
+    x, y, w, h = boxes[13][1]
+    for f in (12, 13, 14):                   # the clip starts halfway through the motion
+        boxes[f][1] = (x, y - 120.0, w, h + 120.0)
+    serves = detect_serves(boxes, conv, 30.0, [(13, 1, 1.0)])
+    assert [s[:2] for s in serves] in ([(13, 1)], [(12, 1)], [(14, 1)])

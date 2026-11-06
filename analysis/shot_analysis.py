@@ -117,22 +117,6 @@ def load_real_detections(ball_csv: str) -> pd.DataFrame:
     return df[["frame", "cx", "cy"]].sort_values("frame").reset_index(drop=True)
 
 
-def ball_track_for_serves(ball_csv: str) -> str:
-    """The ball CSV that the serve checks read for `ball_csv`.
-
-    Serves were designed and validated with the hits of the original single-pass,
-    whole-frame detector, so the track rebuilt with its rules next to the ball CSV
-    (ball_wholeframe_<video>.csv) is used when it exists. All other shots are read
-    from the denser ball track.
-    """
-    folder, name = os.path.split(ball_csv)
-    if name.startswith("ball_") and not name.startswith(("ball_wholeframe_", "ball_candidates_")):
-        alt = os.path.join(folder, "ball_wholeframe_" + name[len("ball_"):])
-        if os.path.exists(alt):
-            return alt
-    return ball_csv
-
-
 def load_player_boxes(players_csv: str) -> dict:
     """{frame: {pid: (x, y, w, h)}} from the player tracker CSV."""
     df = pd.read_csv(players_csv)
@@ -507,8 +491,8 @@ def classify_shot_type(feats: dict, side: str, params: dict = None) -> str:
 
 # ── overhead (smash) detection ─────────────────────────────────────────────────
 #
-# ADDITIVE to shot_type: the `overhead` column holds "serve" (found from the
-# server's motion, see detect_serves) or "smash" (from the ball, here), and never
+# ADDITIVE to shot_type: the `overhead` column holds "serve" (the opening shot of a
+# point, see detect_serves) or "smash" (from the ball, here), and never
 # overwrites shot_type. Deliberately CONSERVATIVE: zero false positives on
 # groundstrokes and lobs is the priority, so anything uncertain returns "".
 #
@@ -623,26 +607,30 @@ def classify_overhead(box, ball_cx, ball_cy, in_feats, out_feats, params=None):
     return ""
 
 
-# ── serve detection from the server's motion ───────────────────────────────────
+# ── serve detection ────────────────────────────────────────────────────────────
 #
-# The ball alone is not enough to find a serve: the toss release looks like a
-# contact (the ball reverses near the player), the contact frame is often
-# missed, and the far player's toss is usually not detected at all. The server's
-# motion is a clearer signature: standing near their own baseline at the start
-# of a point, they raise arm and racket above the head (the box grows taller)
-# and bring them down after the contact. The contact is the last height peak of
-# that raised phase.
+# A serve is what opens a point: the first shot after a quiet spell, by a player
+# standing still on their baseline. That holds for any player, whatever their motion,
+# and at the far end, where the ball is often not seen at all. The box height only
+# pins down the frame of the contact: the toss release also looks like a hit.
 
 SERVE_PARAMS = {
-    "raised_min": 1.15,      # box height / player's median height: raised phase
-    "raised_peak": 1.20,     # the phase must reach at least this...
-    "min_raised_s": 0.2,     # ...and last at least this long
+    # A serve is the first shot of a point, played standing on the baseline.
+    "quiet_s": 2.5,          # no shot by anyone in this time before the serve
+    "behind_max_m": 1.0,     # feet at most this far behind the baseline...
+    "inside_max_m": 0.5,     # ...and this far inside it: a returner stands further back
+    "still_m": 0.5,          # feet displacement before the jump
+    "stance_s": 0.5,         # the stance is taken this long before the contact...
+    "settle_s": 0.17,        # ...and must hold up to this long before it
+    # The exact contact, from the arm and racket raising the box.
+    "raised_min": 1.15,      # box height over the player's usual one, to count as raised
+    "contact_peak": 1.20,    # a raised phase must reach at least this...
+    "contact_min_s": 0.05,   # ...and last at least this long
     "max_dip_s": 0.2,        # shorter dips inside the phase are bridged (racket drop)
     "peak_tol": 0.03,        # contact = last local max within this fraction of the max
-    "near_baseline_m": 2.0,  # feet at most this far inside their own baseline
-    "max_move_m": 1.5,       # feet displacement during the phase (server stands)
-    "quiet_s": 2.5,          # no opponent shot in this time before the phase
-    "next_shot_s": 1.0,      # the same player striking again this soon: not a serve
+    "before_hit_s": 0.17,    # the contact is searched from this long before the first hit...
+    "after_hit_s": 1.5,      # ...to this long after it, which may be the toss
+    "toss_s": 1.2,           # the server's "hits" this long before the contact are the toss
     "min_tail_s": 0.3,       # the clip must go on this long after the contact
 }
 
@@ -712,57 +700,73 @@ def _raised_phases(frames, rel, fps, peak, min_raised_s, params=None):
 
 
 def detect_serves(boxes, conv, fps, hits, params=None):
-    """Serves as [(contact_frame, pid, phase_start_frame), ...].
+    """Serves as [(contact_frame, pid, stance_frame), ...].
 
-    `hits` (from detect_hits) is used to check that a serve starts a point (no
-    opponent shot just before) and is answered by the opponent.
+    A serve opens a point: a shot after a quiet spell, by a player standing still on
+    their baseline. Nothing depends on how the player moves, which changes from one
+    to another, nor on the ball, often not seen at the far end. The raised box only
+    pins down the contact; where it says nothing, the hit itself is the contact.
     """
     p = params or SERVE_PARAMS
-    min_len = max(2, int(round(p["min_raised_s"] * fps)))
-    serves = []
+    if not boxes:
+        return []
+    quiet = p["quiet_s"] * fps
+    hits = sorted(hits)
+
+    # Openings: a hit after a quiet spell...
+    openings, last = [], -np.inf
+    for f, pid, _ in hits:
+        if f - last > quiet:
+            openings.append((f, pid))
+        last = f
+    # ...or a raised box with no hit before it: the serve itself may not show as a hit.
+    peaks = _swing_frames(boxes, conv, fps, p)
     for pid in (1, 2):
-        frames, hm, feet_m = _metric_heights(boxes, conv, pid)
-        if len(frames) < min_len:
+        openings += [(c, pid) for c in peaks[pid]
+                     if not any(c - quiet <= h[0] < c - p["before_hit_s"] * fps for h in hits)]
+
+    serves = []
+    last_frame = max(boxes)
+    for f, pid in sorted(openings):
+        near = [c for c in peaks[pid]
+                if f - p["before_hit_s"] * fps <= c <= f + p["after_hit_s"] * fps]
+        contact = near[0] if near else f
+        if last_frame - contact < p["min_tail_s"] * fps:      # no real peak: the clip just ended
             continue
-        rel = hm / np.nanmedian(hm)
-        for a, _, contact_k in _raised_phases(frames, rel, fps, p["raised_peak"],
-                                              p["min_raised_s"], p):
-            contact, phase_start = int(frames[contact_k]), int(frames[a])
-            # A phase cut by the end of the clip has no real peak.
-            if frames[-1] - contact < p["min_tail_s"] * fps:
-                continue
+        if any(0 <= contact - s[0] < quiet for s in serves):  # a swing after a serve is the return
+            continue
+        stance = max(contact - int(p["stance_s"] * fps), 0)
+        start = _nearest_box(boxes, stance, pid)
+        settled = _nearest_box(boxes, max(contact - int(p["settle_s"] * fps), 0), pid)
+        if start is None or settled is None:
+            continue
+        x0, y0 = conv.to_meters(*_box_feet(start))
+        x1, y1 = conv.to_meters(*_box_feet(settled))
+        inside = L_m - y0 if y0 > NET else y0                 # negative: behind the baseline
+        if (-p["behind_max_m"] <= inside <= p["inside_max_m"]
+                and np.hypot(x1 - x0, y1 - y0) <= p["still_m"]):
+            serves.append((contact, pid, stance))
+    return serves
 
-            # Near their own baseline (or behind it) and standing.
-            y = feet_m[a, 1]
-            near_own_baseline = (y >= L_m - p["near_baseline_m"] if y > NET
-                                 else y <= p["near_baseline_m"])
-            settle = max(a, contact_k - min_len)                # before the jump into the court
-            moved = float(np.hypot(*(feet_m[settle] - feet_m[a])))
-            if not near_own_baseline or not np.isfinite(moved) or moved > p["max_move_m"]:
-                continue
-            # Start of a point: no opponent shot just before the phase...
-            quiet_from = phase_start - p["quiet_s"] * fps
-            if any(h_pid != pid and quiet_from <= h_f <= phase_start for h_f, h_pid, _ in hits):
-                continue
-            # ...and the next shot after the contact is the opponent's (the return).
-            later = [(h_f, h_pid) for h_f, h_pid, _ in hits
-                     if contact + 0.3 * fps < h_f <= contact + p["next_shot_s"] * fps]
-            if later and min(later)[1] == pid:
-                continue
-            serves.append((contact, pid, phase_start))
 
-    # A big swing just after a serve is the return, not another serve.
-    kept = []
-    for serve in sorted(serves):
-        if not kept or serve[2] - kept[-1][0] > p["quiet_s"] * fps:
-            kept.append(serve)
-    return kept
+def _swing_frames(boxes, conv, fps, params=None):
+    """{pid: frames where the arm and racket raise the player's box to a peak}."""
+    p = params or SERVE_PARAMS
+    swings = {}
+    for pid in (1, 2):
+        frames, hm, _ = _metric_heights(boxes, conv, pid)
+        swings[pid] = []
+        if len(frames):
+            rel = hm / np.nanmedian(hm)
+            swings[pid] = [int(frames[k]) for _, _, k in _raised_phases(
+                frames, rel, fps, p["contact_peak"], p["contact_min_s"], p)]
+    return swings
 
 
 def clip_serves(ball_csv, boxes, conv, fps, params=None):
-    """detect_serves on a clip, with the hits its checks were validated on."""
-    hits = detect_hits(load_ball_track(ball_track_for_serves(ball_csv)), boxes, fps)
-    return detect_serves(boxes, conv, fps, hits, params)
+    """detect_serves on a clip, from the hits on its ball track."""
+    return detect_serves(boxes, conv, fps, detect_hits(load_ball_track(ball_csv), boxes, fps),
+                         params)
 
 
 # ── smashes from the striker's motion ──────────────────────────────────────────
@@ -1085,8 +1089,8 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
     if serves is None:
         serves = detect_serves(boxes, conv, fps, hits)
     serve_starts = {c: start for c, _, start in serves}
-    for contact, pid, phase_start in serves:
-        lo, hi = phase_start - 0.5 * fps, contact + 0.3 * fps
+    for contact, pid, _ in serves:
+        lo, hi = contact - SERVE_PARAMS["toss_s"] * fps, contact + 0.3 * fps
         hits = [h for h in hits if not (h[1] == pid and lo <= h[0] <= hi)]
         hits.append((contact, pid, 0.0))
     smash_frames = set()
@@ -1651,8 +1655,8 @@ def overhead_self_test() -> None:
     """
     Validate serve and smash detection on synthetic scenarios (same court as
     self_test):
-      (a) SERVE — near player at their baseline raises arm and racket (taller box),
-          dips, peaks at contact, lowers -> one serve at the last peak.
+      (a) SERVE — first shot of a point, near player still on their baseline, arm and
+          racket raising the box up to the contact -> one serve at the last peak.
       (b) NO SERVE — the same motion right after an opponent shot (a rally).
       (c) SMASH — mid-court, fast descending ball, low-apex downward -> "smash".
       (d) GROUNDSTROKE — ball at waist beside the body -> "".
@@ -1708,8 +1712,8 @@ def overhead_self_test() -> None:
 
         # ── (b) NO SERVE in a rally ────────────────────────────────────────────
         serves = detect_serves(boxes, conv, fps, [(25, 2, 3.0)])     # opponent just hit
-        if serves:
-            failures.append(f"(b) RALLY: got {serves}, expected no serve")
+        if any(pid == 1 for _, pid, _ in serves):
+            failures.append(f"(b) RALLY: got {serves}, expected no serve by P1")
 
         # ── (c) SMASH ──────────────────────────────────────────────────────────
         # Near player mid-court; ball arrives DESCENDING and is driven steeply DOWN.
@@ -1770,7 +1774,7 @@ def overhead_self_test() -> None:
         for msg in failures:
             print("   -", msg)
         raise SystemExit(1)
-    print("  PASS: 5/5 - serve found from the server's motion (none in a rally), smash "
+    print("  PASS: 5/5 - serve found as the opening shot from the baseline (none in a rally), smash "
           "detected; groundstroke and lob produce no overhead (zero false positives).")
 
 

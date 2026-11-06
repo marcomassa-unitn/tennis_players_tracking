@@ -201,12 +201,11 @@ flowchart LR
    image from the point below it on the court. A shot played from inside the
    court with no bounce since the opponent's shot, with the ball coming and going
    back, is a volley. Shots with no bounce found fall back
-   on perspective-invariant features of the outgoing trajectory. Serves are found
-   from the server's motion rather than from the ball: a player standing at their
-   own baseline, after a quiet spell with no opponent shot, whose box (in metres
-   at the feet) stays raised by the toss and racket and then peaks at contact.
-   The last peak is taken as the contact, so neither the toss release nor a gap
-   in the ball track is mistaken for it. The serve is placed where the server stood
+   on perspective-invariant features of the outgoing trajectory. A serve is what opens a
+   point: the first shot after a quiet spell, by a player standing still on their
+   baseline. That holds for any player and needs no ball, often not seen at the far
+   end. The peak of the box raised by arm and racket gives the contact, so the toss
+   release is not mistaken for it. The serve is placed where the server stood
    before jumping, since feet in the air project to the wrong spot on the court.
    Smashes are often hit out of sight, the ball of a high lob having left the
    picture, so they are also found from the motion: the arm-up of a serve from inside
@@ -385,7 +384,7 @@ ruff check .    # lint
   retuning for a different camera; the scale-free ones do not.
 - **The ball detector depends on the court.** On hard courts in blue or purple it
   offers the moving ball on 80–90 % of the frames; on a green indoor court only
-  50–60 %. The motion candidates bring the ball to 59–77 % of the frames there, against
+  50–60 %. The motion candidates bring the ball to about two thirds of the frames there, against
   80–95 % elsewhere, with a few false detections: fewer bounces and flights are measured,
   and more shots rely on the older rules. The motion candidates assume a fixed camera.
 - **Thresholds are tuned on one camera setup.** The shot-type defaults were fit

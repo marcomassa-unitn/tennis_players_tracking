@@ -34,8 +34,7 @@ not see it, and the path through the candidates keeps those that fly like a ball
 
 Also written, from the "frame" candidates only: ball_wholeframe_<video name>.csv,
 the track of the original single-pass detector (whole frame, conf >= 0.65,
-motion gate, highest confidence, straight-line fills). The serve checks were
-validated on it and still use it.
+motion gate, highest confidence, straight-line fills), kept to compare with it.
 
 Usage (from project root):
     python tracking/ball_tracking.py --video data/Input_video2.mp4             # both stages
