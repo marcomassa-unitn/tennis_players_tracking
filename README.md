@@ -380,16 +380,16 @@ ruff check .    # lint
   the ball is airborne at contact. The metre-based shot thresholds may need
   retuning for a different camera; the scale-free ones do not.
 - **The ball detector depends on the court.** On hard courts in blue or purple it
-  offers the moving ball on 80–90 % of the frames; on a green indoor court, which it
-  was not trained on, only 50–60 %, so the ball is followed on about half of the
-  frames and fewer bounces and flights are measured there.
+  offers the moving ball on 80–90 % of the frames; on a green indoor court only
+  50–60 %, so the ball is followed on about half of the frames and fewer bounces and
+  flights are measured there.
 - **Thresholds are tuned on one camera setup.** The shot-type defaults were fit
   on the demo rally.
 - **Serves need the server in view.** A serve hit during a fade-in, or before
   the server's box is tracked, is not detected. Smashes have only been checked on
   one real example.
 - **Some bounces cannot be seen.** When the ball passes behind a player around
-  the landing, or the track has a gap there, no bounce is reported: these are the
+  the landing, or the track has a gap there, no bounce is reported: that is the
   bounce missed on the demo rally. The median landing error is 0.12–0.23 m but
   reaches about 1 m at the far end, so this is no line-calling tool.
 - **Shot types are labelled on one rally only.** On the other clips they are
