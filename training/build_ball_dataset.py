@@ -42,7 +42,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tracking.ball_model import CROP
 from tracking.ball_online import CropMaker, court_roi, pack_channels
-from tracking.ball_tracking import ball_sized_blobs
+from tracking.ball_tracking import ball_sized_blobs, within_reach
 from utils.background import OnlineBackground, camera_shift
 from utils.court_converter import CourtConverter
 from utils.paths import GROUND_TRUTH_DIR, OUTPUT_ROOT, clip_paths
@@ -64,6 +64,9 @@ MANUAL_BOX = 16            # px at 1080p: box of a manual click
 
 STRIDE = 1                 # one pseudo-labelled frame in this many
 MANUAL_COPIES = 4          # crops per manually labelled frame
+NEAR_PLAYER_COPIES = 3     # crops per pseudo-labelled frame with the ball by a player:
+                           # contacts are rare in the labels and where the model fails
+RACKET_NEG_SHARE = 0.25    # negatives around a racket (the rest: blobs, court)
 CENTRED_SHARE = 0.7        # positives with the ball near the centre...
 CENTRED_SIGMA = 40         # ...within this (px, normal)...
 SEARCH_RANGE = 150         # ...the others within this (px, uniform)
@@ -297,7 +300,10 @@ def _write_frame(writer, crops, snap, frame, prev, shift, prev_shift, f, split, 
         ball = (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2)     # frame px
         if not (rx0 <= cx - dx < rx1 and ry0 <= cy - dy < ry1):
             return
-        n_pos = MANUAL_COPIES if kind == "manual" else 1
+        if kind == "manual":
+            n_pos = MANUAL_COPIES
+        else:
+            n_pos = NEAR_PLAYER_COPIES if within_reach(cx, cy, players) else 1
 
     def cut(o):
         d_t, img = crops.diff(snap, frame, o[0], o[1], shift)
@@ -327,7 +333,8 @@ def _write_frame(writer, crops, snap, frame, prev, shift, prev_shift, f, split, 
     blobs = None
     for _ in range(n_neg):
         for _attempt in range(6):
-            kind_neg = rng.choice(["racket", "blob", "court"], p=[0.4, 0.3, 0.3])
+            rest = (1.0 - RACKET_NEG_SHARE) / 2
+            kind_neg = rng.choice(["racket", "blob", "court"], p=[RACKET_NEG_SHARE, rest, rest])
             if kind_neg == "racket" and len(players):
                 x, y, w, h = players[rng.integers(len(players))]
                 px, py = x + w / 2 + rng.normal(0, 0.5 * h), y + 0.3 * h + rng.normal(0, 0.3 * h)

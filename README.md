@@ -388,8 +388,24 @@ pipeline too:
 | Player tracking, Input_video2 | 147 s | 86 s |
 | Bounce segmentation, 11 clips | 34 s | 5 s |
 
-On the laptop CPU the player stage takes 27 ms per frame. The model takes
-13–14 ms per crop with onnxruntime.
+**First results.** YOLO11n trained on Kaggle for 70 epochs, with pseudo-labels
+only. On the validation clips: precision 0.91, recall 0.90, mAP50 0.92.
+
+| Laptop CPU only, onnxruntime | Input_video2 | input_video |
+|---|---|---|
+| Whole pipeline after the startup (video: 30 fps) | 28.9 fps | 32.3 fps |
+| Players / ball, per frame (side by side) | 28 / 25 ms | 24 / 24 ms |
+| Detector alone, crop around the true ball: recall | 0.85 | 0.90 |
+| Ball track, recall after the 2 s warm-up (offline: 0.94 / 0.94) | 0.82 | 0.90 |
+| Ball track, precision | 0.95 | 0.97 |
+
+The track rows use the tile search of the GPU mode. With the CPU blob search
+recall is 0.79 and 0.74, at the speeds shown. Bounces and shots arrive with the
+delays given below; on Input_video2 the pipeline commits 40 events and 31 shots.
+
+Most missed balls are next to a player: around a contact, or by the far player.
+The first dataset had few positives there and many negatives around the
+rackets. The dataset builder now triples the positives close to a player.
 
 **Training the detector** (`notebooks/ball_motion_training_kaggle.ipynb`). The
 dataset comes from the clips: `training/build_ball_dataset.py` replays them with
