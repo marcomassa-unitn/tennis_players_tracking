@@ -1,0 +1,7 @@
+# The real-time pipeline and the motion ball detector (on top of requirements.txt).
+# Inference only: onnxruntime runs the exported model on the CPU.
+onnxruntime>=1.17
+# For a NVIDIA GPU, replace it with:
+#   onnxruntime-gpu>=1.17
+# Training and export (Kaggle notebook, or locally):
+#   ultralytics>=8.3   onnx   onnxslim
