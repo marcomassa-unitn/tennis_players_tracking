@@ -38,6 +38,10 @@ import numpy as np
 # Make the project root importable when this file is run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tracking.court_tracking import line_pixel_mask
+from utils.background import channel_max
+from utils.background import gray_f32 as _gray
+from utils.background import median_stack as _median_stack
+from utils.background import translate as _translate
 from utils.court_converter import CourtConverter
 from utils.court_geometry import NET, RUNOFF_BEHIND, RUNOFF_SIDE, L_m, W_m
 from utils.court_overlay import MODEL_SEGMENTS
@@ -111,30 +115,9 @@ MAX_GAP_S = 0.5            # gaps up to this long are interpolated
 COLUMNS = ["frame", "player_id", "x", "y", "w", "h", "cx", "cy", "area", "interpolated"]
 
 
-def _luma_median(img_bgr):
-    return float(np.median(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)))
-
-
-def _gray(img_bgr):
-    return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-
-
-def _translate(img, dx, dy, interpolation=cv2.INTER_LINEAR):
-    """Shift `img` by (-dx, -dy): undoes a camera translation of (dx, dy)."""
-    if dx == 0 and dy == 0:
-        return img
-    m = np.float32([[1, 0, -dx], [0, 1, -dy]])
-    return cv2.warpAffine(img, m, (img.shape[1], img.shape[0]), flags=interpolation,
-                          borderMode=cv2.BORDER_REPLICATE)
-
-
-def _median_stack(frames):
-    """Per-pixel median of uint8 frames, computed in row strips to bound memory."""
-    stack = np.stack(frames)
-    out = np.empty(stack.shape[1:], np.uint8)
-    for r in range(0, stack.shape[1], 64):
-        out[r:r + 64] = np.median(stack[:, r:r + 64], axis=0).astype(np.uint8)
-    return out
+def _luma_median(img_bgr, step=1):
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    return float(np.median(gray[::step, ::step] if step > 1 else gray))
 
 
 class PlayerTracker:
@@ -184,6 +167,43 @@ class PlayerTracker:
         self.layers = None
         self._hann = cv2.createHanningWindow(self.proc_size, cv2.CV_32F)
         self.shift = (0.0, 0.0)     # camera translation of the current frame (proc px)
+        # Real-time settings (realtime/): the camera shift measured every
+        # `shift_every` frames, the frame brightness on every `luma_step`-th pixel.
+        # The defaults reproduce the offline run exactly.
+        self.shift_every = 1
+        self.luma_step = 1
+        self.shift_downscale = 1
+        self._ref_small = None
+        self.last_diff = None
+        self._shift_age = 0
+        self._snapshot_version = None
+        self.reset()
+
+    def reset(self):
+        """Forget every track: the state process_frame() builds up."""
+        self.detections = {1: {}, 2: {}}
+        self.tracks = {1: (None, None), 2: (None, None)}
+        self.dark_frames = 0
+        self._prev_raw = None
+        self._frozen = None
+
+    def use_snapshot(self, snap):
+        """Compare the next frames with an online background (utils/background.py).
+
+        The snapshot's court-line mask is used if it has one (extra["lines"]),
+        else it is computed here.
+        """
+        if snap.version == self._snapshot_version:
+            return
+        self._snapshot_version = snap.version
+        self.backgrounds = [(0, snap.small)]
+        self._bg_luma = [snap.luma]
+        self._bg_gray = [snap.small_gray]
+        self._bg_hsv = [snap.small_hsv]
+        self._bg_lo = [snap.small_lo]
+        self._bg_hi = [snap.small_hi]
+        lines = snap.extra.get("lines")
+        self._bg_lines = [lines if lines is not None else self._court_line_mask(snap.small)]
 
     # ── 1. background ────────────────────────────────────────────────────────
 
@@ -271,8 +291,24 @@ class PlayerTracker:
     # ── 2. foreground ────────────────────────────────────────────────────────
 
     def _camera_shift(self, ref_gray, img):
-        """(dx, dy) translation of `img` relative to `ref_gray`, in processing px."""
-        (dx, dy), response = cv2.phaseCorrelate(ref_gray, _gray(img), self._hann)
+        """(dx, dy) translation of `img` relative to `ref_gray`, in processing px.
+
+        With shift_downscale > 1 (real time) the correlation runs on images that
+        many times smaller, and the shift is scaled back.
+        """
+        d = self.shift_downscale
+        if d > 1:
+            if self._ref_small is None or self._ref_small[0] is not ref_gray:
+                size = (ref_gray.shape[1] // d, ref_gray.shape[0] // d)
+                self._ref_small = (ref_gray, cv2.resize(ref_gray, size, interpolation=cv2.INTER_AREA),
+                                   cv2.createHanningWindow(size, cv2.CV_32F))
+            _, ref_s, hann_s = self._ref_small
+            img_s = cv2.resize(_gray(img), (ref_s.shape[1], ref_s.shape[0]),
+                               interpolation=cv2.INTER_AREA)
+            (dx, dy), response = cv2.phaseCorrelate(ref_s, img_s, hann_s)
+            dx, dy = dx * d, dy * d
+        else:
+            (dx, dy), response = cv2.phaseCorrelate(ref_gray, _gray(img), self._hann)
         if response < MIN_SHIFT_RESPONSE or np.hypot(dx, dy) > MAX_CAMERA_SHIFT_PX:
             return 0.0, 0.0
         return float(dx), float(dy)
@@ -283,61 +319,81 @@ class PlayerTracker:
         Graphics are composited on top of the video, so their pixels are exactly
         the same from frame to frame; anything filmed (players included) changes
         a little every frame through camera shake, noise and motion.
+        Returns a uint8 mask (255 = graphic).
         """
         if self._prev_raw is None:
             self._frozen = np.zeros(raw.shape[:2], np.uint16)
         else:
-            same = cv2.absdiff(raw, self._prev_raw).max(axis=2) <= FROZEN_TOL
-            self._frozen = np.where(same, self._frozen + 1, 0).astype(np.uint16)
+            same = cv2.compare(channel_max(cv2.absdiff(raw, self._prev_raw)), FROZEN_TOL,
+                               cv2.CMP_LE)
+            grown = cv2.add(self._frozen, 1)
+            self._frozen = cv2.bitwise_and(grown, grown, mask=same)
         self._prev_raw = raw
-        return self._frozen >= self.frozen_frames
+        return cv2.compare(self._frozen, self.frozen_frames, cv2.CMP_GE)
 
     def _foreground(self, small, k):
         """Binary foreground at processing scale, or None for a too-dark frame."""
         raw = small
-        luma = _luma_median(small)
+        luma = _luma_median(small, self.luma_step)
         if luma < DARK_FRAME_RATIO * self._bg_luma[k]:
             self._prev_raw = None
             return None
         # Work in background coordinates: undo the camera's translation.
-        self.shift = self._camera_shift(self._bg_gray[k], small)
+        if self._shift_age % self.shift_every == 0:
+            self.shift = self._camera_shift(self._bg_gray[k], small)
+        self._shift_age += 1
         small = _translate(small, *self.shift)
         gain = self._bg_luma[k] / max(luma, 1.0)
         if abs(gain - 1.0) > 0.02:
             small = cv2.convertScaleAbs(small, alpha=gain)
 
+        # Masks are uint8 (255 = set): OpenCV's bitwise operations are many times
+        # faster than numpy's on whole frames.
         # Distance to the background's local [min, max] range (0 inside it).
-        diff = cv2.max(cv2.subtract(small, self._bg_hi[k]),
-                       cv2.subtract(self._bg_lo[k], small)).max(axis=2)
-        fg = diff > DIFF_THRESH
+        diff = channel_max(cv2.max(cv2.subtract(small, self._bg_hi[k]),
+                                   cv2.subtract(self._bg_lo[k], small)))
+        self.last_diff = diff        # background coordinates; read by the live ball search
+        fg = cv2.compare(diff, DIFF_THRESH, cv2.CMP_GT)
+        rec = self.record_layers
         layers = {"k": k, "diff": diff}
         if np.hypot(*self.shift) > LINE_SUPPRESS_SHIFT_PX:
-            layers["lines"] = fg & self._bg_lines[k]
-            fg &= ~self._bg_lines[k]
+            lines = self._bg_lines[k].astype(np.uint8) * 255
+            if rec:
+                layers["lines"] = cv2.bitwise_and(fg, lines) > 0
+            fg = cv2.bitwise_and(fg, cv2.bitwise_not(lines))
 
         # Cast shadows: darker than the background, same hue and saturation.
-        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV).astype(np.int16)
-        bg_hsv = self._bg_hsv[k].astype(np.int16)
-        v_ratio = hsv[..., 2] / np.maximum(bg_hsv[..., 2], 1)
-        dhue = np.abs(hsv[..., 0] - bg_hsv[..., 0])
-        dhue = np.minimum(dhue, 180 - dhue)
-        shadow = ((v_ratio >= SHADOW_V_RATIO[0]) & (v_ratio <= SHADOW_V_RATIO[1])
-                  & (dhue <= SHADOW_MAX_DHUE)
-                  & (np.abs(hsv[..., 1] - bg_hsv[..., 1]) <= SHADOW_MAX_DSAT))
-        layers["shadow"] = fg & shadow
-        fg &= ~shadow
+        # Only foreground pixels can be removed, so only they are converted.
+        on = np.flatnonzero(fg)
+        if rec:
+            layers["shadow"] = np.zeros(fg.shape, bool)
+        if len(on):
+            hsv = cv2.cvtColor(small.reshape(-1, 3)[on].reshape(-1, 1, 3), cv2.COLOR_BGR2HSV)
+            hsv = hsv.reshape(-1, 3).astype(np.int16)
+            bg_hsv = self._bg_hsv[k].reshape(-1, 3)[on].astype(np.int16)
+            v_ratio = hsv[:, 2] / np.maximum(bg_hsv[:, 2], 1)
+            dhue = np.abs(hsv[:, 0] - bg_hsv[:, 0])
+            dhue = np.minimum(dhue, 180 - dhue)
+            shadow = ((v_ratio >= SHADOW_V_RATIO[0]) & (v_ratio <= SHADOW_V_RATIO[1])
+                      & (dhue <= SHADOW_MAX_DHUE)
+                      & (np.abs(hsv[:, 1] - bg_hsv[:, 1]) <= SHADOW_MAX_DSAT))
+            if rec:
+                layers["shadow"].flat[on[shadow]] = True
+            fg.flat[on[shadow]] = 0
 
-        frozen = self._frozen_pixels(raw).astype(np.uint8)          # frame coordinates
-        frozen = _translate(frozen, *self.shift, interpolation=cv2.INTER_NEAREST).astype(bool)
-        layers["graphics"] = fg & frozen
-        fg &= ~frozen
+        frozen = self._frozen_pixels(raw)                            # frame coordinates
+        frozen = _translate(frozen, *self.shift, interpolation=cv2.INTER_NEAREST)
+        if rec:
+            layers["graphics"] = cv2.bitwise_and(fg, frozen) > 0
+        fg = cv2.bitwise_and(fg, cv2.bitwise_not(frozen))
 
         # No morphological opening: the legs of the far player are ~2 px wide at
         # PROC_HEIGHT and would vanish; specks are dropped by area instead.
-        mask = self._drop_off_court(fg.astype(np.uint8) * 255)
-        layers["off_court"] = fg & (mask == 0)
+        mask = self._drop_off_court(fg)
+        if rec:
+            layers["off_court"] = (fg > 0) & (mask == 0)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel_close)
-        if self.record_layers:
+        if rec:
             self.layers = layers | {"final": mask > 0}
         return mask
 
@@ -366,7 +422,17 @@ class PlayerTracker:
         on_court = ((xm >= -RUNOFF_SIDE - margin) & (xm <= W_m + RUNOFF_SIDE + margin)
                     & (ym >= -RUNOFF_BEHIND - margin) & (ym <= L_m + RUNOFF_BEHIND + margin))
         keep = np.r_[False, on_court & in_front]
-        return np.where(keep[labels], 255, 0).astype(np.uint8)
+        drop = np.flatnonzero(~keep[1:]) + 1
+        if not len(drop):
+            return mask
+        if len(drop) > 64:
+            return np.where(keep[labels], 255, 0).astype(np.uint8)
+        out = mask.copy()                  # few blobs to remove: only their boxes
+        for i in drop:
+            x, y, w, h = stats[i, :4]
+            box = out[y:y + h, x:x + w]
+            box[labels[y:y + h, x:x + w] == i] = 0
+        return out
 
     # ── 3. candidates ────────────────────────────────────────────────────────
 
@@ -574,6 +640,31 @@ class PlayerTracker:
 
     # ── main loop ────────────────────────────────────────────────────────────
 
+    def process_frame(self, frame_idx, frame, small=None, k=None):
+        """Track the players on one frame; returns (foreground mask or None, candidates).
+
+        The detections accumulate in self.detections ({pid: {frame: row}}).
+        k: index of the background to use (default: the one of this frame's segment;
+        0 with an online snapshot).
+        """
+        if small is None:
+            small = cv2.resize(frame, self.proc_size, interpolation=cv2.INTER_AREA)
+        self.layers, cands = None, []
+        mask = self._foreground(small, self._background_for(frame_idx) if k is None else k)
+        if mask is None:
+            self.dark_frames += 1
+            return None, cands
+        cands = self._candidates(mask)
+        halves = {1: [c for c in cands if c["feet_m"][1] > NET],
+                  2: [c for c in cands if c["feet_m"][1] <= NET]}
+        for pid in (1, 2):
+            best = self._pick(halves[pid], self.tracks[pid], frame_idx)
+            if best is not None:
+                self.detections[pid][frame_idx] = (self._to_frame_coords(best)
+                                                   | {"frame": frame_idx, "pid": pid})
+                self.tracks[pid] = (frame_idx, best)
+        return mask, cands
+
     def run(self, save=True, on_frame=None):
         """Track both players and write the CSV.
 
@@ -583,32 +674,17 @@ class PlayerTracker:
         """
         print(f"Building the background from {BG_SAMPLES} frames sampled over the clip...")
         self.backgrounds = self._build_backgrounds()
+        self.reset()
 
-        detections = {1: {}, 2: {}}
-        tracks = {1: (None, None), 2: (None, None)}
-        frame_idx, stopped_by_user, dark_frames = 0, False, 0
+        detections = self.detections
+        frame_idx, stopped_by_user = 0, False
         cap = cv2.VideoCapture(self.video_path)
         try:
             while True:
                 ok, frame = cap.read()
                 if not ok:
                     break
-                small = cv2.resize(frame, self.proc_size, interpolation=cv2.INTER_AREA)
-                self.layers, cands = None, []
-                mask = self._foreground(small, self._background_for(frame_idx))
-                if mask is None:
-                    dark_frames += 1
-                else:
-                    cands = self._candidates(mask)
-                    halves = {1: [c for c in cands if c["feet_m"][1] > NET],
-                              2: [c for c in cands if c["feet_m"][1] <= NET]}
-                    for pid in (1, 2):
-                        best = self._pick(halves[pid], tracks[pid], frame_idx)
-                        if best is not None:
-                            detections[pid][frame_idx] = (self._to_frame_coords(best)
-                                                          | {"frame": frame_idx, "pid": pid})
-                            tracks[pid] = (frame_idx, best)
-
+                mask, cands = self.process_frame(frame_idx, frame)
                 if self.display and self._show(frame, mask, detections, frame_idx):
                     stopped_by_user = True
                     break
@@ -627,6 +703,7 @@ class PlayerTracker:
         if not save:
             return
         self._write_csv(rows)
+        dark_frames = self.dark_frames
         processed = max(frame_idx - dark_frames, 1)
         for pid in (1, 2):
             real = len(detections[pid])

@@ -72,9 +72,13 @@ def load_ball_track(ball_csv: str) -> pd.DataFrame:
     -> all-False (seam guard becomes a no-op; we don't reconstruct it, as that
     is unreliable after the smoothing below).
     """
-    df = pd.read_csv(ball_csv)
+    return ball_track_from_frame(pd.read_csv(ball_csv), ball_csv)
+
+
+def ball_track_from_frame(df: pd.DataFrame, source: str = "ball track") -> pd.DataFrame:
+    """load_ball_track on rows already in memory (the live pipeline's window)."""
     if df.empty:
-        raise ValueError(f"Empty ball CSV: {ball_csv}")
+        raise ValueError(f"Empty ball CSV: {source}")
     idx = range(int(df["frame"].min()), int(df["frame"].max()) + 1)
     # `h` (ball bbox height) is the SCALE proxy for the shot-type classifier:
     # the ball looks bigger near the camera, so px-speed / local median(h) is a
@@ -110,7 +114,11 @@ def load_ball_track(ball_csv: str) -> pd.DataFrame:
 
 def load_real_detections(ball_csv: str) -> pd.DataFrame:
     """Frames with a real ball detection (frame, cx, cy), without the filled gaps."""
-    df = pd.read_csv(ball_csv)
+    return real_detections_from_frame(pd.read_csv(ball_csv))
+
+
+def real_detections_from_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """load_real_detections on rows already in memory."""
     if "interpolated" in df.columns:
         df = df[df["interpolated"] == 0]
     df = df.dropna(subset=["cx", "cy"])
