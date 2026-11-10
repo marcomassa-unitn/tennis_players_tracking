@@ -328,6 +328,34 @@ def keypoints_from_homography(H):
     return {k: (float(x), float(y)) for k, (x, y) in zip(labels, px)}
 
 
+def save_court(H, frame, csv_path):
+    """Write the 8 keypoints of H to `csv_path` and an overlay PNG next to it."""
+    keypoints = keypoints_from_homography(H)
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["label", "x", "y"])
+        for label in ("TL", "TR", "BL", "BR", "STL", "STR", "SBL", "SBR"):
+            x, y = keypoints[label]
+            writer.writerow([label, f"{x:.1f}", f"{y:.1f}"])
+    overlay, _ = draw_court_overlay(frame, csv_path)
+    cv2.imwrite(os.path.splitext(csv_path)[0] + ".png", overlay)
+    return keypoints
+
+
+def court_match_ratio(frame, H):
+    """Share of the visible court model of H lying on the line pixels of `frame`.
+
+    The cheap check of a known homography (one mask, one projection): the live
+    pipeline runs it now and then to notice that the camera moved.
+    """
+    mask = line_pixel_mask(frame)
+    dist = cv2.distanceTransform(255 - mask, cv2.DIST_L2, 3)
+    radius = max(2.0, MATCH_RADIUS_PX * frame.shape[0] / 1080)
+    _, n_hit, n_in = _score(np.asarray(H, float)[None], dist, radius)
+    return float(n_hit[0] / n_in[0]) if n_in[0] else 0.0
+
+
 # ── Court tracker ─────────────────────────────────────────────────────────────
 
 class CourtTracker:
@@ -379,21 +407,9 @@ class CourtTracker:
                     f"{ratio:.0%} of the court model (need {MIN_MATCH_RATIO:.0%}). "
                     "The clip needs a fixed broadcast view of the whole court.")
 
-            keypoints = keypoints_from_homography(H)
-            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-            with open(csv_path, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["label", "x", "y"])
-                for label in ("TL", "TR", "BL", "BR", "STL", "STR", "SBL", "SBR"):
-                    x, y = keypoints[label]
-                    writer.writerow([label, f"{x:.1f}", f"{y:.1f}"])
+            keypoints = save_court(H, frame, csv_path)
             print(f"Court fitted on frame {frame_idx} ({ratio:.0%} match). "
-                  f"Saved keypoints to '{csv_path}'.")
-
-            overlay_path = os.path.splitext(csv_path)[0] + ".png"
-            overlay, _ = draw_court_overlay(frame, csv_path)
-            cv2.imwrite(overlay_path, overlay)
-            print(f"Saved court overlay to '{overlay_path}'.")
+                  f"Saved keypoints to '{csv_path}' and its overlay next to it.")
 
             if not self.no_display:
                 self._play_back(cap, csv_path)

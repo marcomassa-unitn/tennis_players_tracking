@@ -56,7 +56,8 @@ from scipy.interpolate import PchipInterpolator
 
 # Make the project root importable when this file is run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from tracking.player_tracking import _median_stack
+from utils.background import channel_max
+from utils.background import median_stack as _median_stack
 from utils.court_converter import CourtConverter
 from utils.court_geometry import L_m, W_m
 from utils.paths import OUTPUT_ROOT, clip_paths
@@ -220,7 +221,7 @@ def clip_background(video_path, n=BG_FRAMES):
 def ball_sized_blobs(frame, background, frame_height=1080):
     """Boxes (x1, y1, x2, y2) of the ball-sized blobs differing from the background."""
     s2 = (frame_height / 1080) ** 2
-    mask = (cv2.absdiff(frame, background).max(axis=2) >= DIFF_THRESH).astype(np.uint8)
+    mask = (channel_max(cv2.absdiff(frame, background)) >= DIFF_THRESH).astype(np.uint8)
     n, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     boxes = []
     for x, y, w, h, area in stats[1:n]:
@@ -302,6 +303,90 @@ def drop_short_blob_runs(track, blobs):
 
 # ═════════════════════════════ Stage 2: tracking ══════════════════════════════
 
+class PathDP:
+    """The forward pass of the path search, one frame at a time.
+
+    push() adds the candidates of a frame (rows of frame, x1, y1, x2, y2, conf,
+    motion, already filtered) and updates the best score of a path ending at each;
+    backtrack() follows the parents back from a node. track_candidates() pushes the
+    whole clip and backtracks once; OnlinePathDP backtracks a little after every
+    frame and commits what is old enough.
+    """
+
+    def __init__(self, fps, frame_height=1080):
+        self.s = frame_height / 1080
+        self.max_speed = MAX_SPEED_PX * self.s
+        self.max_link = max(1, int(round(MAX_LINK_S * fps)))
+        self.rows, self.pos, self.best, self.back = {}, {}, {}, {}
+        self.run_best = (0.0, None)     # best score among nodes older than the link window
+        self.pending = []               # frames whose nodes are still within the window
+
+    def push(self, f, r):
+        s = self.s
+        while self.pending and self.pending[0] < f - self.max_link:
+            g = self.pending.pop(0)
+            k = int(np.argmax(self.best[g]))
+            if self.best[g][k] > self.run_best[0]:
+                self.run_best = (self.best[g][k], (g, k))
+        pos_f = np.c_[(r[:, 1] + r[:, 3]) / 2, (r[:, 2] + r[:, 4]) / 2]
+        gain = r[:, 5] + MOTION_BONUS * np.minimum(r[:, 6], 0.5) - CONF_BIAS
+        n = len(pos_f)
+        # Start (or restart after the window) a path at this node.
+        score = np.full(n, self.run_best[0] - RESTART_COST)
+        parent = [self.run_best[1]] * n
+        for g in self.pending:          # link from candidates in the previous frames
+            gap = f - g
+            pg = self.pos[g]
+            speed = np.hypot(pos_f[None, :, 0] - pg[:, None, 0],
+                             pos_f[None, :, 1] - pg[:, None, 1]) / gap
+            cost = SPEED_COST * speed / s + SKIP_COST * (gap - 1)
+            cost[speed > self.max_speed] = np.inf
+            via = self.best[g][:, None] - cost
+            i = np.argmax(via, axis=0)
+            better = via[i, np.arange(n)] > score
+            score = np.where(better, via[i, np.arange(n)], score)
+            parent = [(g, int(i[j])) if better[j] else parent[j] for j in range(n)]
+        self.rows[f], self.pos[f] = r, pos_f
+        self.best[f] = score + gain
+        self.back[f] = parent
+        self.pending.append(f)
+
+    def best_end(self, frames=None):
+        """The node (frame, k) with the highest score, among `frames` (default all)."""
+        frames = list(self.best if frames is None else frames)
+        if not frames:
+            return None
+        return max(((f, int(np.argmax(self.best[f]))) for f in frames),
+                   key=lambda fk: self.best[fk[0]][fk[1]])
+
+    def backtrack(self, node, stop_before=None):
+        """{frame: (x1, y1, x2, y2)} of the path ending at `node`, back to `stop_before`."""
+        track = {}
+        while node is not None:
+            f, k = node
+            if stop_before is not None and f < stop_before:
+                break
+            track[int(f)] = tuple(self.rows[f][k, 1:5])
+            node = self.back[f][k]
+        return track
+
+    def forget_before(self, frame):
+        """Drop the nodes older than `frame`; their best score lives on in run_best."""
+        for f in [f for f in self.best if f < frame and f not in self.pending]:
+            del self.rows[f], self.pos[f], self.best[f], self.back[f]
+
+
+def usable_candidates(cands):
+    """The candidates the tracker reads: confident enough, and moving.
+
+    Still candidates are not the ball in play (motion is undefined on the first
+    frame, which has no previous frame to compare with).
+    """
+    first = int(cands.frame.min()) if len(cands) else 0
+    keep = (cands.conf >= MIN_TRACK_CONF) & ((cands.motion >= MIN_MOTION) | (cands.frame == first))
+    return cands[keep]
+
+
 def track_candidates(cands, n_frames, fps, frame_height=1080):
     """Pick the ball among per-frame candidates with the best path over the clip.
 
@@ -317,57 +402,96 @@ def track_candidates(cands, n_frames, fps, frame_height=1080):
     cands: DataFrame with CANDIDATE_COLUMNS. Returns {frame: (x1, y1, x2, y2)}
     of the real detections on the best path.
     """
-    s = frame_height / 1080
-    max_speed = MAX_SPEED_PX * s
-    max_link = max(1, int(round(MAX_LINK_S * fps)))
-    first = int(cands.frame.min()) if len(cands) else 0
-    # Still candidates are not the ball in play (motion is undefined on the
-    # first frame, which has no previous frame to compare with).
-    keep = (cands.conf >= MIN_TRACK_CONF) & ((cands.motion >= MIN_MOTION) | (cands.frame == first))
-    cands = cands[keep]
-    frames = sorted(cands.frame.unique())
     numeric = ["frame", "x1", "y1", "x2", "y2", "conf", "motion"]
-    rows = {f: g[numeric].to_numpy(float) for f, g in cands.groupby("frame")}
-    pos = {f: np.c_[(r[:, 1] + r[:, 3]) / 2, (r[:, 2] + r[:, 4]) / 2] for f, r in rows.items()}
-    gain = {f: r[:, 5] + MOTION_BONUS * np.minimum(r[:, 6], 0.5) - CONF_BIAS for f, r in rows.items()}
+    dp = PathDP(fps, frame_height)
+    for f, g in usable_candidates(cands).groupby("frame"):
+        dp.push(f, g[numeric].to_numpy(float))
+    end = dp.best_end()
+    return {} if end is None else dp.backtrack(end)
 
-    best, back = {}, {}                 # best path score ending at each node, and its parent
-    run_best = (0.0, None)              # best score among nodes older than the link window
-    pending = []                        # frames whose nodes are still within the window
-    for f in frames:
-        while pending and pending[0] < f - max_link:
-            g = pending.pop(0)
-            k = int(np.argmax(best[g]))
-            if best[g][k] > run_best[0]:
-                run_best = (best[g][k], (g, k))
-        n = len(pos[f])
-        # Start (or restart after the window) a path at this node.
-        score = np.full(n, run_best[0] - RESTART_COST)
-        parent = [run_best[1]] * n
-        for g in pending:              # link from candidates in the previous frames
-            gap = f - g
-            speed = np.hypot(pos[f][None, :, 0] - pos[g][:, None, 0],
-                             pos[f][None, :, 1] - pos[g][:, None, 1]) / gap
-            cost = SPEED_COST * speed / s + SKIP_COST * (gap - 1)
-            cost[speed > max_speed] = np.inf
-            via = best[g][:, None] - cost
-            i = np.argmax(via, axis=0)
-            better = via[i, np.arange(n)] > score
-            score = np.where(better, via[i, np.arange(n)], score)
-            parent = [(g, int(i[j])) if better[j] else parent[j] for j in range(n)]
-        best[f] = score + gain[f]
-        back[f] = parent
-        pending.append(f)
 
-    if not best:
-        return {}
-    end = max(((f, int(np.argmax(v))) for f, v in best.items()), key=lambda fk: best[fk[0]][fk[1]])
-    track, node = {}, end
-    while node is not None:
-        f, k = node
-        track[int(f)] = tuple(rows[f][k, 1:5])
-        node = back[f][k]
-    return track
+class OnlinePathDP:
+    """Fixed-lag version of the offline tracking, for the live pipeline.
+
+    push() is called once per frame t, in order, with that frame's candidates. The
+    best path so far is followed back and its node at frame t - lag, if any, is
+    committed: by then the frames after a racket hit have settled the choice, and a
+    committed frame is never revisited. The clean-up of the offline tracker (short
+    blob runs, outliers) then runs on a rolling window and finalises the frame
+    `clean_lag` frames older still. With the defaults a position is final 0.5 s
+    after its frame at 30 fps.
+    """
+
+    WINDOW = 30                         # frames of context kept for the clean-up
+
+    def __init__(self, fps, frame_height=1080, lag=10, clean_lag=6):
+        self.dp = PathDP(fps, frame_height)
+        self.fps, self.height = fps, frame_height
+        self.lag, self.clean_lag = lag, clean_lag
+        self.first = None
+        self.last = -1
+        self.decided = -1               # last frame whose path node is decided
+        self.finalised = -1             # last frame finalised
+        self.committed = {}             # frame -> box, from the path (recent only)
+        self.blobs = set()              # (frame, x1, y1) of the motion candidates
+        self.final = {}                 # frame -> box, after the clean-up
+
+    @property
+    def latency(self):
+        return self.lag + self.clean_lag
+
+    def push(self, frame, rows):
+        """Add the candidates [(frame, x1, y1, x2, y2, conf, motion, source)] of `frame`.
+
+        Returns the positions finalised by this call, {frame: box}.
+        """
+        if self.first is None:
+            self.first = frame
+        self.last = frame
+        for r in rows:
+            if r[7] == "motion":
+                self.blobs.add((int(r[0]), float(r[1]), float(r[2])))
+        good = [r[:7] for r in rows if r[5] >= MIN_TRACK_CONF
+                and (r[6] >= MIN_MOTION or frame == self.first)]
+        if good:
+            self.dp.push(frame, np.array(good, float))
+        self._decide(frame - self.lag)
+        return self._finalise(frame - self.lag - self.clean_lag)
+
+    def _decide(self, upto):
+        if upto <= self.decided:
+            return
+        recent = [f for f in self.dp.best if f > self.decided - self.dp.max_link]
+        end = self.dp.best_end(recent)
+        if end is not None:
+            for f, box in self.dp.backtrack(end, stop_before=self.decided + 1).items():
+                if f <= upto:
+                    self.committed[f] = box
+        self.decided = upto
+        self.dp.forget_before(self.decided - self.dp.max_link - 1)
+
+    def _finalise(self, upto):
+        if upto <= self.finalised:
+            return {}
+        lo = self.finalised - self.WINDOW
+        window = {f: b for f, b in self.committed.items() if f >= lo}
+        clean = drop_outliers(drop_short_blob_runs(window, self.blobs), self.height)
+        out = {f: b for f, b in clean.items() if self.finalised < f <= upto}
+        self.final.update(out)
+        self.finalised = upto
+        keep_from = self.finalised - self.WINDOW
+        self.committed = {f: b for f, b in self.committed.items() if f >= keep_from}
+        self.blobs = {b for b in self.blobs if b[0] >= keep_from}
+        return dict(sorted(out.items()))
+
+    def flush(self):
+        """End of the clip: decide and finalise every frame left."""
+        self._decide(self.last)
+        return self._finalise(self.last)
+
+    def rows(self):
+        """Ball rows like fill_gaps() over everything finalised so far."""
+        return fill_gaps(self.final, self.fps)
 
 
 def drop_outliers(track, frame_height=1080, window=3, passes=3):

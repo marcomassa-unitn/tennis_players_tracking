@@ -103,8 +103,12 @@ def segment_trajectory(t, pts, fps, params=None):
 
     Optimal partitioning: minimises the capped squared residuals plus a penalty
     per parabola. Points that fit no parabola are left out at the cap's cost.
+    For each end j, every start i is fitted at once: the normal equations of all
+    the windows ending at j are running sums over the same points.
     """
     p = params or BOUNCE_PARAMS
+    t = np.asarray(t, float)
+    pts = np.asarray(pts, float)
     n = len(t)
     cap = p["residual_cap_px"]
     best = np.full(n + 1, np.inf)
@@ -115,14 +119,28 @@ def segment_trajectory(t, pts, fps, params=None):
     for j in range(1, n + 1):
         best[j] = best[j - 1] + cap * cap
         prev[j] = j - 1
-        for i in range(max(0, j - p["max_piece"]), j - p["min_piece"] + 1):
-            if t[j - 1] - t[i] > max_span:
-                continue
-            fit = _fit_parabola(t[i:j], pts[i:j])
-            err = np.linalg.norm(pts[i:j] - _position(fit, t[i:j]), axis=1)
-            cost = best[i] + (np.minimum(err, cap) ** 2).sum() + p["piece_penalty"]
-            if cost < best[j]:
-                best[j], prev[j], is_piece[j] = cost, i, True
+        lo, hi = max(0, j - p["max_piece"]), j - p["min_piece"]
+        if hi < lo:
+            continue
+        starts = np.arange(lo, hi + 1)
+        starts = starts[t[j - 1] - t[starts] <= max_span]
+        if not len(starts):
+            continue
+        d = t[lo:j] - t[j - 1]                       # times of the window, <= 0
+        x = pts[lo:j]
+        V = np.c_[np.ones_like(d), d, d * d]         # (L, 3)
+        A = np.cumsum((V[:, :, None] * V[:, None, :])[::-1], axis=0)[::-1]   # (L, 3, 3)
+        B = np.cumsum((V[:, :, None] * x[:, None, :])[::-1], axis=0)[::-1]   # (L, 3, 2)
+        m = starts - lo
+        C = np.linalg.solve(A[m], B[m])              # (S, 3, 2) coefficients per start
+        pred = np.einsum("lk,skc->slc", V, C)        # (S, L, 2)
+        err = np.linalg.norm(pred - x[None], axis=2)
+        inside = np.arange(j - lo)[None, :] >= m[:, None]
+        cost = (best[starts] + np.where(inside, np.minimum(err, cap) ** 2, 0.0).sum(axis=1)
+                + p["piece_penalty"])
+        k = int(np.argmin(cost))
+        if cost[k] < best[j]:
+            best[j], prev[j], is_piece[j] = cost[k], starts[k], True
     pieces = []
     j = n
     while j > 0:
