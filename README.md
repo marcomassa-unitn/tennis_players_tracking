@@ -342,22 +342,97 @@ python analysis/shot_analysis.py --type-self-test      # labelled demo rally (ne
 
 </details>
 
+## Real time
+
+`realtime_pipeline.py` runs the whole analysis (court, players, ball, bounces,
+shots) in **one causal pass**: each frame is seen once, in order, as a camera
+would give it. It writes the same CSVs as the offline pipeline, under
+`outputs/realtime/<clip>/`, so `live_view.py --output outputs/realtime` and the
+evaluation read them unchanged.
+
+```bash
+pip install -r requirements-realtime.txt
+python realtime_pipeline.py --video data/Input_video2.mp4 --model models/ball_motion.onnx
+python realtime_pipeline.py --video data/Input_video2.mp4 --clock live --display   # like a camera
+python realtime_pipeline.py --video data/Input_video2.mp4 --model diff            # no model
+```
+
+**What changes from offline.**
+
+- **Background from the past only.** It is the median of the first 2 s, then of
+  a ring of samples, one per second, refreshed every 5 s in a worker thread
+  (`utils/background.py`). The players are masked out of each sample, so a
+  server standing still does not become part of the background.
+- **A small ball detector that reads motion.** YOLO11n reads 320 × 320 crops at
+  full resolution, with three channels: grey, difference from the background at
+  *t*, the same at *t − 1* (`tracking/ball_online.py`). The difference shows the
+  ball whatever the colour of the court; the grey image tells it from a racket.
+  - While tracking, a Kalman filter predicts the ball and **one crop** is read.
+  - When the ball is lost, the court tiles (GPU) or the moving blobs (CPU) are
+    read instead.
+  - The path search of the offline tracker runs with a **fixed lag of 16 frames
+    (0.5 s)**: on the clips, 99.6 % of the positions match the offline path.
+- **Bounces and shots on a sliding window.** The unchanged offline functions run
+  every second on the last 10 s in a worker thread. An event is committed once
+  it is 1 s old, a shot once it is 4 s old. Fed the offline tracks, this finds
+  50 of the 51 events and all 25 shots of the demo rally, with the same strokes
+  and types.
+- **One loop.** Decoding has its own thread; ball and players of a frame run
+  side by side.
+
+**Speed-ups that keep the offline results identical.** These help the offline
+pipeline too:
+
+| Step | Before | After |
+|---|---|---|
+| Player tracking, Input_video2 | 147 s | 86 s |
+| Bounce segmentation, 11 clips | 34 s | 5 s |
+
+On the laptop CPU the player stage takes 27 ms per frame. The model takes
+13–14 ms per crop with onnxruntime.
+
+**Training the detector** (`notebooks/ball_motion_training_kaggle.ipynb`). The
+dataset comes from the clips: `training/build_ball_dataset.py` replays them with
+the online background.
+- Positives come from the reliable detections of the current tracker, and from
+  hand labels where it misses the ball:
+  `python evaluation/annotate.py ball --frames-from <ball CSV>`.
+- Negatives come from frames where the ball is known to be elsewhere.
+- Input_video2, input_video and input11 are held out for testing.
+- `training/pack_kaggle_inputs.py` zips the CSVs to upload next to the videos.
+
+`evaluation/benchmark_ball.py` scores every track against the ground truth, and
+the detector alone on crops around the true ball.
+
+**Limits.**
+
+- **Startup.** Fitting the court takes 5–9 s on a CPU (`--court` reuses a known
+  one), and the background needs another 2 s.
+- **Events arrive late.** Bounces are known 1 s after they happen, shots 4 s
+  after.
+- **The labels come from the current tracker.** The model first learns what that
+  tracker already finds, so the hand labels on the green courts are what can
+  make it better.
+
 ## Project structure
 
 ```
 ├── pipeline.py              # one-command runner for all stages
+├── realtime_pipeline.py     # the same analysis in one causal pass, at video speed
 ├── live_view.py             # replay with overlays, minimap and live stats
 ├── display_player_tracking.py  # player tracker's stages side by side, for inspection
-├── tracking/                # court keypoints, player tracker, YOLO ball tracker
+├── tracking/                # court keypoints, player tracker, YOLO ball tracker, motion ball detector
+├── realtime/                # frame source, per-frame stages, overlay and timings of the live pipeline
+├── training/                # dataset, training and export of the motion ball detector
 ├── analysis/                # player statistics and shot detection/classification
 ├── motion_estimation/       # Farnebäck / Lucas–Kanade, block matching from scratch
 ├── evaluation/              # annotation tool and tracking metrics
 ├── ground_truth/            # hand-made annotations used by the evaluation
 ├── utils/                   # court geometry (ITF), pixel→metre homography, paths, video helpers
 ├── tests/                   # pytest suite (run in CI)
-├── notebooks/               # Colab and Kaggle notebooks to run ball detection on a GPU
+├── notebooks/               # Colab / Kaggle notebooks: ball detection, motion detector training
 ├── data/                    # demo clip
-├── models/                  # put ball_tracker.pt here
+├── models/                  # put ball_tracker.pt (and ball_motion.onnx) here
 └── outputs/<clip>/          # all the results of a clip, one folder per kind (not in git)
 ```
 
@@ -407,13 +482,11 @@ ruff check .    # lint
 
 ## Future work
 
-- **Train the ball detector on motion rather than on raw frames.** The difference from
-  the background shows the ball as a small bright dot whatever the colour of the court,
-  while the detector reads colour images and loses it on courts unlike its usual ones.
-  The motion candidates already use this without any training; a detector retrained on
-  the background difference, or on several consecutive frames as TrackNet does, should
-  do better. It needs labelled frames, and the colour image may still help to tell the
-  ball from a racket.
+- **More hand labels for the motion detector.** Its first labels are the
+  current tracker's own detections, so it starts from what that tracker already
+  finds; the frames it misses (green courts, fast flights) need labels by hand,
+  which `annotate.py ball --frames-from` offers one after the other. A temporal
+  model on several consecutive frames, as TrackNet does, is the next step.
 - **Smooth the player positions.** A median and a low-order filter over the clip remove
   almost all the impossible jumps with no delay, and would correct distances and speeds.
 - **Detect the shots from the events alone.** Contacts still start from the reversals
