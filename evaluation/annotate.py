@@ -31,6 +31,10 @@ Usage (from project root):
 
     python evaluation/annotate.py ball --video data/Input_video2.mp4 --step 10
 
+    # training labels where the current tracker misses the ball:
+    python evaluation/annotate.py ball --video data/input10.mp4 --step 2 \\
+        --frames-from outputs/input10/ball_coordinates/ball_input10.csv
+
     python evaluation/annotate.py bounce --video data/Input_video2.mp4
 
 Keys (boxes mode, inside the OpenCV ROI selector):
@@ -243,8 +247,11 @@ def _save_ball_gt(path, labels):
             wr.writerow([fr, vis, f"{x:.1f}" if vis else "", f"{y:.1f}" if vis else ""])
 
 
-def annotate_ball(video, step, start, output):
+def annotate_ball(video, step, start, output, skip=()):
     """Click the ball centre on every `step`-th frame; `n` = ball not visible.
+
+    skip: frames not to offer (e.g. those the tracker already found, see
+    tracked_frames), so the labels go where the current detector fails.
 
     A magnified inset follows the cursor, since the ball is only ~10 px wide on
     screen. Annotations are saved on quit and on every 10 frames, and an
@@ -254,7 +261,8 @@ def annotate_ball(video, step, start, output):
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video}")
     n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frames = list(range(start, n_total, step))
+    skip = set(skip)
+    frames = [f for f in range(start, n_total) if f not in skip][::step]
     labels = _load_ball_gt(output)
     todo = [f for f in frames if f not in labels]
     print(f"{len(frames)} frames to label ({len(frames) - len(todo)} already done).")
@@ -320,6 +328,13 @@ def annotate_ball(video, step, start, output):
     _save_ball_gt(output, labels)
     n_vis = sum(1 for v, _, _ in labels.values() if v)
     print(f"\nSaved {len(labels)} labelled frames ({n_vis} with the ball visible) to {output}")
+
+
+def tracked_frames(ball_csv):
+    """Frames with a real (not interpolated) detection in a ball tracker CSV."""
+    with open(ball_csv, newline="") as f:
+        return {int(r["frame"]) for r in csv.DictReader(f)
+                if not int(r.get("interpolated") or 0) and r.get("cx")}
 
 
 # ── bounce mode ────────────────────────────────────────────────────────────────
@@ -431,6 +446,9 @@ def main():
     pl.add_argument("--start", type=int, default=0, help="first frame (default: 0)")
     pl.add_argument("--output", default=None,
                     help="output CSV (default: ground_truth/ball_<video name>_gt.csv)")
+    pl.add_argument("--frames-from", default=None, dest="frames_from",
+                    help="ball tracker CSV: offer only the frames it did not find the ball "
+                         "on (--step then counts among those), to label for training")
 
     pn = sub.add_parser("bounce", help="mark the frames where the ball touches the ground")
     pn.add_argument("--video", default="data/Input_video2.mp4")
@@ -444,7 +462,8 @@ def main():
     if args.mode == "boxes":
         annotate_boxes(args.video, args.step, args.start, output)
     elif args.mode == "ball":
-        annotate_ball(args.video, args.step, args.start, output)
+        skip = tracked_frames(args.frames_from) if args.frames_from else ()
+        annotate_ball(args.video, args.step, args.start, output, skip)
     elif args.mode == "bounce":
         annotate_bounce(args.video, args.start, output)
     else:

@@ -22,7 +22,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["analysis", "evaluation", "motion_estimation", "tracking", "utils"]
+known-first-party = ["analysis", "evaluation", "motion_estimation", "realtime", "tracking",
+                     "training", "utils"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
