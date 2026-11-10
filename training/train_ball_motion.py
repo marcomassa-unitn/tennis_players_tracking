@@ -14,6 +14,7 @@ Usage (from project root):
 
 import argparse
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -51,7 +52,8 @@ def train(data, model="yolo11n.pt", project="runs/ball_motion", name="train", **
     from ultralytics import YOLO
     args = dict(TRAIN_ARGS, **overrides)
     yolo = YOLO(model)
-    yolo.train(data=data, project=project, name=name, exist_ok=True, **args)
+    # Absolute: recent ultralytics puts a relative project under runs/<task>/.
+    yolo.train(data=data, project=os.path.abspath(project), name=name, exist_ok=True, **args)
     best = Path(yolo.trainer.best)
     print(f"Best weights -> {best}")
     return best
