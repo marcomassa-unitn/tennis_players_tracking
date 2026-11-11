@@ -25,6 +25,15 @@ import numpy as np
 CROP = 320                 # the model's input size: crops at native resolution
 DETECT_CONF = 0.15         # boxes below this are dropped
 NMS_IOU = 0.3
+GPU_BATCHES = (1, 2, 4, 8, 16, 32)   # batch sizes a GPU session sees (see OnnxBackend)
+
+
+def batch_bucket(n, sizes=GPU_BATCHES):
+    """Smallest of `sizes` holding n crops (the largest if none does)."""
+    for size in sizes:
+        if n <= size:
+            return size
+    return sizes[-1]
 
 
 def load_backend(spec, conf=DETECT_CONF, device=None):
@@ -60,6 +69,7 @@ class UltralyticsBackend:
         self.conf = conf
         self.device = device
         self.half = path.endswith(".engine")
+        self.detect([np.zeros((CROP, CROP, 3), np.uint8)])      # first call: model setup
 
     def detect(self, crops):
         if not len(crops):
@@ -80,7 +90,9 @@ class OnnxBackend:
         import onnxruntime as ort
         providers = ["CPUExecutionProvider"]
         if device not in ("cpu",) and "CUDAExecutionProvider" in ort.get_available_providers():
-            providers.insert(0, "CUDAExecutionProvider")
+            # The default EXHAUSTIVE search times every cuDNN algorithm again for
+            # each new input shape: seconds, in the middle of a rally.
+            providers.insert(0, ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}))
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         self.session = ort.InferenceSession(path, opts, providers=providers)
@@ -88,6 +100,13 @@ class OnnxBackend:
         self.input_name = inp.name
         self.fixed_batch = inp.shape[0] if isinstance(inp.shape[0], int) else None
         self.conf = conf
+        # On a GPU, batches are padded to a few fixed sizes, all run once here:
+        # a new shape costs a long first call, a few padded crops cost nothing.
+        self.on_gpu = "CUDAExecutionProvider" in self.session.get_providers()
+        if self.on_gpu and not self.fixed_batch:
+            for size in GPU_BATCHES:
+                self.session.run(None, {self.input_name:
+                                        np.zeros((size, 3, CROP, CROP), np.float32)})
 
     @staticmethod
     def preprocess(crops):
@@ -113,6 +132,16 @@ class OnnxBackend:
         if not len(crops):
             return []
         x = self.preprocess(crops)
+        if self.on_gpu and not self.fixed_batch:
+            n = len(x)
+            outs = []
+            for i in range(0, n, GPU_BATCHES[-1]):
+                chunk = x[i:i + GPU_BATCHES[-1]]
+                pad = batch_bucket(len(chunk)) - len(chunk)
+                if pad:
+                    chunk = np.concatenate([chunk, np.zeros((pad, *chunk.shape[1:]), np.float32)])
+                outs.append(self.session.run(None, {self.input_name: chunk})[0][:len(chunk) - pad])
+            return self.postprocess(np.concatenate(outs))
         if self.fixed_batch:
             outs = []
             for i in range(0, len(x), self.fixed_batch):

@@ -121,3 +121,8 @@ def test_a_colour_detection_by_a_player_is_a_candidate_but_starts_no_track():
     assert "colour" in sources                       # offered to the path search...
     assert tracker.state == OnlineBallTracker.SEARCH  # ...but it never became the ball
     assert tracker.n_fallback > 0
+
+
+def test_gpu_batches_are_padded_to_a_few_sizes():
+    from tracking.ball_model import batch_bucket
+    assert [batch_bucket(n) for n in (1, 2, 3, 5, 15, 16, 17, 40)] == [1, 2, 4, 8, 16, 16, 32, 32]
