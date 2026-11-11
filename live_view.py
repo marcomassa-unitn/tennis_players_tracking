@@ -1166,10 +1166,12 @@ def main() -> None:
     parser.add_argument("--court", default=None,
                         help="court keypoints CSV "
                              "(default: outputs/<video name>/court_coordinates/<stem>_court.csv)")
+    parser.add_argument("--realtime", action="store_true",
+                        help="show the results of realtime_pipeline.py "
+                             "(same as --output outputs/realtime)")
     parser.add_argument("--shots", default=None,
-                        help="shot analysis CSV (default: "
-                             "outputs/Input_video2/shot_analysis/shots.csv; optional - when "
-                             "present, shots accumulate on the minimap)")
+                        help="shot analysis CSV (default: outputs/<video name>/shot_analysis/"
+                             "shots.csv; optional - when present, shots accumulate on the minimap)")
     parser.add_argument("--max-shot-markers", type=int, default=0,
                         dest="max_shot_markers",
                         help="cap simultaneously shown shot markers "
@@ -1203,6 +1205,8 @@ def main() -> None:
                         help="playback fps (default: read from the video)")
     args = parser.parse_args()
 
+    if args.realtime:
+        args.output = os.path.join(OUTPUT_ROOT, "realtime")
     defaults = clip_paths(args.video, args.output)
     players_csv = _resolve(args.players or defaults["players_csv"])
     court_csv   = _resolve(args.court   or defaults["court_csv"])

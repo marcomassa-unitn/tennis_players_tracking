@@ -347,8 +347,8 @@ python analysis/shot_analysis.py --type-self-test      # labelled demo rally (ne
 `realtime_pipeline.py` runs the whole analysis (court, players, ball, bounces,
 shots) in **one causal pass**: each frame is seen once, in order, as a camera
 would give it. It writes the same CSVs as the offline pipeline, under
-`outputs/realtime/<clip>/`, so `live_view.py --output outputs/realtime` and the
-evaluation read them unchanged.
+`outputs/realtime/<clip>/`, so `live_view.py --realtime` shows them and the
+evaluation reads them unchanged.
 
 ```bash
 pip install -r requirements-realtime.txt
@@ -356,6 +356,7 @@ python realtime_pipeline.py --video data/Input_video2.mp4 --model models/ball_mo
 python realtime_pipeline.py --video data/Input_video2.mp4 --calibrate     # tracks from frame 0
 python realtime_pipeline.py --video data/Input_video2.mp4 --clock live --display   # like a camera
 python realtime_pipeline.py --video data/Input_video2.mp4 --model diff            # no model
+python live_view.py --video data/Input_video2.mp4 --realtime                       # watch it
 ```
 
 **Calibration.** With a fixed camera, the court and the empty court can be
