@@ -354,6 +354,7 @@ evaluation reads them unchanged.
 pip install -r requirements-realtime.txt
 python realtime_pipeline.py --video data/Input_video2.mp4 --model models/ball_motion.onnx
 python realtime_pipeline.py --video data/Input_video2.mp4 --calibrate     # tracks from frame 0
+python realtime_pipeline.py --video data/Input_video2.mp4 --calibrate --fallback models/ball_tracker.pt   # GPU
 python realtime_pipeline.py --video data/Input_video2.mp4 --clock live --display   # like a camera
 python realtime_pipeline.py --video data/Input_video2.mp4 --model diff            # no model
 python live_view.py --video data/Input_video2.mp4 --realtime                       # watch it
@@ -405,6 +406,7 @@ second dataset (more contacts), best epoch 19.
 | Ball vs hand labels, recall / precision | Input_video2 | input_video |
 |---|---|---|
 | Offline (YOLOv8x tiles, whole clip) | 0.93 / 1.00 | 0.95 / 0.95 |
+| Real time, calibrated, with the colour fallback | 0.92 / 0.96 | 0.91 / 0.95 |
 | Real time, calibrated | 0.87 / 0.96 | 0.91 / 0.97 |
 | Real time, 2 s warm-up | 0.83 / 0.97 | 0.65 / 0.97 |
 | Detector alone, crop around the true ball (recall) | 0.87 | 0.90 |
@@ -420,8 +422,25 @@ loses a few points of recall: 0.80 and 0.77 after the warm-up.
 On battery the same laptop is about 3 times slower.
 
 Most missed balls are next to a player: around a contact, or by the far player.
-The first dataset had few positives there and many negatives around the rackets.
-The builder now cuts three crops for each frame with the ball close to a player.
+Next to a player the difference shows the player too, while the ball in flight
+is found on 76 of 78 labelled frames. Two answers:
+
+- **More contacts in the dataset.** The first dataset had few positives there
+  and many negatives around the rackets. The builder now cuts three crops for
+  each frame with the ball close to a player.
+- **A colour fallback** (`--fallback models/ball_tracker.pt`). The offline
+  YOLOv8x runs on one 320 px crop of the plain frame, only when the ball is
+  expected by a player and the motion model found nothing there: about one frame
+  in four or five.
+  - Its detections always go to the path search.
+  - They move the crop only when they move and lie where the Kalman filter
+    expects the ball. A first version that let them steer freely followed
+    yellow things by the players and lost the ball in flight: recall 0.78.
+  - On Input_video2 recall goes from 0.87 to 0.92, against 0.93 offline. By
+    the players it finds 43 of 51 balls instead of 39, and still 49 of 49 in
+    flight.
+  - YOLOv8x takes 0.4 s per crop on the laptop CPU, so the fallback is meant
+    for a GPU.
 
 **Training the detector** (`notebooks/ball_motion_training_kaggle.ipynb`). The
 dataset comes from the clips: `training/build_ball_dataset.py` replays them with

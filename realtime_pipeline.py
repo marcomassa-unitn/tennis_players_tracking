@@ -35,6 +35,10 @@ def build_parser():
     p.add_argument("--model", default=None,
                    help="motion ball detector: .onnx, .pt or TensorRT .engine; 'diff' runs "
                         f"without a model (default: {DEFAULT_MODEL} if present, else diff)")
+    p.add_argument("--fallback", default=None,
+                   help="colour ball detector (e.g. models/ball_tracker.pt or its .onnx), run "
+                        "only by the players where the motion model finds nothing; heavy "
+                        "(YOLOv8x): meant for a GPU")
     p.add_argument("--device", default=None, help="'cpu' to keep the model off the GPU")
     p.add_argument("--court", default=None, help="known court CSV: skips the startup fit")
     p.add_argument("--background", default=None,
@@ -89,7 +93,8 @@ def main(argv=None):
         clock=args.clock, search=args.search, search_every=args.search_every,
         display=args.display, video_out=args.video_out, max_frames=args.max_frames,
         hands=(args.p1_hand, args.p2_hand), shots=not args.no_shots, figures=args.figures,
-        device=args.device, log_every=args.log_every, background=args.background).run()
+        device=args.device, log_every=args.log_every, background=args.background,
+        fallback=args.fallback).run()
 
 
 if __name__ == "__main__":

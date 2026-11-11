@@ -89,3 +89,35 @@ def test_crops_stay_inside_the_roi_at_the_edges():
         assert 100 <= x0 <= 1180 - CROP and 100 <= y0 <= 700 - CROP
         lo, hi = snap.full_crop(x0, y0, CROP)
         assert lo.shape == hi.shape == (CROP, CROP, 3)
+
+
+class _Nothing:
+    name = "none"
+
+    def detect(self, crops):
+        return [[] for _ in crops]
+
+
+class _YellowThing:
+    """A colour detector that always sees something in the middle of its crop."""
+
+    name = "colour"
+
+    def detect(self, crops):
+        return [[(150.0, 150.0, 166.0, 166.0, 0.9)] for _ in crops]
+
+
+def test_a_colour_detection_by_a_player_is_a_candidate_but_starts_no_track():
+    frames, _ = _clip(40)
+    bg = OnlineBackground(30, (W, H), PROC, roi=(100, 100, 1180, 700), threaded=False,
+                          warmup_s=0.5)
+    tracker = OnlineBallTracker(_Nothing(), bg.scale, H, search="tiles", fallback=_YellowThing())
+    player = [(600.0, 300.0, 60.0, 150.0)]
+    sources = set()
+    for i, f in enumerate(frames):
+        live, rows = tracker.step(i, f, bg.snapshot, players=player)
+        bg.feed(i, f)
+        sources |= {r[7] for r in rows}
+    assert "colour" in sources                       # offered to the path search...
+    assert tracker.state == OnlineBallTracker.SEARCH  # ...but it never became the ball
+    assert tracker.n_fallback > 0

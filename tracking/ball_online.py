@@ -54,6 +54,7 @@ STRONG_CONF = 0.6          # accepted anywhere in the crop: a hit changed the ve
 ACQUIRE_CONF = 0.3         # SEARCH: detections weaker than this start nothing
 ACQUIRE_FRAMES = 3         # ...two of them this close in time start a track
 REACH_Q_GAIN = 10.0        # process noise x this near a player (contacts)
+COLOUR_MIN_MOTION = 0.3    # a colour detection must have moved this much to steer
 ROI_MARGIN = 64            # px around the court region kept at full resolution
 
 
@@ -164,8 +165,10 @@ class OnlineBallTracker:
     TRACKING, SEARCH = "tracking", "search"
 
     def __init__(self, backend, scale, frame_height=1080, search="tiles", search_every=1,
-                 crop=CROP):
+                 crop=CROP, fallback=None):
         self.backend = backend
+        self.fallback = fallback       # colour detector for the ball by a player (or None)
+        self.n_fallback = 0            # crops run through it so far
         self.crops = CropMaker(scale, crop)
         self.size = crop
         self.s = frame_height / 1080
@@ -248,6 +251,34 @@ class OnlineBallTracker:
             return _nms(np.array(boxes), scores, 0.0, NMS_IOU)
         return [(*b, c) for b, c in zip(boxes, scores)]
 
+    def _detect_colour(self, frame, centres):
+        """The colour fallback on plain frame crops centred on `centres` (frame px).
+
+        By a player the difference shows the player too, and the motion model
+        misses the ball there most; a detector trained on colour images sees a
+        yellow ball against a shirt or a racket. It is far bigger, so it only
+        runs where the motion model found nothing near a player.
+        """
+        if self.fallback is None or not centres:
+            return []
+        h, w = frame.shape[:2]
+        origins = []
+        for cx, cy in centres:
+            o = (int(np.clip(cx - self.size / 2, 0, w - self.size)),
+                 int(np.clip(cy - self.size / 2, 0, h - self.size)))
+            if o not in origins:
+                origins.append(o)
+        batch = [frame[y0:y0 + self.size, x0:x0 + self.size] for x0, y0 in origins]
+        self.n_fallback += len(batch)
+        boxes, scores = [], []
+        for (x0, y0), dets in zip(origins, self.fallback.detect(batch)):
+            for x1, y1, x2, y2, conf in dets:
+                boxes.append((x1 + x0, y1 + y0, x2 + x0, y2 + y0))
+                scores.append(conf)
+        if not boxes:
+            return []
+        return _nms(np.array(boxes), scores, 0.0, NMS_IOU)
+
     # ── state machine ────────────────────────────────────────────────────────
 
     def _start(self, frame_idx, det, v=(0.0, 0.0)):
@@ -293,6 +324,12 @@ class OnlineBallTracker:
                 self.last_crops = origins
                 dets = self._detect(snap, frame, origins, shift)
                 rows += self._rows(frame_idx, dets, gray, "search")
+                if self.fallback is not None and players:      # around the rackets
+                    # Candidates for the path only: a still yellow thing by a player
+                    # (a ball in a pocket or a hand) must not start a track.
+                    colour = self._detect_colour(frame, [(x + w / 2, y + 0.4 * h)
+                                                         for x, y, w, h in players])
+                    rows += self._rows(frame_idx, colour, gray, "colour")
                 got = self._acquire(frame_idx, dets)
                 if got is not None:
                     live = {"cx": (got[0] + got[2]) / 2, "cy": (got[1] + got[3]) / 2,
@@ -311,17 +348,28 @@ class OnlineBallTracker:
         dets = self._detect(snap, frame, [origin], shift)
         rows = self._rows(frame_idx, dets, gray, "crop")
 
-        chosen = None
-        gated = []
-        for d in dets:
+        def in_gate(d):
             z = ((d[0] + d[2]) / 2, (d[1] + d[3]) / 2)
-            if (self.kf.mahalanobis2(z) <= GATE_CHI2
-                    or np.hypot(z[0] - px, z[1] - py) <= MIN_GATE_PX * self.s):
-                gated.append(d)
+            return (self.kf.mahalanobis2(z) <= GATE_CHI2
+                    or np.hypot(z[0] - px, z[1] - py) <= MIN_GATE_PX * self.s)
+
+        chosen = None
+        gated = [d for d in dets if in_gate(d)]
+        if not gated and self.fallback is not None and within_reach(px, py, players):
+            colour = self._detect_colour(frame, [(px, py)])
+            colour_rows = self._rows(frame_idx, colour, gray, "colour")
+            rows += colour_rows
+            # It steers the crop only if it moves and is where the ball is expected.
+            gated = [d for d, r in zip(colour, colour_rows)
+                     if r[6] >= COLOUR_MIN_MOTION and in_gate(d)]
+            if gated:
+                chosen = max(gated, key=lambda d: d[4])
+                self.kf.update(((chosen[0] + chosen[2]) / 2, (chosen[1] + chosen[3]) / 2))
+                gated = []
         if gated:
             chosen = max(gated, key=lambda d: d[4])
             self.kf.update(((chosen[0] + chosen[2]) / 2, (chosen[1] + chosen[3]) / 2))
-        else:
+        elif chosen is None:
             strong = [d for d in dets if d[4] >= STRONG_CONF]
             if strong:
                 chosen = max(strong, key=lambda d: d[4])
