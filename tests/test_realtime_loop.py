@@ -107,3 +107,19 @@ def test_realtime_pipeline_writes_the_offline_outputs(clip, tmp_path):
     assert saved["ball_lag_frames"] == 16
     timings = pd.read_csv(out / "rt_clip" / "realtime" / "timings.csv")
     assert set(timings.columns) == {"frame", "stage", "ms"}
+
+
+def test_a_calibrated_run_tracks_from_the_first_frame(clip, tmp_path):
+    video, court_csv = clip
+    from realtime.calibration import calibrate
+    cal = calibrate(str(video), str(tmp_path / "out"), frames=21)
+    cal["court_csv"] = str(court_csv)              # the synthetic court is known exactly
+    RealtimePipeline(str(video), str(tmp_path / "out"), "diff", court_csv=cal["court_csv"],
+                     background=cal["background"], shots=False, log_every=0).run()
+    p = clip_paths(str(video), str(tmp_path / "out"))
+    players = pd.read_csv(p["players_csv"])
+    assert players.frame.min() <= 1                # no 2 s warm-up
+    ball = pd.read_csv(p["ball_csv"])
+    # Well before the 60 frames of the warm-up (early on the ball crosses the net,
+    # where a yellow ball on a white line is faint for the difference blobs).
+    assert ball[ball.interpolated == 0].frame.min() < 40

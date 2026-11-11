@@ -103,3 +103,16 @@ def test_the_roi_can_come_after_the_warm_up():
     snap = bg.feed(30, frames[30])
     assert snap.full is not None and snap.full.shape == (120, 200, 3)
     assert snap.roi == (40, 30, 240, 150)
+
+
+def test_a_seeded_background_is_ready_at_the_first_frame():
+    court = _court()
+    bg = OnlineBackground(30, (W, H), PROC, roi=(40, 30, 240, 150), threaded=False,
+                          ring=5, sample_every_s=0.1, refresh_s=0.2)
+    snap = bg.seed(court)
+    assert snap is not None and np.array_equal(snap.full, court[30:150, 40:240])
+    frame = court.copy()
+    cv2.rectangle(frame, (100, 60), (115, 110), (40, 40, 200), -1)      # someone passing by
+    for i in range(30):
+        snap = bg.feed(i, frame if i < 2 else court)
+    assert np.abs(snap.full.astype(int) - court[30:150, 40:240]).max() <= 2
