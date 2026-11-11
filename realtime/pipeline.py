@@ -124,7 +124,8 @@ class RealtimePipeline:
     def __init__(self, video, output="outputs/realtime", model=None, court_csv=None,
                  players_csv=None, clock="all", search=None, search_every=None,
                  display=False, video_out=None, max_frames=None, hands=("right", "right"),
-                 shots=True, figures=False, device=None, log_every=150, background=None):
+                 shots=True, figures=False, device=None, log_every=150, background=None,
+                 fallback=None):
         self.video = video
         self.paths = clip_paths(video, output)
         self.model = model
@@ -142,6 +143,7 @@ class RealtimePipeline:
         self.device = device
         self.log_every = log_every
         self.background_png = background             # calibration: no warm-up
+        self.fallback = fallback                     # colour detector by the players
 
     # ── setup ────────────────────────────────────────────────────────────────
 
@@ -206,7 +208,9 @@ class RealtimePipeline:
         gpu = uses_gpu(backend)
         search = self.search or ("tiles" if gpu else "blobs")
         search_every = self.search_every or (1 if gpu else 2)
-        self.ball = OnlineBallTracker(backend, self.bg.scale, H, search, search_every)
+        fallback = load_backend(self.fallback, device=self.device) if self.fallback else None
+        self.ball = OnlineBallTracker(backend, self.bg.scale, H, search, search_every,
+                                      fallback=fallback)
         self.path = OnlinePathDP(fps, H)
         candidates = []
         self.live_rows = []                 # zero-lag Kalman estimate, per frame
@@ -393,6 +397,9 @@ class RealtimePipeline:
             "ball_backend": self.ball.backend.name,
             "ball_search": self.ball.search,
             "ball_crops_per_frame": round(self.ball.n_crops / max(len(self.timer.frame_ms), 1), 2),
+            "ball_fallback": self.fallback,
+            "ball_fallback_crops_per_frame": round(
+                self.ball.n_fallback / max(len(self.timer.frame_ms), 1), 3),
             "ball_positions_final": len(self.path.final),
             "ball_lag_frames": self.path.latency,
             "event_lag_s": None if self.analysis is None else self.analysis.event_lag / fps,
