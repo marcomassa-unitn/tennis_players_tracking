@@ -353,9 +353,19 @@ evaluation read them unchanged.
 ```bash
 pip install -r requirements-realtime.txt
 python realtime_pipeline.py --video data/Input_video2.mp4 --model models/ball_motion.onnx
+python realtime_pipeline.py --video data/Input_video2.mp4 --calibrate     # tracks from frame 0
 python realtime_pipeline.py --video data/Input_video2.mp4 --clock live --display   # like a camera
 python realtime_pipeline.py --video data/Input_video2.mp4 --model diff            # no model
 ```
+
+**Calibration.** With a fixed camera, the court and the empty court can be
+learnt before the match, during the warm-up for instance. `--calibrate` does it
+once per clip and saves the result in `outputs/realtime/<clip>/calibration/`
+(`court.csv`, `court.png`, `background.png`). The background is the median of
+41 frames spread over the clip, at full resolution. The analysis then tracks
+from the first frame, and the background keeps refreshing itself as below.
+Without calibration, the court is fitted on the first frames and the background
+learnt in the first 2 s, which go untracked.
 
 **What changes from offline.**
 
@@ -388,24 +398,29 @@ pipeline too:
 | Player tracking, Input_video2 | 147 s | 86 s |
 | Bounce segmentation, 11 clips | 34 s | 5 s |
 
-**First results.** YOLO11n trained on Kaggle for 70 epochs, with pseudo-labels
-only. On the validation clips: precision 0.91, recall 0.90, mAP50 0.92.
+**First results.** YOLO11n trained on Kaggle with pseudo-labels only, the
+second dataset (more contacts), best epoch 19.
 
-| Laptop CPU only, onnxruntime | Input_video2 | input_video |
+| Ball vs hand labels, recall / precision | Input_video2 | input_video |
+|---|---|---|
+| Offline (YOLOv8x tiles, whole clip) | 0.93 / 1.00 | 0.95 / 0.95 |
+| Real time, calibrated | 0.87 / 0.96 | 0.91 / 0.97 |
+| Real time, 2 s warm-up | 0.83 / 0.97 | 0.65 / 0.97 |
+| Detector alone, crop around the true ball (recall) | 0.87 | 0.90 |
+
+These real-time rows use the tile search of the GPU mode. The CPU blob search
+loses a few points of recall: 0.80 and 0.77 after the warm-up.
+
+| Laptop CPU only, onnxruntime, mains power | Input_video2 | input_video |
 |---|---|---|
 | Whole pipeline after the startup (video: 30 fps) | 28.9 fps | 32.3 fps |
 | Players / ball, per frame (side by side) | 28 / 25 ms | 24 / 24 ms |
-| Detector alone, crop around the true ball: recall | 0.85 | 0.90 |
-| Ball track, recall after the 2 s warm-up (offline: 0.94 / 0.94) | 0.82 | 0.90 |
-| Ball track, precision | 0.95 | 0.97 |
 
-The track rows use the tile search of the GPU mode. With the CPU blob search
-recall is 0.79 and 0.74, at the speeds shown. Bounces and shots arrive with the
-delays given below; on Input_video2 the pipeline commits 40 events and 31 shots.
+On battery the same laptop is about 3 times slower.
 
 Most missed balls are next to a player: around a contact, or by the far player.
-The first dataset had few positives there and many negatives around the
-rackets. The dataset builder now triples the positives close to a player.
+The first dataset had few positives there and many negatives around the rackets.
+The builder now cuts three crops for each frame with the ball close to a player.
 
 **Training the detector** (`notebooks/ball_motion_training_kaggle.ipynb`). The
 dataset comes from the clips: `training/build_ball_dataset.py` replays them with
@@ -422,8 +437,8 @@ the detector alone on crops around the true ball.
 
 **Limits.**
 
-- **Startup.** Fitting the court takes 5–9 s on a CPU (`--court` reuses a known
-  one), and the background needs another 2 s.
+- **Startup.** Without `--calibrate`, fitting the court takes 5–9 s on a CPU and
+  the background needs another 2 s.
 - **Events arrive late.** Bounces are known 1 s after they happen, shots 4 s
   after.
 - **The labels come from the current tracker.** The model first learns what that

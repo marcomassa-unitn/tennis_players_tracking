@@ -7,6 +7,7 @@ realtime/pipeline.py for the stages and README.md for the measured speeds.
 
 Usage (from project root):
     python realtime_pipeline.py --video data/Input_video2.mp4 --model models/ball_motion.onnx
+    python realtime_pipeline.py --video data/Input_video2.mp4 --calibrate     # from frame 0
     python realtime_pipeline.py --video data/Input_video2.mp4 --clock live --display
     python realtime_pipeline.py --video data/input3.mp4 --model diff        # no model
     # ball only, with the offline players and court:
@@ -36,6 +37,14 @@ def build_parser():
                         f"without a model (default: {DEFAULT_MODEL} if present, else diff)")
     p.add_argument("--device", default=None, help="'cpu' to keep the model off the GPU")
     p.add_argument("--court", default=None, help="known court CSV: skips the startup fit")
+    p.add_argument("--background", default=None,
+                   help="known background PNG (full resolution): skips the 2 s warm-up")
+    p.add_argument("--calibrate", action="store_true",
+                   help="calibrate the camera first, as before a match: court and median "
+                        "background of the clip, saved in <output>/<clip>/calibration/ and "
+                        "reused next time; the analysis then tracks from the first frame")
+    p.add_argument("--recalibrate", action="store_true",
+                   help="like --calibrate, recomputing the calibration")
     p.add_argument("--players", default=None,
                    help="offline players CSV: tracks the ball only (needs --court; no shots)")
     p.add_argument("--clock", choices=["all", "live"], default="all",
@@ -68,6 +77,11 @@ def main(argv=None):
     model = args.model
     if model is None:
         model = DEFAULT_MODEL if os.path.exists(DEFAULT_MODEL) else "diff"
+    if args.calibrate or args.recalibrate:
+        from realtime.calibration import calibrate
+        cal = calibrate(args.video, args.output, force=args.recalibrate)
+        args.court = args.court or cal["court_csv"]
+        args.background = args.background or cal["background"]
     if args.players and not args.court:
         raise SystemExit("--players needs --court")
     return RealtimePipeline(
@@ -75,7 +89,7 @@ def main(argv=None):
         clock=args.clock, search=args.search, search_every=args.search_every,
         display=args.display, video_out=args.video_out, max_frames=args.max_frames,
         hands=(args.p1_hand, args.p2_hand), shots=not args.no_shots, figures=args.figures,
-        device=args.device, log_every=args.log_every).run()
+        device=args.device, log_every=args.log_every, background=args.background).run()
 
 
 if __name__ == "__main__":

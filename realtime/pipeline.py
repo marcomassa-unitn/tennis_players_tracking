@@ -124,7 +124,7 @@ class RealtimePipeline:
     def __init__(self, video, output="outputs/realtime", model=None, court_csv=None,
                  players_csv=None, clock="all", search=None, search_every=None,
                  display=False, video_out=None, max_frames=None, hands=("right", "right"),
-                 shots=True, figures=False, device=None, log_every=150):
+                 shots=True, figures=False, device=None, log_every=150, background=None):
         self.video = video
         self.paths = clip_paths(video, output)
         self.model = model
@@ -141,6 +141,7 @@ class RealtimePipeline:
         self.figures = figures
         self.device = device
         self.log_every = log_every
+        self.background_png = background             # calibration: no warm-up
 
     # ── setup ────────────────────────────────────────────────────────────────
 
@@ -221,6 +222,13 @@ class RealtimePipeline:
         if self.court_csv_in:
             conv = CourtConverter(self.court_csv_in)
             self._court_ready(np.linalg.inv(conv._H), None)
+        if self.background_png:
+            image = cv2.imread(self.background_png)
+            if image is None:
+                raise FileNotFoundError(f"Background not found: {self.background_png}")
+            self.bg.seed(image)
+            self.timer.mark("background_ready")
+            print(f"  background from {self.background_png}: tracking from the first frame")
 
         court_every = max(1, int(round(COURT_TRY_EVERY_S * fps)))
         check_every = max(1, int(round(COURT_CHECK_S * fps)))

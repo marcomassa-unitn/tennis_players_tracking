@@ -234,6 +234,26 @@ class OnlineBackground:
         if self.snapshot is not None and self._last_refresh is not None:
             self._last_refresh = -10 ** 9      # rebuild with the ROI at the next frame
 
+    def seed(self, background, idx=0):
+        """Start from a known background (full-res BGR): no warm-up.
+
+        With a fixed camera the empty court can be learnt before the match (see
+        realtime/calibration.py). The ring is filled with copies of it, so the
+        running median moves away from it only once most of the ring holds new
+        samples. Returns the first snapshot.
+        """
+        if background.shape[:2] != (self.H, self.W):
+            raise ValueError(f"background is {background.shape[1]}x{background.shape[0]}, "
+                             f"the video {self.W}x{self.H}")
+        small = cv2.resize(background, self.proc_size, interpolation=cv2.INTER_AREA)
+        full = self._roi_crop(background)
+        self.snapshot = self._build([small], [full], idx, align=False)
+        self._ring_small = [small] * self.ring_size
+        self._ring_full = [full] * self.ring_size
+        self._warm_small, self._warm_full = [], []
+        self._first = self._last_sample = self._last_refresh = idx
+        return self.snapshot
+
     def feed(self, idx, frame, small=None, players=(), shift=(0.0, 0.0)):
         """Offer frame `idx` (full res BGR) to the background; return the snapshot.
 
