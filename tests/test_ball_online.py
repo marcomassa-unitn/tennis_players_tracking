@@ -126,3 +126,25 @@ def test_a_colour_detection_by_a_player_is_a_candidate_but_starts_no_track():
 def test_gpu_batches_are_padded_to_a_few_sizes():
     from tracking.ball_model import batch_bucket
     assert [batch_bucket(n) for n in (1, 2, 3, 5, 15, 16, 17, 40)] == [1, 2, 4, 8, 16, 16, 32, 32]
+
+
+class _Faint:
+    """Sees a ball at (100, 100) of the crop, but only with a low threshold."""
+
+    name = "faint"
+
+    def __init__(self):
+        self.conf = 0.15
+
+    def detect(self, crops):
+        return [[(94.0, 94.0, 106.0, 106.0, 0.08)] if self.conf < 0.1 else [] for _ in crops]
+
+
+def test_a_missed_frame_is_read_again_where_the_ball_must_be():
+    tracker = OnlineBallTracker(_Faint(), 0.5, 1080)
+    crop = np.zeros((CROP, CROP, 3), np.uint8)
+    tracker.missed[10] = ((500, 300), (2.0, 0.0), crop, None)   # origin, camera offset
+    assert tracker.refill(10, (602.0, 400.0)) == (596.0, 394.0, 608.0, 406.0)
+    assert tracker.refill(10, (700.0, 400.0)) is None            # too far from the gap
+    assert tracker.refill(11, (602.0, 400.0)) is None            # nothing kept for it
+    assert tracker.backend.conf == 0.15                          # threshold restored

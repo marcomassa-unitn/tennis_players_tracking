@@ -55,6 +55,9 @@ ACQUIRE_CONF = 0.3         # SEARCH: detections weaker than this start nothing
 ACQUIRE_FRAMES = 3         # ...two of them this close in time start a track
 REACH_Q_GAIN = 10.0        # process noise x this near a player (contacts)
 ROI_DIFF_MIN_CROPS = 4     # more crops than this: one difference over the ROI, sliced
+REFILL_KEEP = 60           # frames a missed crop is kept for a second look (see refill)
+REFILL_CONF = 0.05         # ...which accepts weaker detections...
+REFILL_RADIUS_PX = 30      # ...but only this close to where the ball must be
 COLOUR_MIN_MOTION = 0.3    # a colour detection must have moved this much to steer
 ROI_MARGIN = 64            # px around the court region kept at full resolution
 
@@ -185,6 +188,9 @@ class OnlineBallTracker:
         self.last_crops = []           # (x0, y0) of the crops of the last frame (overlay)
         self.n_crops = 0               # crops run through the model so far
         self._roi_cache = None         # ((frame, background version, ROI), ROI difference)
+        self._last_batch = []          # model input of the last _detect call
+        self.missed = {}               # frame -> crops of a TRACKING frame without the ball
+        self.n_refilled = 0
 
     # ── proposals ────────────────────────────────────────────────────────────
 
@@ -274,6 +280,7 @@ class OnlineBallTracker:
         if not origins:
             return []
         batch = self._batch(snap, frame, origins, shift, frame_idx)
+        self._last_batch = batch
         self.n_crops += len(batch)
         dx, dy = shift[0] / self.crops.scale, shift[1] / self.crops.scale
         boxes, scores = [], []
@@ -413,6 +420,7 @@ class OnlineBallTracker:
         if chosen is not None:
             self.misses = 0
         else:
+            self._keep_missed(frame_idx, frame, origin, (dx, dy), (px, py))
             self.misses += 1
             if self.misses > MAX_COAST:
                 self.state, self.kf = self.SEARCH, None
@@ -420,6 +428,55 @@ class OnlineBallTracker:
         cx, cy = self.kf.x[:2]
         return {"cx": float(cx), "cy": float(cy), "detected": chosen is not None,
                 "state": self.state}, rows
+
+    def _keep_missed(self, frame_idx, frame, origin, offset, centre):
+        """Keep the crops of a frame where the ball was not found, for refill()."""
+        colour = None
+        if self.fallback is not None:
+            h, w = frame.shape[:2]
+            o = (int(np.clip(centre[0] - self.size / 2, 0, w - self.size)),
+                 int(np.clip(centre[1] - self.size / 2, 0, h - self.size)))
+            colour = (o, frame[o[1]:o[1] + self.size, o[0]:o[0] + self.size].copy())
+        self.missed[frame_idx] = (origin, offset, self._last_batch[0].copy(), colour)
+        for f in [f for f in self.missed if f < frame_idx - REFILL_KEEP]:
+            del self.missed[f]
+
+    def refill(self, frame_idx, expected, conf=REFILL_CONF, radius=REFILL_RADIUS_PX):
+        """Second look at a missed frame, once the positions around it are known.
+
+        The fixed-lag path search gives the ball before and after a short gap, so
+        where it must have been in between is known (`expected`, frame px). The
+        crops kept for that frame go through the models again with a lower
+        threshold, and the detection nearest to `expected` within `radius` is
+        returned as (x1, y1, x2, y2), or None.
+        """
+        item = self.missed.get(frame_idx)
+        if item is None:
+            return None
+        origin, (dx, dy), packed, colour = item
+        found = []
+        for backend, crop, (ox, oy) in ((self.backend, packed, (origin[0] + dx, origin[1] + dy)),
+                                         (self.fallback, None if colour is None else colour[1],
+                                          (0, 0) if colour is None else colour[0])):
+            if backend is None or crop is None:
+                continue
+            old = getattr(backend, "conf", None)
+            if old is not None:
+                backend.conf = min(old, conf)
+            try:
+                dets = backend.detect([crop])[0]
+            finally:
+                if old is not None:
+                    backend.conf = old
+            found += [(x1 + ox, y1 + oy, x2 + ox, y2 + oy) for x1, y1, x2, y2, _ in dets]
+        best, best_d = None, radius * self.s
+        for b in found:
+            d = np.hypot((b[0] + b[2]) / 2 - expected[0], (b[1] + b[3]) / 2 - expected[1])
+            if d <= best_d:
+                best, best_d = b, d
+        if best is not None:
+            self.n_refilled += 1
+        return best
 
     def _rows(self, frame_idx, dets, gray, source):
         return [(frame_idx, round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1),

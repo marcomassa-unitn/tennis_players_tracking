@@ -39,6 +39,8 @@ def build_parser():
                    help="colour ball detector (e.g. models/ball_tracker.pt or its .onnx), run "
                         "only by the players where the motion model finds nothing; heavy "
                         "(YOLOv8x): meant for a GPU")
+    p.add_argument("--no-refill", action="store_true", dest="no_refill",
+                   help="no second look at the short gaps of the ball by a player")
     p.add_argument("--device", default=None, help="'cpu' to keep the model off the GPU")
     p.add_argument("--court", default=None, help="known court CSV: skips the startup fit")
     p.add_argument("--background", default=None,
@@ -94,7 +96,7 @@ def main(argv=None):
         display=args.display, video_out=args.video_out, max_frames=args.max_frames,
         hands=(args.p1_hand, args.p2_hand), shots=not args.no_shots, figures=args.figures,
         device=args.device, log_every=args.log_every, background=args.background,
-        fallback=args.fallback).run()
+        fallback=args.fallback, refill=not args.no_refill).run()
 
 
 if __name__ == "__main__":

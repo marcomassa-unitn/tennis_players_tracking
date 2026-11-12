@@ -40,6 +40,7 @@ from tracking.ball_online import OnlineBallTracker, court_roi
 from tracking.ball_tracking import (
     CANDIDATE_COLUMNS,
     OnlinePathDP,
+    within_reach,
     write_ball_csv,
 )
 from tracking.court_tracking import (
@@ -62,6 +63,7 @@ SHIFT_EVERY = 3            # camera shift measured once every this many frames
 LUMA_STEP = 4              # frame brightness from every 4th pixel
 PLAYER_RECENT = 3          # frames a player box stays "current" for the ball tracker
 TRAIL = 20                 # final ball positions drawn on the overlay
+REFILL_MAX_GAP = 3         # gaps up to this many frames by a player get a second look
 
 
 def uses_gpu(backend):
@@ -127,7 +129,7 @@ class RealtimePipeline:
                  players_csv=None, clock="all", search=None, search_every=None,
                  display=False, video_out=None, max_frames=None, hands=("right", "right"),
                  shots=True, figures=False, device=None, log_every=150, background=None,
-                 fallback=None):
+                 fallback=None, refill=True):
         self.video = video
         self.paths = clip_paths(video, output)
         self.model = model
@@ -146,6 +148,7 @@ class RealtimePipeline:
         self.log_every = log_every
         self.background_png = background             # calibration: no warm-up
         self.fallback = fallback                     # colour detector by the players
+        self.refill = refill                         # second look at short gaps
 
     # ── setup ────────────────────────────────────────────────────────────────
 
@@ -214,6 +217,7 @@ class RealtimePipeline:
         self.ball = OnlineBallTracker(backend, self.bg.scale, H, search, search_every,
                                       fallback=fallback)
         self.path = OnlinePathDP(fps, H)
+        self._last_final = None
         candidates = []
         self.live_rows = []                 # zero-lag Kalman estimate, per frame
         trail = []
@@ -298,6 +302,7 @@ class RealtimePipeline:
                     tm.rows.append((idx, "ball", ms))
                     with tm.stage(idx, "ball_path"):
                         finals = self.path.push(idx, rows)
+                        self._refill(finals)
                     candidates += rows
                     if live is not None:
                         self.live_rows.append((idx, round(live["cx"], 1), round(live["cy"], 1),
@@ -355,6 +360,31 @@ class RealtimePipeline:
                 cv2.destroyAllWindows()
         return self._finish(idx, candidates)
 
+    def _refill(self, finals):
+        """Second look at short gaps of the ball by a player, once both ends are final.
+
+        The ball is missed most at a contact, where finding it matters most to
+        place the shot. With the positions before and after the gap known, the
+        crops of the missed frames are read again (OnlineBallTracker.refill).
+        """
+        if not self.refill:
+            return
+        for f in sorted(finals):
+            prev = self._last_final
+            self._last_final = f
+            if prev is None or not 1 <= f - prev - 1 <= REFILL_MAX_GAP:
+                continue
+            a, b = self.path.final[prev], self.path.final[f]
+            for g in range(prev + 1, f):
+                t = (g - prev) / (f - prev)
+                ex = (a[0] + a[2]) / 2 + t * ((b[0] + b[2]) / 2 - (a[0] + a[2]) / 2)
+                ey = (a[1] + a[3]) / 2 + t * ((b[1] + b[3]) / 2 - (a[1] + a[3]) / 2)
+                if not within_reach(ex, ey, list(self._current_players(g).values())):
+                    continue
+                box = self.ball.refill(g, (ex, ey))
+                if box is not None:
+                    self.path.final[g] = tuple(float(v) for v in box)
+
     def _ball_step(self, idx, frame, snap, shift, players, diff):
         t = time.perf_counter()
         live, rows = self.ball.step(idx, frame, snap, shift, players, diff)
@@ -400,6 +430,7 @@ class RealtimePipeline:
             "ball_search": self.ball.search,
             "ball_crops_per_frame": round(self.ball.n_crops / max(len(self.timer.frame_ms), 1), 2),
             "ball_fallback": self.fallback,
+            "ball_refilled": self.ball.n_refilled,
             "ball_fallback_crops_per_frame": round(
                 self.ball.n_fallback / max(len(self.timer.frame_ms), 1), 3),
             "ball_positions_final": len(self.path.final),

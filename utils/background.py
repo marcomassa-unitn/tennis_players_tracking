@@ -74,11 +74,16 @@ def translate(img, dx, dy, interpolation=cv2.INTER_LINEAR):
 
 
 def median_stack(frames):
-    """Per-pixel median of uint8 frames, computed in row strips to bound memory."""
-    stack = np.stack(frames)
-    out = np.empty(stack.shape[1:], np.uint8)
-    for r in range(0, stack.shape[1], 64):
-        out[r:r + 64] = np.median(stack[:, r:r + 64], axis=0).astype(np.uint8)
+    """Per-pixel median of uint8 frames, computed in row strips to bound memory.
+
+    Only one strip of all the frames is stacked at a time, so the peak memory is
+    a strip, not a copy of every frame.
+    """
+    frames = list(frames)
+    out = np.empty(frames[0].shape, np.uint8)
+    for r in range(0, out.shape[0], 64):
+        strip = np.stack([f[r:r + 64] for f in frames])
+        out[r:r + 64] = np.median(strip, axis=0).astype(np.uint8)
     return out
 
 
