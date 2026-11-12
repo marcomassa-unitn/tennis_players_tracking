@@ -49,7 +49,8 @@ MODEL_STEP_M = 0.2                                   # sampling step along model
 LINE_TAU_PX = 8          # max half-width of a line
 LINE_MIN_LUMA = 110      # min brightness of a line pixel
 LINE_MIN_CONTRAST = 18   # min brightness gap to the neighbours at +-tau
-LINE_MAX_SAT = 90        # court lines are white: reject saturated colours
+LINE_MAX_SAT = 170       # court lines are white: reject saturated colours (on clay
+                         # they are dusty orange: 90 lost half of them)
 
 # ── Hough candidates ──────────────────────────────────────────────────────────
 HOUGH_VOTES_FRAC = 0.12  # accumulator threshold as a fraction of frame height
@@ -61,6 +62,9 @@ MATCH_RADIUS_PX = 3      # a model point "hits" a line pixel within this distanc
 MIN_MATCH_RATIO = 0.6    # min fraction of visible model points on line pixels
 GOOD_MATCH_RATIO = 0.9   # stop trying further frames once this is reached
 MIN_MODEL_POINTS = 200   # min model points inside the frame (court big enough)
+MIN_COURT_HEIGHT = 0.15  # baseline to baseline, at least this fraction of the frame
+                         # height: a model squeezed onto the net tape or a banner
+                         # matches a white line, but is no court
 FRAMES_TO_TRY = 6        # frames sampled over the first half of the clip
 
 # ── Playback ──────────────────────────────────────────────────────────────────
@@ -251,13 +255,24 @@ def fit_court_model(mask, chunk=3000):
     best = (-np.inf, None, 0, 0)
     for s in range(0, len(Hs), chunk):
         score, n_hit, n_in = _score(Hs[s:s + chunk], dist, radius)
+        score = np.where(_court_height(Hs[s:s + chunk]) >= MIN_COURT_HEIGHT * h, score, -np.inf)
         k = int(np.argmax(score))
         if score[k] > best[0]:
             best = (score[k], Hs[s + k], n_hit[k], n_in[k])
-    _, H, n_hit, n_in = best
-    if n_in < MIN_MODEL_POINTS:
+    score, H, n_hit, n_in = best
+    if not np.isfinite(score) or n_in < MIN_MODEL_POINTS:
         return None, 0.0
     return H, n_hit / n_in
+
+
+def _court_height(Hs):
+    """Image height (px) from the far to the near baseline, per homography."""
+    P = np.array([[W_m / 2, 0.0, 1.0], [W_m / 2, L_m, 1.0]]).T
+    proj = Hs @ P
+    z = proj[:, 2]
+    y = proj[:, 1] / np.where(np.abs(z) > 1e-9, z, 1e-9)
+    ok = (z > 1e-6).all(axis=1)
+    return np.where(ok, np.abs(y[:, 1] - y[:, 0]), 0.0)
 
 
 # ── 4. Refinement ─────────────────────────────────────────────────────────────
