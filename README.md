@@ -421,6 +421,17 @@ loses a few points of recall: 0.80 and 0.77 after the warm-up.
 
 On battery the same laptop is about 3 times slower.
 
+| Kaggle T4 (4 vCPU), steady fps | Input_video2 | input11 | input_video |
+|---|---|---|---|
+| Ball model on TensorRT FP16 | 27.9 | 24.8 | 34.0 |
+| Ball model on PyTorch FP16 | 25.5 | 20.9 | 31.6 |
+| PyTorch, with the colour fallback | 24.4 | 17.9 | 28.7 |
+
+The frames take 23–27 ms at the median, players and ball side by side. What
+still costs is the search over 21 court tiles while the ball is lost.
+onnxruntime-gpu did not match the CUDA of the Kaggle image and ran on the CPU
+(7–18 fps).
+
 Most missed balls are next to a player: around a contact, or by the far player.
 Next to a player the difference shows the player too, while the ball in flight
 is found on 76 of 78 labelled frames. Two answers:

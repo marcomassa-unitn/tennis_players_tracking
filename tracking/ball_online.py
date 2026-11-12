@@ -54,6 +54,7 @@ STRONG_CONF = 0.6          # accepted anywhere in the crop: a hit changed the ve
 ACQUIRE_CONF = 0.3         # SEARCH: detections weaker than this start nothing
 ACQUIRE_FRAMES = 3         # ...two of them this close in time start a track
 REACH_Q_GAIN = 10.0        # process noise x this near a player (contacts)
+ROI_DIFF_MIN_CROPS = 4     # more crops than this: one difference over the ROI, sliced
 COLOUR_MIN_MOTION = 0.3    # a colour detection must have moved this much to steer
 ROI_MARGIN = 64            # px around the court region kept at full resolution
 
@@ -183,6 +184,7 @@ class OnlineBallTracker:
         self.prev_idx = None
         self.last_crops = []           # (x0, y0) of the crops of the last frame (overlay)
         self.n_crops = 0               # crops run through the model so far
+        self._roi_cache = None         # ((frame, background version, ROI), ROI difference)
 
     # ── proposals ────────────────────────────────────────────────────────────
 
@@ -234,12 +236,44 @@ class OnlineBallTracker:
 
     # ── detection ────────────────────────────────────────────────────────────
 
-    def _detect(self, snap, frame, origins, shift):
+    def _roi_diff(self, snap, frame, shift):
+        """(gray, difference) of the whole ROI of this frame, in background coordinates."""
+        rx0, ry0, rx1, ry1 = snap.roi
+        dx, dy = shift[0] / self.crops.scale, shift[1] / self.crops.scale
+        img = subpix_crop(frame, rx0 + dx, ry0 + dy, rx1 - rx0, ry1 - ry0)
+        return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), jitter_diff(img, snap.full_lo, snap.full_hi)
+
+    def _batch(self, snap, frame, origins, shift, frame_idx):
+        """The model crops at `origins`.
+
+        A few crops are cut one by one. For many (the court tiles of SEARCH) the
+        difference is computed once over the ROI and sliced, and kept: it is the
+        t - 1 channel of the next frame.
+        """
+        if len(origins) <= ROI_DIFF_MIN_CROPS:
+            return [self.crops.channels(snap, frame, self.prev, x0, y0, shift, self.prev_shift)
+                    for x0, y0 in origins]
+        gray, d_t = self._roi_diff(snap, frame, shift)
+        key = (frame_idx - 1, snap.version, snap.roi)
+        if self._roi_cache is not None and self._roi_cache[0] == key:
+            d_tm1 = self._roi_cache[1]
+        elif self.prev is not None:
+            d_tm1 = self._roi_diff(snap, self.prev, self.prev_shift)[1]
+        else:
+            d_tm1 = d_t
+        self._roi_cache = ((frame_idx, snap.version, snap.roi), d_t)
+        rx0, ry0 = snap.roi[0], snap.roi[1]
+        n = self.size
+        return [pack_channels(gray[y0 - ry0:y0 - ry0 + n, x0 - rx0:x0 - rx0 + n],
+                              d_t[y0 - ry0:y0 - ry0 + n, x0 - rx0:x0 - rx0 + n],
+                              d_tm1[y0 - ry0:y0 - ry0 + n, x0 - rx0:x0 - rx0 + n])
+                for x0, y0 in origins]
+
+    def _detect(self, snap, frame, origins, shift, frame_idx=None):
         """Detections (x1, y1, x2, y2, conf) in frame px over the crops at `origins`."""
         if not origins:
             return []
-        batch = [self.crops.channels(snap, frame, self.prev, x0, y0, shift, self.prev_shift)
-                 for x0, y0 in origins]
+        batch = self._batch(snap, frame, origins, shift, frame_idx)
         self.n_crops += len(batch)
         dx, dy = shift[0] / self.crops.scale, shift[1] / self.crops.scale
         boxes, scores = [], []
@@ -322,7 +356,7 @@ class OnlineBallTracker:
                 else:
                     origins = self._blob_proposals(snap, frame, shift, players, small_diff)
                 self.last_crops = origins
-                dets = self._detect(snap, frame, origins, shift)
+                dets = self._detect(snap, frame, origins, shift, frame_idx)
                 rows += self._rows(frame_idx, dets, gray, "search")
                 if self.fallback is not None and players:      # around the rackets
                     # Candidates for the path only: a still yellow thing by a player
