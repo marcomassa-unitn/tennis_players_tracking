@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tracking.ball_model import CROP
 
 
-def export(weights, fmt="onnx", batch=16):
+def export(weights, fmt="onnx", batch=32):
     from ultralytics import YOLO
     model = YOLO(weights)
     if fmt == "onnx":
@@ -35,7 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description="Export the motion ball detector")
     parser.add_argument("--weights", required=True)
     parser.add_argument("--format", choices=["onnx", "engine"], default="onnx")
-    parser.add_argument("--batch", type=int, default=16, help="largest batch (engine)")
+    parser.add_argument("--batch", type=int, default=32, help="largest batch (engine)")
     args = parser.parse_args()
     export(args.weights, args.format, args.batch)
 

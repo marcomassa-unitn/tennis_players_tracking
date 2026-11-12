@@ -26,6 +26,7 @@ CROP = 320                 # the model's input size: crops at native resolution
 DETECT_CONF = 0.15         # boxes below this are dropped
 NMS_IOU = 0.3
 GPU_BATCHES = (1, 2, 4, 8, 16, 32)   # batch sizes a GPU session sees (see OnnxBackend)
+ENGINE_MAX_BATCH = 16      # crops per call to a TensorRT engine (exported for up to 32)
 
 
 def batch_bucket(n, sizes=GPU_BATCHES):
@@ -75,10 +76,17 @@ class UltralyticsBackend:
         if not len(crops):
             return []
         kw = {"device": self.device} if self.device is not None else {}
-        results = self.model.predict(list(crops), imgsz=CROP, conf=self.conf, verbose=False,
-                                     half=self.half, **kw)
-        return [[(*map(float, b), float(c)) for b, c in
-                 zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy())] for r in results]
+        out = []
+        # A TensorRT engine only takes batches within its optimisation profile.
+        step = ENGINE_MAX_BATCH if self.half else len(crops)
+        crops = list(crops)
+        for i in range(0, len(crops), step):
+            results = self.model.predict(crops[i:i + step], imgsz=CROP, conf=self.conf,
+                                         verbose=False, half=self.half, **kw)
+            out += [[(*map(float, b), float(c)) for b, c in
+                     zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy())]
+                    for r in results]
+        return out
 
 
 class OnnxBackend:
