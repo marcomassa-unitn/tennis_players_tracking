@@ -67,6 +67,8 @@ TRAIL = 20                 # final ball positions drawn on the overlay
 def uses_gpu(backend):
     if backend.name == "onnx":
         return "CUDAExecutionProvider" in backend.session.get_providers()
+    if backend.name == "torch":
+        return backend.device.type == "cuda"
     if backend.name == "ultralytics":
         try:
             import torch

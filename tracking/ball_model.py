@@ -46,7 +46,9 @@ def load_backend(spec, conf=DETECT_CONF, device=None):
         raise FileNotFoundError(f"Ball model not found: {spec}")
     if ext == ".onnx":
         return OnnxBackend(spec, conf=conf, device=device)
-    if ext in (".pt", ".engine"):
+    if ext == ".pt":
+        return TorchBackend(spec, conf=conf, device=device)
+    if ext == ".engine":
         return UltralyticsBackend(spec, conf=conf, device=device)
     raise ValueError(f"Unknown ball model format: {spec} (expected .pt, .engine or .onnx)")
 
@@ -87,6 +89,47 @@ class UltralyticsBackend:
                      zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy())]
                     for r in results]
         return out
+
+
+class TorchBackend:
+    """.pt weights run straight through PyTorch: half precision on a GPU.
+
+    Ultralytics' predict() prepares every image and builds a Results object per
+    crop; for one 320 px crop that overhead is several times the network itself.
+    Here the crops go to the network as one tensor and the raw output is decoded
+    like OnnxBackend's (same layout: 4 + classes rows per anchor).
+    """
+
+    name = "torch"
+
+    def __init__(self, path, conf=DETECT_CONF, device=None):
+        import torch
+        from ultralytics import YOLO
+        self.torch = torch
+        if device in (None, ""):
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        elif str(device).isdigit():
+            device = f"cuda:{device}"
+        self.device = torch.device(device)
+        self.half = self.device.type == "cuda"
+        model = YOLO(path, task="detect").model.fuse().eval().to(self.device)
+        self.model = model.half() if self.half else model.float()
+        self.conf = conf
+        self._decode = OnnxBackend.postprocess.__get__(self)
+        self.detect([np.zeros((CROP, CROP, 3), np.uint8)])      # first call: kernels, cuDNN
+
+    def detect(self, crops):
+        if not len(crops):
+            return []
+        torch = self.torch
+        x = torch.from_numpy(OnnxBackend.preprocess(crops)).to(self.device)
+        if self.half:
+            x = x.half()
+        with torch.inference_mode():
+            out = self.model(x)
+        if isinstance(out, (list, tuple)):
+            out = out[0]
+        return self._decode(out.float().cpu().numpy())
 
 
 class OnnxBackend:
