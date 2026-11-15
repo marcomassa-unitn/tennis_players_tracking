@@ -842,6 +842,9 @@ CONTACT_PARAMS = {
     "leaving_s": 0.8,        # time after a contact to see where the ball is going
     "fill_margin_s": 0.3,    # a missing shot is at least this far from the shots around it
     "max_fill_s": 4.0,       # further apart, two shots of one player are two points
+    "duplicate_s": 0.6,      # closer, two shots of one player are one contact: the ball
+                             # cannot reach the opponent and come back in less (volleys
+                             # at the net included)
 }
 
 
@@ -921,6 +924,33 @@ def fill_missing_hits(hits, events, real_ball, fps, params=None):
         filled.append((f, opponent, 0.0))
         ball_at[f] = (float(turn["cx"]), float(turn["cy"]))
     return sorted(filled), ball_at
+
+
+def alternate_players(hits, fps, keep=(), params=None):
+    """Make the players alternate within a point: (hits, frames of inferred shots).
+
+    Two shots in a row by one player, within max_fill_s, cannot both be right:
+      - closer than duplicate_s they are one contact counted twice, and one is kept:
+        a serve or smash (in `keep`) first, else the stronger;
+      - further apart the opponent's shot was missed, and if fill_missing_hits could
+        not place it from the ball, it is added halfway, flagged as inferred: the
+        player is known, the contact frame and the shot itself are not.
+    Further apart than max_fill_s they belong to two points, and both stay.
+    """
+    p = params or CONTACT_PARAMS
+    out, inferred = [], set()
+    for hit in sorted(hits):
+        if out and out[-1][1] == hit[1] and hit[0] - out[-1][0] <= p["max_fill_s"] * fps:
+            last = out[-1]
+            if hit[0] - last[0] < p["duplicate_s"] * fps:
+                if (hit[0] in keep, hit[2]) > (last[0] in keep, last[2]):
+                    out[-1] = hit
+                continue
+            f = int(round((last[0] + hit[0]) / 2))
+            out.append((f, 3 - hit[1], 0.0))
+            inferred.add(f)
+        out.append(hit)
+    return out, inferred
 
 
 # ── impact point from the ball's flight ────────────────────────────────────────
@@ -1119,12 +1149,18 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                                        {*serve_starts, *smash_frames})
         hits, added = fill_missing_hits(hits, events, real_ball, fps)
         ball_at.update(added)
+    # Within a point the players alternate: drop doubles, infer what is still missing.
+    hits, inferred = alternate_players(hits, fps, {*serve_starts, *smash_frames})
 
     previous = None         # the last shot kept: (frame, player, impact)
     n_dropped = 0
     rows = []
     for k, (f, pid, _strength) in enumerate(hits):
-        box = _nearest_box(boxes, f, pid)
+        is_inferred = f in inferred
+        # A contact added from the flight, or inferred, was not seen: the player may
+        # be out of the picture right then (a near player off the bottom edge).
+        added = is_inferred or f in ball_at
+        box = _nearest_box(boxes, f, pid, radius=15 if added else 3)
         if box is None:
             continue
         is_serve = f in serve_starts
@@ -1138,7 +1174,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         cx_win = sel["cx"].values
         cy_win = sel["cy"].values
         if np.all(np.isnan(cx_win)) or np.all(np.isnan(cy_win)):
-            if not (is_serve or is_smash):
+            if not (is_serve or is_smash or added):
                 n_dropped += 1
                 continue
             ball_cx = ball_cy = np.nan
@@ -1201,6 +1237,9 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
             except Exception:
                 overhead = ""
 
+        if is_inferred:          # the contact frame is a guess: so would be the rest
+            stroke, shot_type, overhead = "unknown", "unknown", ""
+
         # CAVEAT: to_meters uses the ground homography but the ball is airborne at
         # contact, so ball_x_m/ball_y_m are indicative, not exact.
         bx_m, by_m = conv.to_meters(ball_cx, ball_cy)
@@ -1222,6 +1261,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
             "impact_x_m": round(impact[0], 2),
             "impact_y_m": round(impact[1], 2),
             "ball_x_m": round(bx_m, 2), "ball_y_m": round(by_m, 2),
+            "inferred": int(is_inferred),
         })
     if n_dropped:
         print(f"  Note: skipped {n_dropped} candidate shot(s) with an all-NaN "

@@ -306,3 +306,23 @@ def test_a_short_raised_phase_at_the_start_of_the_clip_still_gives_the_contact(c
         boxes[f][1] = (x, y - 120.0, w, h + 120.0)
     serves = detect_serves(boxes, conv, 30.0, [(13, 1, 1.0)])
     assert [s[:2] for s in serves] in ([(13, 1)], [(12, 1)], [(14, 1)])
+
+
+def test_one_contact_counted_twice_is_kept_once():
+    from analysis.shot_analysis import alternate_players
+    hits = [(100, 2, 3.0), (115, 2, 0.0), (170, 1, 2.0)]      # 0.5 s apart: one contact
+    out, inferred = alternate_players(hits, 30.0, keep={115})  # 115 is the smash
+    assert out == [(115, 2, 0.0), (170, 1, 2.0)] and not inferred
+
+
+def test_a_missed_reply_is_inferred_between_two_shots_of_one_player():
+    from analysis.shot_analysis import alternate_players
+    hits = [(210, 2, 2.0), (275, 2, 1.5)]                      # 2.2 s apart, same player
+    out, inferred = alternate_players(hits, 30.0)
+    assert out == [(210, 2, 2.0), (242, 1, 0.0), (275, 2, 1.5)] and inferred == {242}
+
+
+def test_two_points_keep_their_shots():
+    from analysis.shot_analysis import alternate_players
+    hits = [(100, 1, 2.0), (400, 1, 2.0)]                      # 10 s apart: a new point
+    assert alternate_players(hits, 30.0) == (hits, set())

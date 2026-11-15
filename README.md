@@ -190,8 +190,15 @@ flowchart LR
    kept only when the ball is near a player. That rejects most bounces, and the
    ones left, right in front of the receiver, are moved to the hit that follows
    them using the events of the next step. A contact must then send the ball towards
-   the opponent, and when one player seems to strike twice in a row the opponent's shot
-   in between is added, from the events or from where the ball turned back. The stroke
+   the opponent. Within a point the players always alternate. When one player seems
+   to strike twice in a row:
+   - less than 0.6 s apart, it is one contact counted twice, and one is kept, since
+     the ball cannot reach the opponent and come back in less;
+   - further apart, the opponent's shot in between was missed and is added, from
+     the events or from where the ball turned back. With the ball unseen it is
+     added halfway and flagged `inferred`, with its stroke and type unknown.
+
+   The stroke
    (forehand/backhand) comes from the ball's side relative to the body axis,
    taking handedness and court side into account. The shot type comes from the
    flight to the bounce of the next step: a flight under 1.05 s is flat; a slower
