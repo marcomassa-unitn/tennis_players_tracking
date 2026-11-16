@@ -19,7 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.paths import GROUND_TRUTH_DIR, OUTPUT_ROOT, clip_paths
 
-KEYS = ("ball_csv", "ball_candidates_csv", "players_csv", "court_csv")
+KEYS = ("ball_csv", "players_csv", "court_csv")     # needed by the dataset builder
+OPTIONAL = ("ball_candidates_csv",)                  # used if there (pseudo-label sources)
 
 
 def main():
@@ -32,7 +33,7 @@ def main():
         p = clip_paths(os.path.basename(clip_dir) + ".mp4", args.outputs)
         found = [p[k] for k in KEYS if os.path.exists(p[k])]
         if len(found) == len(KEYS):
-            files += found
+            files += found + [p[k] for k in OPTIONAL if os.path.exists(p[k])]
         elif found:
             print(f"  {p['stem']}: incomplete, skipped ({len(found)}/{len(KEYS)} CSVs)")
     files += sorted(glob.glob(os.path.join(GROUND_TRUTH_DIR, "ball_*_gt.csv")))
