@@ -107,7 +107,7 @@ class _YellowThing:
         return [[(150.0, 150.0, 166.0, 166.0, 0.9)] for _ in crops]
 
 
-def test_a_colour_detection_by_a_player_is_a_candidate_but_starts_no_track():
+def test_the_colour_detector_is_not_used_to_search_by_the_players():
     frames, _ = _clip(40)
     bg = OnlineBackground(30, (W, H), PROC, roi=(100, 100, 1180, 700), threaded=False,
                           warmup_s=0.5)
@@ -118,9 +118,53 @@ def test_a_colour_detection_by_a_player_is_a_candidate_but_starts_no_track():
         live, rows = tracker.step(i, f, bg.snapshot, players=player)
         bg.feed(i, f)
         sources |= {r[7] for r in rows}
-    assert "colour" in sources                       # offered to the path search...
-    assert tracker.state == OnlineBallTracker.SEARCH  # ...but it never became the ball
-    assert tracker.n_fallback > 0
+    assert "colour" not in sources and tracker.n_fallback == 0   # yellow things by a player
+    assert tracker.state == OnlineBallTracker.SEARCH
+
+
+def test_the_ball_is_on_a_player_only_inside_the_grown_box():
+    from tracking.ball_online import inside_player
+    player = [(100.0, 100.0, 40.0, 100.0)]
+    assert inside_player(120, 150, player)
+    assert inside_player(104 - 0.1 * 40, 95, player)          # within the 15 % margin
+    assert not inside_player(60, 150, player)                 # an arm's length away
+    assert not inside_player(120, 260, player)
+
+
+def _lob_clip(n=120):
+    """A ball rising out of the top of the picture and falling back where it left."""
+    rng = np.random.default_rng(1)
+    court = np.full((H, W, 3), (150, 90, 60), np.uint8)
+    texture = cv2.GaussianBlur(rng.normal(0, 25, (H, W)), (0, 0), 3)[..., None]
+    court = np.clip(court + texture, 0, 255).astype(np.uint8)
+    frames, centres = [], []
+    for t in range(n):
+        f = court.copy()
+        x = 640 + 2 * t
+        y = 700 - 26 * t + 0.22 * t * t        # out at the top from t ~ 41 to t ~ 77
+        if y > 6:
+            cv2.circle(f, (int(x), int(y)), 6, (60, 230, 230), -1)
+        frames.append(np.clip(f + rng.normal(0, 2, f.shape), 0, 255).astype(np.uint8))
+        centres.append((x, y))
+    return frames, centres
+
+
+def test_a_ball_lost_at_the_top_is_found_again_where_it_left():
+    frames, centres = _lob_clip()
+    bg = OnlineBackground(30, (W, H), PROC, roi=(0, 0, W, H), threaded=False, warmup_s=0.5)
+    tracker = OnlineBallTracker(DiffBlobBackend(), bg.scale, H, search="tiles",
+                                search_roi=(0, 200, W, H))     # the court: below y = 200
+    states = []
+    for i, f in enumerate(frames):
+        live, rows = tracker.step(i, f, bg.snapshot)
+        bg.feed(i, f)
+        states.append((i, tracker.state, live))
+        if any(r[7] == "high" for r in rows):
+            break
+    assert tracker.n_high_found == 1                           # found in the crops where it left
+    i, state, live = states[-1]
+    assert state == OnlineBallTracker.TRACKING and centres[i][1] < 200   # still above the court
+    assert np.hypot(live["cx"] - centres[i][0], live["cy"] - centres[i][1]) < 8
 
 
 def test_gpu_batches_are_padded_to_a_few_sizes():

@@ -42,6 +42,9 @@ PLAYER_MARGIN = 0.25       # player boxes grown by this fraction before masking
 # ── Camera motion (processing px) ─────────────────────────────────────────────
 MAX_CAMERA_SHIFT_PX = 40
 MIN_SHIFT_RESPONSE = 0.1
+MAX_ALIGN_SHIFT_PX = 12    # samples of one background: a fixed camera drifts less than
+                           # this between them; a larger estimate was fooled by motion
+                           # (a ball on a plain court) and would print it in the median
 
 
 def channel_max(img):
@@ -379,7 +382,8 @@ class OnlineBackground:
             align = False
         if align and len(small) > 1:
             ref = gray_f32(small[len(small) // 2])
-            shifts = [camera_shift(ref, fr, self.hann) for fr in small]
+            shifts = [camera_shift(ref, fr, self.hann, max_shift=MAX_ALIGN_SHIFT_PX)
+                      for fr in small]
             small = [translate(fr, dx, dy) for fr, (dx, dy) in zip(small, shifts)]
             if full:
                 full = [translate(fr, dx / self.scale, dy / self.scale)
