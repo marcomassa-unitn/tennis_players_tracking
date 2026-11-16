@@ -34,7 +34,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from evaluation.evaluate_tracking import ball_metrics, load_ball_gt, load_ball_pred
 from tracking.ball_model import CROP, load_backend
-from tracking.ball_online import CropMaker, court_roi
+from tracking.ball_online import CropMaker, track_region
 from tracking.ball_tracking import track_from_candidates
 from tracking.player_tracking import PROC_HEIGHT
 from training.build_ball_dataset import find_video
@@ -71,7 +71,7 @@ def oracle(video, gt, court_csv, backend, radius, seed=0):
     fps = safe_fps(cap.get(cv2.CAP_PROP_FPS))
     W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     proc = (int(round(W * PROC_HEIGHT / H)), PROC_HEIGHT)
-    bg = OnlineBackground(fps, (W, H), proc, roi=court_roi(CourtConverter(court_csv), W, H),
+    bg = OnlineBackground(fps, (W, H), proc, roi=track_region(CourtConverter(court_csv), W, H),
                           threaded=False)
     crops = CropMaker(bg.scale)
     hann = cv2.createHanningWindow(proc, cv2.CV_32F)

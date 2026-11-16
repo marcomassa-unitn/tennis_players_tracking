@@ -387,8 +387,22 @@ learnt in the first 2 s, which go untracked.
   *t*, the same at *t − 1* (`tracking/ball_online.py`). The difference shows the
   ball whatever the colour of the court; the grey image tells it from a racket.
   - While tracking, a Kalman filter predicts the ball and **one crop** is read.
+    The crop follows the ball up to the top of the picture. Above the court it
+    accepts only a detection where the ball is expected, since the crowd and the
+    boards are behind it there.
   - When the ball is lost, the court tiles (GPU) or the moving blobs (CPU) are
-    read instead.
+    read instead. A ball lost above the court went out at the top: for 3 s it is
+    also looked for where it left, and one detection there is enough to follow it
+    again.
+  - The colour fallback runs only when the ball is expected inside a player's
+    box, part of the silhouette that the background difference cannot separate.
+    It never runs while searching: yellow things by the players fooled it.
+    On Input_video2 and input8 the ball is now followed above the court on about
+    60 frames each, up to the top of the picture. Against the hand labels of
+    Input_video2, recall goes from 0.86 to 0.91 with no false detection, and on
+    input8 there are three times fewer crops per frame. The dataset builder now
+    also cuts crops above the court, so that the next training sees the ball
+    against the boards and the crowd.
   - The path search of the offline tracker runs with a **fixed lag of 16 frames
     (0.5 s)**: on the clips, 99.6 % of the positions match the offline path.
 - **Bounces and shots on a sliding window.** The unchanged offline functions run

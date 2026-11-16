@@ -50,7 +50,8 @@ MAX_BLOB_PROPOSALS = 4     # CPU search: crops around the most contrasted blobs
 MAX_COAST = 3              # frames predicted without a detection before SEARCH
 GATE_CHI2 = 13.8           # 2 dof, 99.9 %
 MIN_GATE_PX = 25           # always accept a detection this close to the prediction
-STRONG_CONF = 0.6          # accepted anywhere in the crop: a hit changed the velocity
+STRONG_CONF = 0.6          # accepted anywhere in the crop: a hit changed the velocity...
+STRONG_MIN_MOTION = 0.2    # ...if that much of it moved since the previous frame
 ACQUIRE_CONF = 0.3         # SEARCH: detections weaker than this start nothing
 ACQUIRE_FRAMES = 3         # ...two of them this close in time start a track
 REACH_Q_GAIN = 10.0        # process noise x this near a player (contacts)
@@ -60,6 +61,11 @@ REFILL_CONF = 0.05         # ...which accepts weaker detections...
 REFILL_RADIUS_PX = 30      # ...but only this close to where the ball must be
 COLOUR_MIN_MOTION = 0.3    # a colour detection must have moved this much to steer
 ROI_MARGIN = 64            # px around the court region kept at full resolution
+HIGH_WAIT_S = 3.0          # a ball lost above the court is looked for where it left
+                           # for this long: it went out of the picture and falls back
+HIGH_SPREAD = 1            # ...on that many crops each side of where it was lost
+PLAYER_MARGIN = 0.15       # the colour fallback runs only inside a player's box grown
+                           # by this: the ball is part of the player's silhouette
 
 
 def court_roi(conv, width, height, margin=ROI_MARGIN, min_size=CROP):
@@ -76,6 +82,26 @@ def court_roi(conv, width, height, margin=ROI_MARGIN, min_size=CROP):
             roi[a] = max(0, min(roi[a], lim - min_size))
             roi[b] = min(lim, roi[a] + min_size)
     return tuple(roi)
+
+
+def track_region(conv, width, height, margin=ROI_MARGIN, min_size=CROP):
+    """(x0, y0, x1, y1): where a ball already followed is still looked for.
+
+    The court region of court_roi, up to the top of the picture: a high ball, a lob
+    above all, is projected far above the court it flies over. Only the SEARCH for a
+    lost ball keeps to court_roi, where the crowd and the boards cannot fool it.
+    """
+    x0, _, x1, y1 = court_roi(conv, width, height, margin, min_size)
+    return (x0, 0, x1, y1)
+
+
+def inside_player(x, y, players, margin=PLAYER_MARGIN):
+    """True if (x, y) lies in a player's box grown by `margin` of its size."""
+    for px, py, w, h in players:
+        if (px - margin * w <= x <= px + w + margin * w
+                and py - margin * h <= y <= py + h + margin * h):
+            return True
+    return False
 
 
 def pack_channels(gray, diff_t, diff_tm1, gain=DIFF_GAIN):
@@ -163,13 +189,16 @@ class OnlineBallTracker:
     backend: a tracking.ball_model backend. scale: processing -> full-res factor of
     the camera shift (OnlineBackground.scale). search: "tiles" (every court tile,
     for a GPU) or "blobs" (crops on the ball-sized blobs only, for a CPU).
-    search_every: run SEARCH on one frame in this many.
+    search_every: run SEARCH on one frame in this many. search_roi: the region of the
+    blind SEARCH (court_roi; default the background's whole region), while a followed
+    ball is tracked over the whole background region (track_region). fps: for the
+    time a ball lost high is waited for.
     """
 
     TRACKING, SEARCH = "tracking", "search"
 
     def __init__(self, backend, scale, frame_height=1080, search="tiles", search_every=1,
-                 crop=CROP, fallback=None):
+                 crop=CROP, fallback=None, search_roi=None, fps=30.0):
         self.backend = backend
         self.fallback = fallback       # colour detector for the ball by a player (or None)
         self.n_fallback = 0            # crops run through it so far
@@ -191,11 +220,31 @@ class OnlineBallTracker:
         self._last_batch = []          # model input of the last _detect call
         self.missed = {}               # frame -> crops of a TRACKING frame without the ball
         self.n_refilled = 0
+        self.search_roi = search_roi
+        self.high_wait = max(1, int(round(HIGH_WAIT_S * fps)))
+        self.lost_high = None          # (frame lost, cx, cy): a ball that left at the top
+        self.n_high_found = 0
+        self.last_seen = None          # (frame, cx, cy) of the last detection followed
+
+    def set_search_roi(self, roi):
+        self.search_roi = roi
+
+    def _search_region(self, snap):
+        """The blind SEARCH region inside the background region (background coords)."""
+        if self.search_roi is None:
+            return snap.roi
+        a, b = snap.roi, self.search_roi
+        r = (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+        return r if r[2] - r[0] >= self.size and r[3] - r[1] >= self.size else snap.roi
+
+    def _in_search_region(self, snap, y, shift):
+        """True if frame row y lies at or below the top of the SEARCH region."""
+        return y - shift[1] / self.crops.scale >= self._search_region(snap)[1]
 
     # ── proposals ────────────────────────────────────────────────────────────
 
     def _tiles(self, snap):
-        rx0, ry0, rx1, ry1 = snap.roi
+        rx0, ry0, rx1, ry1 = self._search_region(snap)
         return [(rx0 + x, ry0 + y) for x, y in
                 tile_origins(rx1 - rx0, ry1 - ry0, self.size, SEARCH_OVERLAP)]
 
@@ -206,7 +255,7 @@ class OnlineBallTracker:
         that the player tracker has just computed; without it the difference is
         computed here over the ROI at full resolution (slower).
         """
-        rx0, ry0, rx1, ry1 = snap.roi
+        rx0, ry0, rx1, ry1 = self._search_region(snap)
         k = self.crops.scale                     # processing px per full-res px
         dx, dy = shift[0] / k, shift[1] / k
         if small_diff is not None:
@@ -216,7 +265,9 @@ class OnlineBallTracker:
             s2 = (self.s * k) ** 2
         else:
             img = subpix_crop(frame, rx0 + dx, ry0 + dy, rx1 - rx0, ry1 - ry0)
-            diff = jitter_diff(img, snap.full_lo, snap.full_hi)
+            lo, hi = (bg[ry0 - snap.roi[1]:ry1 - snap.roi[1], rx0 - snap.roi[0]:rx1 - snap.roi[0]]
+                      for bg in (snap.full_lo, snap.full_hi))
+            diff = jitter_diff(img, lo, hi)
             to_full, ox, oy = 1.0, rx0, ry0
             s2 = self.s * self.s
         mask = (diff >= DIFF_THRESH).astype(np.uint8)
@@ -325,6 +376,37 @@ class OnlineBallTracker:
     def _start(self, frame_idx, det, v=(0.0, 0.0)):
         self.kf = Kalman(((det[0] + det[2]) / 2, (det[1] + det[3]) / 2), v, self.s)
         self.state, self.misses, self.tentative = self.TRACKING, 0, []
+        self.lost_high = None
+        self.last_seen = (frame_idx, (det[0] + det[2]) / 2, (det[1] + det[3]) / 2)
+
+    def _look_where_lost(self, frame_idx, frame, gray, snap, shift):
+        """SEARCH for a ball that left at the top: crops where it was last seen.
+
+        It went up out of the picture (or out of reach of the model, against the
+        crowd), and comes down about where it left. One detection there is enough to
+        follow it again. Returns (detection or None, candidate rows).
+        """
+        f_lost, cx, cy = self.lost_high
+        if frame_idx - f_lost > self.high_wait:
+            self.lost_high = None
+            return None, []
+        dx, dy = shift[0] / self.crops.scale, shift[1] / self.crops.scale
+        step = self.size - SEARCH_OVERLAP
+        origins = []
+        for k in range(-HIGH_SPREAD, HIGH_SPREAD + 1):
+            o = self.crops.clamp(snap, cx - dx + k * step - self.size / 2, cy - dy - self.size / 2)
+            if o not in origins:
+                origins.append(o)
+        self.last_crops = origins
+        dets = self._detect(snap, frame, origins, shift, frame_idx)
+        rows = self._rows(frame_idx, dets, gray, "high")
+        good = [d for d in dets if d[4] >= ACQUIRE_CONF]
+        if not good:
+            return None, rows
+        best = max(good, key=lambda d: d[4])
+        self._start(frame_idx, best)
+        self.n_high_found += 1
+        return best, rows
 
     def _acquire(self, frame_idx, dets):
         """SEARCH: start a track on a confident detection or two consistent ones."""
@@ -357,20 +439,20 @@ class OnlineBallTracker:
             if self.state == self.TRACKING:
                 gap = 1 if self.prev_idx is None else max(1, frame_idx - self.prev_idx)
                 live, rows = self._track(frame_idx, frame, gray, snap, shift, players, gap)
+            if self.state == self.SEARCH and self.lost_high is not None:
+                got, high_rows = self._look_where_lost(frame_idx, frame, gray, snap, shift)
+                rows += high_rows
+                if got is not None:
+                    live = {"cx": (got[0] + got[2]) / 2, "cy": (got[1] + got[3]) / 2,
+                            "detected": True, "state": self.state}
             if self.state == self.SEARCH and frame_idx % self.search_every == 0:
                 if self.search == "tiles":
                     origins = self._tiles(snap)
                 else:
                     origins = self._blob_proposals(snap, frame, shift, players, small_diff)
-                self.last_crops = origins
+                self.last_crops = self.last_crops + origins if self.lost_high else origins
                 dets = self._detect(snap, frame, origins, shift, frame_idx)
                 rows += self._rows(frame_idx, dets, gray, "search")
-                if self.fallback is not None and players:      # around the rackets
-                    # Candidates for the path only: a still yellow thing by a player
-                    # (a ball in a pocket or a hand) must not start a track.
-                    colour = self._detect_colour(frame, [(x + w / 2, y + 0.4 * h)
-                                                         for x, y, w, h in players])
-                    rows += self._rows(frame_idx, colour, gray, "colour")
                 got = self._acquire(frame_idx, dets)
                 if got is not None:
                     live = {"cx": (got[0] + got[2]) / 2, "cy": (got[1] + got[3]) / 2,
@@ -394,9 +476,14 @@ class OnlineBallTracker:
             return (self.kf.mahalanobis2(z) <= GATE_CHI2
                     or np.hypot(z[0] - px, z[1] - py) <= MIN_GATE_PX * self.s)
 
+        # Above the court the crowd and the boards are behind the ball: only what is
+        # where the ball is expected counts there, never a confident stranger.
+        high = not self._in_search_region(snap, py, shift)
         chosen = None
         gated = [d for d in dets if in_gate(d)]
-        if not gated and self.fallback is not None and within_reach(px, py, players):
+        # The colour detector only where the ball is surely on a player, part of the
+        # silhouette the motion model cannot tell it from.
+        if not gated and self.fallback is not None and inside_player(px, py, players):
             colour = self._detect_colour(frame, [(px, py)])
             colour_rows = self._rows(frame_idx, colour, gray, "colour")
             rows += colour_rows
@@ -410,8 +497,11 @@ class OnlineBallTracker:
         if gated:
             chosen = max(gated, key=lambda d: d[4])
             self.kf.update(((chosen[0] + chosen[2]) / 2, (chosen[1] + chosen[3]) / 2))
-        elif chosen is None:
-            strong = [d for d in dets if d[4] >= STRONG_CONF]
+        elif chosen is None and not high:
+            # A jump to a confident detection away from the prediction (a racket
+            # hit) only to something moving: never a still ball in a pocket.
+            strong = [d for d, r in zip(dets, rows) if d[4] >= STRONG_CONF
+                      and r[6] >= STRONG_MIN_MOTION]
             if strong:
                 chosen = max(strong, key=lambda d: d[4])
                 cx, cy = (chosen[0] + chosen[2]) / 2, (chosen[1] + chosen[3]) / 2
@@ -419,20 +509,25 @@ class OnlineBallTracker:
                 self._start(frame_idx, chosen, (cx - last[0], cy - last[1]))
         if chosen is not None:
             self.misses = 0
+            self.last_seen = (frame_idx, (chosen[0] + chosen[2]) / 2, (chosen[1] + chosen[3]) / 2)
         else:
-            self._keep_missed(frame_idx, frame, origin, (dx, dy), (px, py))
+            self._keep_missed(frame_idx, frame, origin, (dx, dy), (px, py), players)
             self.misses += 1
             if self.misses > MAX_COAST:
+                # Lost above the court: it went out at the top, wait for it there.
+                if (self.last_seen is not None
+                        and not self._in_search_region(snap, self.last_seen[2], shift)):
+                    self.lost_high = self.last_seen
                 self.state, self.kf = self.SEARCH, None
                 return None, rows
         cx, cy = self.kf.x[:2]
         return {"cx": float(cx), "cy": float(cy), "detected": chosen is not None,
                 "state": self.state}, rows
 
-    def _keep_missed(self, frame_idx, frame, origin, offset, centre):
+    def _keep_missed(self, frame_idx, frame, origin, offset, centre, players=()):
         """Keep the crops of a frame where the ball was not found, for refill()."""
         colour = None
-        if self.fallback is not None:
+        if self.fallback is not None and inside_player(centre[0], centre[1], players):
             h, w = frame.shape[:2]
             o = (int(np.clip(centre[0] - self.size / 2, 0, w - self.size)),
                  int(np.clip(centre[1] - self.size / 2, 0, h - self.size)))

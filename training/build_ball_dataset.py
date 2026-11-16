@@ -41,7 +41,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tracking.ball_model import CROP
-from tracking.ball_online import CropMaker, court_roi, pack_channels
+from tracking.ball_online import CropMaker, pack_channels, track_region
 from tracking.ball_tracking import ball_sized_blobs, within_reach
 from utils.background import OnlineBackground, camera_shift
 from utils.court_converter import CourtConverter
@@ -242,7 +242,7 @@ def build_clip(clip, video, outputs, gt_dir, out_dir, rng, stride=STRIDE, previe
     players = pd.read_csv(paths["players_csv"])
     boxes = {f: g[["x", "y", "w", "h"]].to_numpy(float) for f, g in players.groupby("frame")}
 
-    roi = court_roi(CourtConverter(paths["court_csv"]), W, H)
+    roi = track_region(CourtConverter(paths["court_csv"]), W, H)
     bg = OnlineBackground(fps, (W, H), proc, roi=roi, threaded=False)
     crops = CropMaker(bg.scale)
     hann = cv2.createHanningWindow(proc, cv2.CV_32F)
