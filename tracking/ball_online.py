@@ -36,6 +36,7 @@ from tracking.ball_tracking import (
     BLOB_MAX_ELONGATION,
     BLOB_MIN_AREA,
     MAX_SPEED_PX,
+    MIN_MOTION,
     court_pixels,
     motion_fraction,
     tile_origins,
@@ -400,7 +401,7 @@ class OnlineBallTracker:
         self.last_crops = origins
         dets = self._detect(snap, frame, origins, shift, frame_idx)
         rows = self._rows(frame_idx, dets, gray, "high")
-        good = [d for d in dets if d[4] >= ACQUIRE_CONF]
+        good = [d for d, r in zip(dets, rows) if d[4] >= ACQUIRE_CONF and r[6] >= MIN_MOTION]
         if not good:
             return None, rows
         best = max(good, key=lambda d: d[4])
@@ -408,9 +409,13 @@ class OnlineBallTracker:
         self.n_high_found += 1
         return best, rows
 
-    def _acquire(self, frame_idx, dets):
-        """SEARCH: start a track on a confident detection or two consistent ones."""
-        good = [d for d in dets if d[4] >= ACQUIRE_CONF]
+    def _acquire(self, frame_idx, dets, rows):
+        """SEARCH: start a track on a confident detection or two consistent ones.
+
+        Only on moving ones: a still ball-like thing (a ball kid's cap, a ball in a
+        pocket) would hold the track there and keep the search from the real ball.
+        """
+        good = [d for d, r in zip(dets, rows) if d[4] >= ACQUIRE_CONF and r[6] >= MIN_MOTION]
         self.tentative = [t for t in self.tentative if frame_idx - t[0] <= ACQUIRE_FRAMES]
         if not good:
             return None
@@ -452,8 +457,9 @@ class OnlineBallTracker:
                     origins = self._blob_proposals(snap, frame, shift, players, small_diff)
                 self.last_crops = self.last_crops + origins if self.lost_high else origins
                 dets = self._detect(snap, frame, origins, shift, frame_idx)
-                rows += self._rows(frame_idx, dets, gray, "search")
-                got = self._acquire(frame_idx, dets)
+                search_rows = self._rows(frame_idx, dets, gray, "search")
+                rows += search_rows
+                got = self._acquire(frame_idx, dets, search_rows)
                 if got is not None:
                     live = {"cx": (got[0] + got[2]) / 2, "cy": (got[1] + got[3]) / 2,
                             "detected": True, "state": self.state}
@@ -480,7 +486,9 @@ class OnlineBallTracker:
         # where the ball is expected counts there, never a confident stranger.
         high = not self._in_search_region(snap, py, shift)
         chosen = None
-        gated = [d for d in dets if in_gate(d)]
+        # A still detection is not the ball in play (the path search drops it too):
+        # following it would hold the crop on a ball kid's cap for the whole clip.
+        gated = [d for d, r in zip(dets, rows) if in_gate(d) and r[6] >= MIN_MOTION]
         # The colour detector only where the ball is surely on a player, part of the
         # silhouette the motion model cannot tell it from.
         if not gated and self.fallback is not None and inside_player(px, py, players):
