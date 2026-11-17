@@ -64,8 +64,11 @@ def test_flight_gives_the_shot_type():
         return {"time_s": time_s, "depth_m": depth_m, "apex_m": apex_m}
 
     assert classify_flight(flight(0.8, 9.0, 1.4)) == "flat"
-    assert classify_flight(flight(0.8, 3.0, 3.0)) == "flat"
     assert classify_flight(flight(1.3, 3.0, 2.3)) == "dropshot"
+    assert classify_flight(flight(0.9, 3.0, 3.0)) == "dropshot"   # short: whatever the flight
+    assert classify_flight(flight(0.4, 1.0, 1.0)) == "flat"       # into the net
+    assert classify_flight(flight(1.3, 4.3, 1.3)) == "slice"      # an angle, not short enough
+    assert classify_flight(flight(0.9, 3.0, 2.0), serve=True) == "flat"
     assert classify_flight(flight(1.4, 10.0, 3.5)) == "lob"
     assert classify_flight(flight(1.3, 9.0, 1.3)) == "slice"
 
