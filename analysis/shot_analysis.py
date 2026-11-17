@@ -783,7 +783,11 @@ def clip_serves(ball_csv, boxes, conv, fps, params=None):
 # no reversal is seen. The striker shows it, though, with the arm-up motion of a
 # serve played from inside the court. An arm raised at the net is not enough (a
 # player reacts to a passing ball too), so the ball must then leave from the
-# striker's side and cross the net.
+# striker's side and cross the net. Before the contact the ball comes down from
+# above: seen higher than the striker's head at least once in the last second (a
+# ball at the striker's knees is a groundstroke, whatever the box does). The box
+# height is a 3-frame median: a ball just hit, still touching the legs, grows the
+# box for one frame, and that is no arm going up.
 
 SMASH_PARAMS = {
     "raised_peak": 1.5,      # the arm-up motion of a serve reaches this; groundstrokes do not
@@ -791,8 +795,32 @@ SMASH_PARAMS = {
     "max_net_m": 9.0,        # played inside the court
     "ball_back_s": 0.4,      # the ball is seen again within this time, on the striker's side...
     "cross_s": 1.0,          # ...and has crossed the net this long after the contact
-    "same_hit_s": 0.3,       # a detected hit this close is the smash itself
+    "incoming_s": 1.0,       # the ball is seen above the striker within this time before
+    "above_frac": 0.2,       # ...higher than this fraction of the box from its top (the head)
+    "same_hit_s": 0.6,       # a hit the ball shows this close is the same stroke: it stands
 }
+
+
+def _median3(a):
+    """3-sample running median (the ends unchanged): drops one-frame spikes."""
+    a = np.asarray(a, float)
+    if len(a) < 3:
+        return a
+    out = a.copy()
+    out[1:-1] = np.median(np.stack([a[:-2], a[1:-1], a[2:]]), axis=0)
+    return out
+
+
+def _ball_comes_from_above(contact, pid, boxes, real_ball, fps, params=None):
+    """True if the ball is seen above the striker's head in the second before `contact`."""
+    p = params or SMASH_PARAMS
+    seen = real_ball[real_ball["frame"].between(contact - p["incoming_s"] * fps, contact - 1)]
+    at_contact = boxes.get(contact, {}).get(pid)
+    for f, cy in zip(seen["frame"], seen["cy"]):
+        box = boxes.get(int(f), {}).get(pid) or at_contact
+        if box is not None and cy < box[1] + p["above_frac"] * box[3]:
+            return True
+    return False
 
 
 def _ball_leaves_striker(contact, pid, real_ball, conv, fps, params=None):
@@ -814,11 +842,12 @@ def detect_smashes(boxes, conv, fps, real_ball, serves=(), params=None):
         frames, hm, feet_m = _metric_heights(boxes, conv, pid)
         if not len(frames):
             continue
-        rel = hm / np.nanmedian(hm)
+        rel = _median3(hm) / np.nanmedian(hm)
         for _, _, k in _raised_phases(frames, rel, fps, p["raised_peak"], p["min_raised_s"]):
             contact = int(frames[k])
             if (abs(feet_m[k, 1] - NET) <= p["max_net_m"]
                     and not any(c == contact for c, _, _ in serves)
+                    and _ball_comes_from_above(contact, pid, boxes, real_ball, fps, p)
                     and _ball_leaves_striker(contact, pid, real_ball, conv, fps, p)):
                 smashes.append((contact, pid))
     return sorted(smashes)
@@ -1134,8 +1163,12 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
     smash_frames = set()
     if real_ball is not None:
         for contact, pid in detect_smashes(boxes, conv, fps, real_ball, serves):
+            # The striker's motion only fills in a smash the ball did not show: when
+            # the ball shows that player's hit close by, that hit is the stroke, with
+            # its own contact and type (a smash from the ball is typed as one).
             near = SMASH_PARAMS["same_hit_s"] * fps
-            hits = [h for h in hits if not (h[1] == pid and abs(h[0] - contact) <= near)]
+            if any(h[1] == pid and abs(h[0] - contact) <= near for h in hits):
+                continue
             hits.append((contact, pid, 0.0))
             smash_frames.add(contact)
     hits.sort()
