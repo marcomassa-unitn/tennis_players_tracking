@@ -1045,7 +1045,33 @@ FLIGHT_PARAMS = {
     "volley_net_m": 9.0,     # a volley is played at most this far from the net, about
                              # halfway between the service line and the baseline
     "reversal_s": 0.4,       # time around a volley to see the ball come and go
+    # A shot the opponent takes in the air (volley, smash) has no bounce: its flight
+    # is measured up to that contact. A missed bounce looks the same, and a rally
+    # ball whose bounce went unseen flies about as long, so only a much higher arc
+    # than any rally ball makes it a lob there.
+    "air_lob_apex_m": 3.0,
+    "air_lob_rise_m": 1.0,   # ...and a lob goes UP after the contact: from the first
+                             # position seen to the apex (a ball hit down from high, as a
+                             # serve or a smash, starts at its highest)
+    "air_min_points": 5,     # ball positions needed in the flight to trust its apex
 }
+
+
+def _flight_heights(seen, contact, end_frame, start, end, conv):
+    """Height (m) of each seen ball position above the ground line `start` -> `end`.
+
+    The point below the ball moves along the straight line from `start` (at
+    `contact`) to `end` (at `end_frame`) at a constant speed; the height is the
+    image distance from that point up to the ball, at the image scale there.
+    """
+    start, end = np.asarray(start, float), np.asarray(end, float)
+    m_to_px = np.linalg.inv(conv._H)
+    heights = []
+    for frame, cy in zip(seen["frame"], seen["cy"]):
+        below = start + (frame - contact) / (end_frame - contact) * (end - start)
+        _, v, w = m_to_px @ np.array([below[0], below[1], 1.0])
+        heights.append((v / w - cy) / _px_per_metre(conv, *below))
+    return heights
 
 
 def shot_flight(contact, pid, feet_m, next_contact, events, real_ball, conv, fps,
@@ -1066,22 +1092,41 @@ def shot_flight(contact, pid, feet_m, next_contact, events, real_ball, conv, fps
     seen = real_ball[real_ball["frame"].between(contact, bounce["frame"])]
     if seen.empty:
         return None
-    start = np.asarray(feet_m, float)
-    end = np.array([bounce["x_m"], bounce["y_m"]], float)
-    m_to_px = np.linalg.inv(conv._H)
-    heights = []
-    for frame, cy in zip(seen["frame"], seen["cy"]):
-        below = start + (frame - contact) / (bounce["frame"] - contact) * (end - start)
-        _, v, w = m_to_px @ np.array([below[0], below[1], 1.0])
-        heights.append((v / w - cy) / _px_per_metre(conv, *below))
+    heights = _flight_heights(seen, contact, bounce["frame"], feet_m,
+                              (bounce["x_m"], bounce["y_m"]), conv)
     return {"time_s": (bounce["frame"] - contact) / fps,
             "depth_m": abs(bounce["y_m"] - NET),
             "apex_m": max(heights)}
 
 
-def classify_flight(flight, params=None):
-    """flat / dropshot / lob / slice from shot_flight."""
+def air_flight(contact, feet_m, next_contact, next_feet_m, real_ball, fps, conv,
+               params=None):
+    """Flight of a shot the opponent took in the air: up to their contact, or None.
+
+    {"time_s", "depth_m" (NaN: it never landed), "apex_m", "rise_m", "in_air": True}.
+    The ground line ends at the feet of the player who took it (`next_feet_m`);
+    rise_m is how much the ball climbed from its first seen position to the apex.
+    """
     p = params or FLIGHT_PARAMS
+    if next_feet_m is None or not np.isfinite(next_contact) or next_contact <= contact:
+        return None
+    seen = real_ball[real_ball["frame"].between(contact + 1, next_contact - 1)]
+    if len(seen) < p["air_min_points"]:
+        return None
+    heights = _flight_heights(seen, contact, next_contact, feet_m, next_feet_m, conv)
+    return {"time_s": (next_contact - contact) / fps, "depth_m": np.nan,
+            "apex_m": max(heights), "rise_m": max(heights) - heights[0], "in_air": True}
+
+
+def classify_flight(flight, params=None):
+    """flat / dropshot / lob / slice from shot_flight; lob or None from air_flight."""
+    p = params or FLIGHT_PARAMS
+    if flight.get("in_air"):
+        # No landing point: only a lob is told, the rest is left to the shape.
+        if (flight["time_s"] >= p["slow_flight_s"] and flight["apex_m"] >= p["air_lob_apex_m"]
+                and flight["rise_m"] >= p["air_lob_rise_m"]):
+            return "lob"
+        return None
     if flight["time_s"] < p["slow_flight_s"]:
         return "flat"
     if flight["depth_m"] <= p["drop_depth_m"]:
@@ -1251,8 +1296,16 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
         if flight_known:
             next_contact = hits[k + 1][0] if k + 1 < len(hits) else np.inf
             flight = shot_flight(f, pid, impact, next_contact, events, real_ball, conv, fps)
+            if (flight is None and not is_serve and k + 1 < len(hits)
+                    and hits[k + 1][1] != pid):
+                # No bounce before the reply: the opponent took it in the air (a
+                # serve that is not returned in the air is never a lob).
+                next_f, next_pid = hits[k + 1][0], hits[k + 1][1]
+                next_box = _nearest_box(boxes, next_f, next_pid, radius=15)
+                next_feet = conv.to_meters(*_box_feet(next_box)) if next_box else None
+                flight = air_flight(f, impact, next_f, next_feet, real_ball, fps, conv)
         if flight is not None:
-            shot_type = classify_flight(flight)
+            shot_type = classify_flight(flight) or shot_type
         if (flight_known and not (is_serve or is_smash) and shot_type != "dropshot"
                 and is_volley(f, pid, player_y_m, hits[k - 1] if k else None,
                               events, real_ball, conv, fps)):
@@ -1282,7 +1335,8 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
             "shot_type": shot_type,
             "overhead": overhead,
             "flight_s": round(flight["time_s"], 2) if flight else None,
-            "landing_depth_m": round(flight["depth_m"], 1) if flight else None,
+            "landing_depth_m": (round(flight["depth_m"], 1)
+                                if flight and np.isfinite(flight["depth_m"]) else None),
             "apex_m": round(flight["apex_m"], 1) if flight else None,
             "ball_pace": (round(feats["pace"], 1)
                           if feats["pace"] is not None
