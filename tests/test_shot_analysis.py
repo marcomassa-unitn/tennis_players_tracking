@@ -127,21 +127,53 @@ def _ball_from(conv, frames, y_from, y_to):
     return pd.DataFrame(rows, columns=["frame", "cx", "cy"])
 
 
+def _smash_boxes(conv, contact, y_m=None):
+    """A player raising the arm up to `contact`, the racket high for 3 frames."""
+    boxes = _server_boxes(conv, 2, 0, 150, contact, y_m=y_m)
+    for f in (contact - 2, contact - 1):
+        x, y, w, h = boxes[f][2]
+        boxes[f][2] = (x, y + h - 340.0, w, 340.0)
+    return boxes
+
+
+def _falling_on(boxes, contact, pid=2):
+    """A lob seen coming down above the striker's head before `contact`."""
+    x, y, w, h = boxes[contact][pid]
+    return pd.DataFrame({"frame": range(contact - 12, contact - 4),
+                         "cx": x + w / 2, "cy": np.linspace(y - 120, y - 30, 8)})
+
+
 def test_a_smash_hit_out_of_sight_is_found_from_the_motion_and_the_ball(conv):
-    boxes = _server_boxes(conv, 2, 0, 150, 80, y_m=6.0)
-    ball = _ball_from(conv, range(84, 100), 7.0, 20.0)
+    boxes = _smash_boxes(conv, 80, y_m=6.0)
+    ball = pd.concat([_falling_on(boxes, 80), _ball_from(conv, range(84, 100), 7.0, 20.0)])
     assert detect_smashes(boxes, conv, 30.0, ball) == [(80, 2)]
 
 
+def test_no_smash_without_a_ball_coming_down_from_above(conv):
+    boxes = _smash_boxes(conv, 80, y_m=6.0)
+    x, y, w, h = boxes[80][2]
+    low = pd.DataFrame({"frame": range(68, 76), "cx": x + w / 2, "cy": y + 0.8 * h})  # at the knees
+    for before in (None, low):
+        ball = pd.concat([before, _ball_from(conv, range(84, 100), 7.0, 20.0)])
+        assert detect_smashes(boxes, conv, 30.0, ball) == []
+
+
+def test_a_box_grown_for_one_frame_is_no_raised_arm(conv):
+    boxes = _server_boxes(conv, 2, 0, 150, 80, y_m=6.0)    # the peak lasts one frame only
+    ball = pd.concat([_falling_on(boxes, 80), _ball_from(conv, range(84, 100), 7.0, 20.0)])
+    assert detect_smashes(boxes, conv, 30.0, ball) == []
+
+
 def test_an_arm_raised_while_the_ball_is_elsewhere_is_no_smash(conv):
-    boxes = _server_boxes(conv, 2, 0, 150, 80, y_m=11.0)
-    ball = _ball_from(conv, range(84, 100), 20.0, 15.0)   # already past, on the other side
+    boxes = _smash_boxes(conv, 80, y_m=11.0)
+    ball = pd.concat([_falling_on(boxes, 80),
+                      _ball_from(conv, range(84, 100), 20.0, 15.0)])   # already past, other side
     assert detect_smashes(boxes, conv, 30.0, ball) == []
 
 
 def test_the_same_motion_from_the_baseline_is_no_smash(conv):
-    boxes = _server_boxes(conv, 2, 0, 150, 80)
-    ball = _ball_from(conv, range(84, 100), 1.0, 20.0)
+    boxes = _smash_boxes(conv, 80)
+    ball = pd.concat([_falling_on(boxes, 80), _ball_from(conv, range(84, 100), 1.0, 20.0)])
     assert detect_smashes(boxes, conv, 30.0, ball) == []
 
 
@@ -269,8 +301,8 @@ def test_a_reply_proves_the_contact(conv):
 
 
 def test_a_smash_still_counts_if_a_stray_point_shows_up_on_the_striker_side_at_the_end(conv):
-    boxes = _server_boxes(conv, 2, 0, 150, 80, y_m=6.0)
-    ball = pd.concat([_ball_from(conv, range(84, 100), 7.0, 20.0),
+    boxes = _smash_boxes(conv, 80, y_m=6.0)
+    ball = pd.concat([_falling_on(boxes, 80), _ball_from(conv, range(84, 100), 7.0, 20.0),
                       _ball_from(conv, range(100, 104), 5.0, 5.0)])
     assert detect_smashes(boxes, conv, 30.0, ball) == [(80, 2)]
 
