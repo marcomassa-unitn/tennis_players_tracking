@@ -1032,15 +1032,19 @@ def stroke_from_impact(impact_x, feet_x, side, hand, params=None):
 # ── shot type from the flight ──────────────────────────────────────────────────
 #
 # Once a shot's bounce is known its type comes from the flight itself, which is
-# physics rather than image shape. A rally ball crosses in under a second; of the
-# slower ones a dropshot lands short, a lob flies high, and a slice floats low.
+# physics rather than image shape. Only a dropshot lands this close to the net,
+# however it flies (a ball that short and fast is one that hit the net, or a
+# wrong bounce). A rally ball crosses in under a second; of the slower ones a lob
+# flies high, and a slice floats low.
 # A volley is told by what came before: the ball never touched the ground. A
 # dropshot stays one even when played in the air.
 
 FLIGHT_PARAMS = {
     "slow_flight_s": 1.05,   # a longer flight is no longer a rally ball
-    "drop_depth_m": 4.5,     # a dropshot lands this close to the net...
-    "lob_apex_m": 2.0,       # ...a lob flies above this height (the net is 0.91 m)
+    "drop_depth_m": 4.0,     # a dropshot lands this close to the net (service line 6.4)...
+    "drop_min_flight_s": 0.7,  # ...after a flight this long at least: shorter ones that
+                             # land there hit the net (they last 0.5 s at most)
+    "lob_apex_m": 2.0,       # a slow ball flying above this is a lob (the net is 0.91 m)
     "late_bounce_s": 0.1,    # a bounce may follow the next contact by this much
     "volley_net_m": 9.0,     # a volley is played at most this far from the net, about
                              # halfway between the service line and the baseline
@@ -1118,8 +1122,11 @@ def air_flight(contact, feet_m, next_contact, next_feet_m, real_ball, fps, conv,
             "apex_m": max(heights), "rise_m": max(heights) - heights[0], "in_air": True}
 
 
-def classify_flight(flight, params=None):
-    """flat / dropshot / lob / slice from shot_flight; lob or None from air_flight."""
+def classify_flight(flight, params=None, serve=False):
+    """flat / dropshot / lob / slice from shot_flight; lob or None from air_flight.
+
+    A serve is never a dropshot: it lands in the service box by the rules.
+    """
     p = params or FLIGHT_PARAMS
     if flight.get("in_air"):
         # No landing point: only a lob is told, the rest is left to the shape.
@@ -1127,10 +1134,11 @@ def classify_flight(flight, params=None):
                 and flight["rise_m"] >= p["air_lob_rise_m"]):
             return "lob"
         return None
+    if (not serve and flight["depth_m"] <= p["drop_depth_m"]
+            and flight["time_s"] >= p["drop_min_flight_s"]):
+        return "dropshot"
     if flight["time_s"] < p["slow_flight_s"]:
         return "flat"
-    if flight["depth_m"] <= p["drop_depth_m"]:
-        return "dropshot"
     return "lob" if flight["apex_m"] >= p["lob_apex_m"] else "slice"
 
 
@@ -1305,7 +1313,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                 next_feet = conv.to_meters(*_box_feet(next_box)) if next_box else None
                 flight = air_flight(f, impact, next_f, next_feet, real_ball, fps, conv)
         if flight is not None:
-            shot_type = classify_flight(flight) or shot_type
+            shot_type = classify_flight(flight, serve=is_serve) or shot_type
         if (flight_known and not (is_serve or is_smash) and shot_type != "dropshot"
                 and is_volley(f, pid, player_y_m, hits[k - 1] if k else None,
                               events, real_ball, conv, fps)):
