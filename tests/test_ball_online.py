@@ -192,3 +192,35 @@ def test_a_missed_frame_is_read_again_where_the_ball_must_be():
     assert tracker.refill(10, (700.0, 400.0)) is None            # too far from the gap
     assert tracker.refill(11, (602.0, 400.0)) is None            # nothing kept for it
     assert tracker.backend.conf == 0.15                          # threshold restored
+
+
+class _BallAndCap(DiffBlobBackend):
+    """The moving ball (from the difference) plus a still white cap the model loves."""
+
+    name = "ball+cap"
+
+    def detect(self, crops):
+        out = super().detect(crops)
+        for dets, img in zip(out, crops):
+            ys, xs = np.nonzero(img[..., 2] > 245)             # gray channel: the cap
+            if len(xs):
+                dets.append((xs.min() - 1.0, ys.min() - 1.0, xs.max() + 1.0, ys.max() + 1.0, 0.95))
+        return out
+
+
+def test_a_still_ball_lookalike_neither_starts_nor_holds_a_track():
+    frames, centres = _clip()
+    for f in frames:                                            # a ball kid's cap, never moving
+        cv2.circle(f, (400, 460), 7, (255, 255, 255), -1)
+    bg = OnlineBackground(30, (W, H), PROC, roi=(100, 100, 1180, 700), threaded=False,
+                          warmup_s=1.0, refresh_s=1.0)
+    tracker = OnlineBallTracker(_BallAndCap(), bg.scale, H, search="tiles")
+    found = on_cap = 0
+    for i, f in enumerate(frames):
+        live, rows = tracker.step(i, f, bg.snapshot)
+        bg.feed(i, f)
+        if i >= 45 and live is not None and live["detected"]:
+            found += np.hypot(live["cx"] - centres[i][0], live["cy"] - centres[i][1]) < 5
+            on_cap += np.hypot(live["cx"] - 400, live["cy"] - 460) < 10
+    assert on_cap == 0
+    assert found >= 0.9 * (len(frames) - 45)
