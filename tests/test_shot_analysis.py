@@ -12,7 +12,9 @@ from analysis.shot_analysis import (
     BOUNCE_FAR,
     BOUNCE_NEAR,
     HIT_FAR,
+    _px_per_metre,
     _synthetic_court_csv,
+    air_flight,
     analyze_shots,
     classify_flight,
     detect_serves,
@@ -66,6 +68,40 @@ def test_flight_gives_the_shot_type():
     assert classify_flight(flight(1.3, 3.0, 2.3)) == "dropshot"
     assert classify_flight(flight(1.4, 10.0, 3.5)) == "lob"
     assert classify_flight(flight(1.3, 9.0, 1.3)) == "slice"
+
+
+def test_a_ball_taken_in_the_air_is_a_lob_only_if_slow_high_and_rising():
+    def air(time_s, apex_m, rise_m):
+        return {"time_s": time_s, "depth_m": np.nan, "apex_m": apex_m, "rise_m": rise_m,
+                "in_air": True}
+
+    assert classify_flight(air(1.6, 4.5, 3.0)) == "lob"
+    assert classify_flight(air(0.8, 4.5, 3.0)) is None        # a fast ball: no lob
+    assert classify_flight(air(1.6, 2.5, 1.5)) is None        # not high enough
+    assert classify_flight(air(1.6, 4.0, 0.2)) is None        # hit down from its highest
+
+
+def _arc(conv, frames, y_from, y_to, apex_m):
+    """A ball flying straight down the middle from `y_from` to `y_to` (metres) on a
+    parabola `apex_m` high, as image detections."""
+    m_to_px = np.linalg.inv(conv._H)
+    rows = []
+    for i, f in enumerate(frames):
+        t = i / (len(frames) - 1)
+        y = y_from + (y_to - y_from) * t
+        u, v, w = m_to_px @ np.array([W_m / 2, y, 1.0])
+        h = 4 * apex_m * t * (1 - t)
+        rows.append((f, u / w, v / w - h * _px_per_metre(conv, W_m / 2, y)))
+    return pd.DataFrame(rows, columns=["frame", "cx", "cy"])
+
+
+def test_the_flight_to_a_contact_in_the_air_measures_the_lob(conv):
+    ball = _arc(conv, range(100, 161), L_m - 1.0, 3.0, 6.0)   # a lob over a player at the net
+    flight = air_flight(100, (W_m / 2, L_m - 1.0), 160, (W_m / 2, 3.0), ball, 30.0, conv)
+    assert flight["time_s"] == pytest.approx(2.0)
+    assert flight["apex_m"] == pytest.approx(6.0, abs=0.2)
+    assert classify_flight(flight) == "lob"
+    assert air_flight(100, (W_m / 2, L_m - 1.0), 160, None, ball, 30.0, conv) is None
 
 
 def _bounce_at(frame, event):
