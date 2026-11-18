@@ -1041,7 +1041,8 @@ def stroke_from_impact(impact_x, feet_x, side, hand, params=None):
 
 FLIGHT_PARAMS = {
     "slow_flight_s": 1.05,   # a longer flight is no longer a rally ball
-    "drop_depth_m": 4.0,     # a dropshot lands this close to the net (service line 6.4)...
+    "drop_depth_m": 4.5,     # a dropshot lands this close to the net (service line 6.4,
+                             # sharp angles land at 4.2-4.3 m too: dropshots or near it)...
     "drop_min_flight_s": 0.7,  # ...after a flight this long at least: shorter ones that
                              # land there hit the net (they last 0.5 s at most)
     "lob_apex_m": 2.0,       # a slow ball flying above this is a lob (the net is 0.91 m)
