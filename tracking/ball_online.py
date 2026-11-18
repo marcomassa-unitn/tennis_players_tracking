@@ -226,9 +226,27 @@ class OnlineBallTracker:
         self.lost_high = None          # (frame lost, cx, cy): a ball that left at the top
         self.n_high_found = 0
         self.last_seen = None          # (frame, cx, cy) of the last detection followed
+        self.last_vel = None           # its velocity (px/frame), from the Kalman filter
+        self.last_players = ()         # the player boxes then
+        self.reach = None              # ball_reach.BallReach, once the court is known
+        self.n_refused = 0             # SEARCH detections the ball could not reach
 
     def set_search_roi(self, roi):
         self.search_roi = roi
+
+    def set_reach(self, reach):
+        """After a loss, start again only where the ball can be (ball_reach)."""
+        self.reach = reach
+
+    def _reachable(self, frame_idx, det):
+        """Can the ball lost at last_seen be at detection `det` now?"""
+        if self.reach is None or self.last_seen is None:
+            return True
+        f, cx, cy = self.last_seen
+        ok = self.reach.allowed((cx, cy), ((det[0] + det[2]) / 2, (det[1] + det[3]) / 2),
+                                frame_idx - f, self.last_vel, self.last_players)
+        self.n_refused += not ok
+        return ok
 
     def _search_region(self, snap):
         """The blind SEARCH region inside the background region (background coords)."""
@@ -374,11 +392,13 @@ class OnlineBallTracker:
 
     # ── state machine ────────────────────────────────────────────────────────
 
-    def _start(self, frame_idx, det, v=(0.0, 0.0)):
-        self.kf = Kalman(((det[0] + det[2]) / 2, (det[1] + det[3]) / 2), v, self.s)
+    def _start(self, frame_idx, det, v=None):
+        self.kf = Kalman(((det[0] + det[2]) / 2, (det[1] + det[3]) / 2),
+                         (0.0, 0.0) if v is None else v, self.s)
         self.state, self.misses, self.tentative = self.TRACKING, 0, []
         self.lost_high = None
         self.last_seen = (frame_idx, (det[0] + det[2]) / 2, (det[1] + det[3]) / 2)
+        self.last_vel, self.last_players = v, ()
 
     def _look_where_lost(self, frame_idx, frame, gray, snap, shift):
         """SEARCH for a ball that left at the top: crops where it was last seen.
@@ -416,6 +436,9 @@ class OnlineBallTracker:
         pocket) would hold the track there and keep the search from the real ball.
         """
         good = [d for d, r in zip(dets, rows) if d[4] >= ACQUIRE_CONF and r[6] >= MIN_MOTION]
+        # ...and only where the ball lost a moment ago can be by now (ball_reach): a
+        # confident detection on the other player's head is no reason to jump there.
+        good = [d for d in good if self._reachable(frame_idx, d)]
         self.tentative = [t for t in self.tentative if frame_idx - t[0] <= ACQUIRE_FRAMES]
         if not good:
             return None
@@ -518,6 +541,8 @@ class OnlineBallTracker:
         if chosen is not None:
             self.misses = 0
             self.last_seen = (frame_idx, (chosen[0] + chosen[2]) / 2, (chosen[1] + chosen[3]) / 2)
+            self.last_vel = np.array(self.kf.x[2:4], float)
+            self.last_players = tuple(players)
         else:
             self._keep_missed(frame_idx, frame, origin, (dx, dy), (px, py), players)
             self.misses += 1

@@ -311,29 +311,52 @@ class PathDP:
     backtrack() follows the parents back from a node. track_candidates() pushes the
     whole clip and backtracks once; OnlinePathDP backtracks a little after every
     frame and commits what is old enough.
+
+    reach (ball_reach.BallReach, optional): every link, and every restart from an
+    earlier path, must also be physically possible from where the ball was going
+    (the velocity of the best path into the node) or from the racket of a player
+    it was on (players passed to push()). A false object a few frames after the
+    ball, on a player or a ball kid, then starts a path of its own, which has to
+    beat the ball's rather than extend it. Without it, as offline, only
+    MAX_SPEED_PX (pixels per frame) limits a link.
     """
 
-    def __init__(self, fps, frame_height=1080):
+    def __init__(self, fps, frame_height=1080, reach=None):
         self.s = frame_height / 1080
         self.max_speed = MAX_SPEED_PX * self.s
         self.max_link = max(1, int(round(MAX_LINK_S * fps)))
+        self.reach = reach
         self.rows, self.pos, self.best, self.back = {}, {}, {}, {}
-        self.run_best = (0.0, None)     # best score among nodes older than the link window
+        self.vel, self.players = {}, {}
+        # best score among nodes older than the link window: (score, node, pos, vel, players)
+        self.run_best = (0.0, None, None, None, ())
         self.pending = []               # frames whose nodes are still within the window
 
-    def push(self, f, r):
+    def _possible(self, g, i, f, b):
+        """Can the ball go from node (g, i) to position b at frame f? (reach only)"""
+        return self.reach.allowed(self.pos[g][i], b, f - g, self.vel[g][i], self.players[g])
+
+    def push(self, f, r, players=()):
         s = self.s
         while self.pending and self.pending[0] < f - self.max_link:
             g = self.pending.pop(0)
             k = int(np.argmax(self.best[g]))
             if self.best[g][k] > self.run_best[0]:
-                self.run_best = (self.best[g][k], (g, k))
+                self.run_best = (self.best[g][k], (g, k), self.pos[g][k], self.vel[g][k],
+                                 self.players.get(g, ()))
         pos_f = np.c_[(r[:, 1] + r[:, 3]) / 2, (r[:, 2] + r[:, 4]) / 2]
         gain = r[:, 5] + MOTION_BONUS * np.minimum(r[:, 6], 0.5) - CONF_BIAS
         n = len(pos_f)
-        # Start (or restart after the window) a path at this node.
-        score = np.full(n, self.run_best[0] - RESTART_COST)
-        parent = [self.run_best[1]] * n
+        # Start (or restart after the window) a path at this node: from the best
+        # earlier path if the ball can get here from its end, else afresh.
+        run_score, run_node, run_pos, run_vel, run_players = self.run_best
+        score = np.full(n, run_score - RESTART_COST)
+        parent = [run_node] * n
+        if self.reach is not None and run_node is not None:
+            for j in range(n):
+                if not self.reach.allowed(run_pos, pos_f[j], f - run_node[0], run_vel,
+                                          run_players):
+                    score[j], parent[j] = -RESTART_COST, None
         for g in self.pending:          # link from candidates in the previous frames
             gap = f - g
             pg = self.pos[g]
@@ -341,6 +364,10 @@ class PathDP:
                              pos_f[None, :, 1] - pg[:, None, 1]) / gap
             cost = SPEED_COST * speed / s + SKIP_COST * (gap - 1)
             cost[speed > self.max_speed] = np.inf
+            if self.reach is not None:
+                for i, j in zip(*np.nonzero(np.isfinite(cost))):
+                    if not self._possible(g, i, f, pos_f[j]):
+                        cost[i, j] = np.inf
             via = self.best[g][:, None] - cost
             i = np.argmax(via, axis=0)
             better = via[i, np.arange(n)] > score
@@ -349,6 +376,12 @@ class PathDP:
         self.rows[f], self.pos[f] = r, pos_f
         self.best[f] = score + gain
         self.back[f] = parent
+        self.players[f] = tuple(players)
+        vel = np.full((n, 2), np.nan)   # velocity of the best path into each node
+        for j, p in enumerate(parent):
+            if p is not None and p[0] in self.pos and f - p[0] <= self.max_link:
+                vel[j] = (pos_f[j] - self.pos[p[0]][p[1]]) / (f - p[0])
+        self.vel[f] = vel
         self.pending.append(f)
 
     def best_end(self, frames=None):
@@ -374,6 +407,8 @@ class PathDP:
         """Drop the nodes older than `frame`; their best score lives on in run_best."""
         for f in [f for f in self.best if f < frame and f not in self.pending]:
             del self.rows[f], self.pos[f], self.best[f], self.back[f]
+            self.vel.pop(f, None)
+            self.players.pop(f, None)
 
 
 def usable_candidates(cands):
@@ -424,8 +459,8 @@ class OnlinePathDP:
 
     WINDOW = 30                         # frames of context kept for the clean-up
 
-    def __init__(self, fps, frame_height=1080, lag=10, clean_lag=6):
-        self.dp = PathDP(fps, frame_height)
+    def __init__(self, fps, frame_height=1080, lag=10, clean_lag=6, reach=None):
+        self.dp = PathDP(fps, frame_height, reach)
         self.fps, self.height = fps, frame_height
         self.lag, self.clean_lag = lag, clean_lag
         self.first = None
@@ -440,9 +475,14 @@ class OnlinePathDP:
     def latency(self):
         return self.lag + self.clean_lag
 
-    def push(self, frame, rows):
+    def set_reach(self, reach):
+        """Check every link physically (ball_reach.BallReach) from now on."""
+        self.dp.reach = reach
+
+    def push(self, frame, rows, players=()):
         """Add the candidates [(frame, x1, y1, x2, y2, conf, motion, source)] of `frame`.
 
+        players: (x, y, w, h) boxes at `frame`, for the physical check of a hit.
         Returns the positions finalised by this call, {frame: box}.
         """
         if self.first is None:
@@ -454,7 +494,7 @@ class OnlinePathDP:
         good = [r[:7] for r in rows if r[5] >= MIN_TRACK_CONF
                 and (r[6] >= MIN_MOTION or frame == self.first)]
         if good:
-            self.dp.push(frame, np.array(good, float))
+            self.dp.push(frame, np.array(good, float), players)
         self._decide(frame - self.lag)
         return self._finalise(frame - self.lag - self.clean_lag)
 
