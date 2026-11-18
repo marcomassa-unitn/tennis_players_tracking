@@ -22,6 +22,10 @@ Three modes:
            ground, clicking the ball, or as hidden if the contact cannot be seen.
            Output CSV: frame,visible,x,y. Resumes an existing file.
 
+  shots  — watch every shot the pipeline found, in a loop, and press the key of its
+           type (flat, slice, dropshot, lob, volley, smash, serve, not a shot,
+           unsure). Output CSV: frame,player_id,label. Resumes an existing file.
+
 Usage (from project root):
     python evaluation/annotate.py boxes --video data/Input_video2.mp4 \\
         --step 30 --output ground_truth/players_Input_video2_gt.csv
@@ -36,6 +40,9 @@ Usage (from project root):
         --frames-from outputs/input10/ball_coordinates/ball_input10.csv
 
     python evaluation/annotate.py bounce --video data/Input_video2.mp4
+
+    # the shots of the real-time results (--results outputs for the offline ones):
+    python evaluation/annotate.py shots --video data/input22.mp4
 
 Keys (boxes mode, inside the OpenCV ROI selector):
     draw with the mouse, ENTER/SPACE = confirm box, c = cancel selection
@@ -52,7 +59,7 @@ from pathlib import Path
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils.paths import ground_truth_path
+from utils.paths import OUTPUT_ROOT, clip_paths, ground_truth_path
 
 DISPLAY_W = 1280  # display width; clicks are divided back to source coords
 
@@ -415,6 +422,145 @@ def annotate_bounce(video, start, output):
     print(f"\nSaved {len(labels)} bounces ({n_vis} visible) to {output}")
 
 
+# ── shots mode ─────────────────────────────────────────────────────────────────
+
+# key -> label. The labels are the pipeline's shot types (shot_type), plus the
+# overheads (its `overhead` column), a detection that is no shot, and "unsure".
+SHOT_KEYS = {
+    ord("f"): "flat", ord("s"): "slice", ord("d"): "dropshot", ord("l"): "lob",
+    ord("v"): "volley", ord("m"): "smash", ord("e"): "serve",
+    ord("x"): "not_a_shot", ord("k"): "unsure",
+}
+SHOT_LEAD = 20        # frames shown before the contact
+SHOT_TAIL = 75        # ...and at most this many after it (up to the next shot)
+
+
+def load_shot_labels(path):
+    """{frame: (player_id, label)} from a shot-type ground truth CSV."""
+    if not os.path.exists(path):
+        return {}
+    with open(path, newline="") as f:
+        return {int(r["frame"]): (int(r["player_id"]), r["label"]) for r in csv.DictReader(f)}
+
+
+def save_shot_labels(path, labels):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "player_id", "label"])
+        for fr in sorted(labels):
+            w.writerow([fr, *labels[fr]])
+
+
+def _player_boxes(players_csv):
+    """{(frame, pid): (x, y, w, h)} from a player tracker CSV, or {} if missing."""
+    if not players_csv or not os.path.exists(players_csv):
+        return {}
+    with open(players_csv, newline="") as f:
+        return {(int(r["frame"]), int(r["player_id"])): tuple(float(r[k]) for k in "xywh")
+                for r in csv.DictReader(f)}
+
+
+def _ball_points(ball_csv):
+    """{frame: (cx, cy)} of the real ball detections, or {} if missing."""
+    if not ball_csv or not os.path.exists(ball_csv):
+        return {}
+    with open(ball_csv, newline="") as f:
+        return {int(r["frame"]): (float(r["cx"]), float(r["cy"])) for r in csv.DictReader(f)
+                if not int(r.get("interpolated") or 0) and r.get("cx")}
+
+
+def annotate_shots(video, shots_csv, output, players_csv=None, ball_csv=None):
+    """Label the type of every shot the pipeline found, watching each one in a loop.
+
+    The clip plays from SHOT_LEAD frames before the contact to the next shot (at
+    most SHOT_TAIL frames after), the striker boxed, the ball's track drawn. The
+    pipeline's own type is not shown, so as not to steer the answer. A key labels
+    the shot and moves on; an existing output file is resumed.
+    """
+    with open(shots_csv, newline="") as f:
+        shots = sorted((int(r["frame"]), int(r["player_id"])) for r in csv.DictReader(f))
+    if not shots:
+        raise SystemExit(f"No shots in {shots_csv}")
+    cap = cv2.VideoCapture(video)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video}")
+    n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    boxes, ball = _player_boxes(players_csv), _ball_points(ball_csv)
+    labels = load_shot_labels(output)
+    keys = "  ".join(f"{chr(k)}={v}" for k, v in SHOT_KEYS.items())
+    print(f"{len(shots)} shots, {sum(1 for s in shots if s[0] in labels)} already labelled.")
+    print(keys)
+    print("b = previous shot   n = next shot (no label)   space = pause   "
+          "+/- = speed   q = save and quit\n")
+
+    win = "annotate shots"
+    cv2.namedWindow(win)
+    k = next((i for i, s in enumerate(shots) if s[0] not in labels), len(shots))
+    delay = max(1, int(1000 / fps * 2))           # half speed to start with
+    while 0 <= k < len(shots):
+        contact, pid = shots[k]
+        nxt = shots[k + 1][0] if k + 1 < len(shots) else n_total
+        first = max(0, contact - SHOT_LEAD)
+        last = min(n_total - 1, contact + SHOT_TAIL, nxt + 5)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, first)
+        fr, paused, frame, decided = first, False, None, None
+        while decided is None:
+            if not paused or frame is None:
+                ok, frame = cap.read()
+                if not ok or fr > last:                      # loop the shot
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, first)
+                    fr = first
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                shown = fr
+                fr += 1
+            disp, s = _scaled(frame)
+            box = boxes.get((shown, pid))
+            if box is not None:
+                x, y, w, h = (int(v * s) for v in box)
+                cv2.rectangle(disp, (x, y), (x + w, y + h), (0, 255, 255), 2)
+            trail = [ball[g] for g in range(max(first, shown - 12), shown + 1) if g in ball]
+            for i, (bx, by) in enumerate(trail):
+                cv2.circle(disp, (int(bx * s), int(by * s)), 3 + i // 4, (0, 140, 255), -1)
+            side = "near" if pid == 1 else "far"
+            done = labels.get(contact)
+            head = (f"shot {k + 1}/{len(shots)}  P{pid} ({side})  frame {shown}"
+                    f"{'  CONTACT' if abs(shown - contact) <= 1 else ''}"
+                    f"{f'  [labelled: {done[1]}]' if done else ''}")
+            cv2.putText(disp, head, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4)
+            cv2.putText(disp, head, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(disp, keys, (10, disp.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (255, 255, 255), 1)
+            cv2.imshow(win, disp)
+            key = cv2.waitKey(delay) & 0xFF
+            if key in SHOT_KEYS:
+                labels[contact] = (pid, SHOT_KEYS[key])
+                save_shot_labels(output, labels)
+                decided = 1
+            elif key == ord("n"):
+                decided = 1
+            elif key == ord("b"):
+                decided = -1
+            elif key == ord(" "):
+                paused = not paused
+            elif key in (ord("+"), ord("=")):
+                delay = max(1, delay // 2)
+            elif key == ord("-"):
+                delay = min(400, delay * 2)
+            elif key == ord("q"):
+                decided = 0
+        if decided == 0 or decided is None:
+            break
+        k = max(0, k + decided)
+    cap.release()
+    cv2.destroyAllWindows()
+    save_shot_labels(output, labels)
+    print(f"\nSaved {len(labels)} labelled shots to {output}")
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -456,10 +602,21 @@ def main():
     pn.add_argument("--output", default=None,
                     help="output CSV (default: ground_truth/bounce_<video name>_gt.csv)")
 
+    ps = sub.add_parser("shots", help="label the type of every shot the pipeline found")
+    ps.add_argument("--video", default="data/Input_video2.mp4")
+    ps.add_argument("--results", default=os.path.join(OUTPUT_ROOT, "realtime"),
+                    help="results folder whose shots are labelled (default: outputs/realtime)")
+    ps.add_argument("--output", default=None,
+                    help="output CSV (default: ground_truth/shots_<video name>_gt.csv)")
+
     args = parser.parse_args()
-    kinds = {"boxes": "players", "court": "court", "ball": "ball", "bounce": "bounce"}
+    kinds = {"boxes": "players", "court": "court", "ball": "ball", "bounce": "bounce",
+             "shots": "shots"}
     output = args.output or ground_truth_path(kinds[args.mode], args.video)
-    if args.mode == "boxes":
+    if args.mode == "shots":
+        p = clip_paths(args.video, args.results)
+        annotate_shots(args.video, p["shots_csv"], output, p["players_csv"], p["ball_csv"])
+    elif args.mode == "boxes":
         annotate_boxes(args.video, args.step, args.start, output)
     elif args.mode == "ball":
         skip = tracked_frames(args.frames_from) if args.frames_from else ()

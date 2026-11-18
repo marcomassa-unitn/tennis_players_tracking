@@ -52,5 +52,5 @@ def clip_paths(video: str, output: str = OUTPUT_ROOT) -> dict:
 
 
 def ground_truth_path(kind: str, video: str) -> str:
-    """Annotation file of a clip; `kind` is players, court, ball or bounce."""
+    """Annotation file of a clip; `kind` is players, court, ball, bounce or shots."""
     return os.path.join(GROUND_TRUTH_DIR, f"{kind}_{clip_stem(video)}_gt.csv")
