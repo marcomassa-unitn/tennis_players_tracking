@@ -1035,19 +1035,30 @@ def stroke_from_impact(impact_x, feet_x, side, hand, params=None):
 # physics rather than image shape. Only a dropshot lands this close to the net,
 # and it is slow: its mean speed over the ground (impact to bounce) is low,
 # however short the flight (a dropshot played from near the net lands soon). A
-# ball that short and fast hit the net, or is a wrong bounce. A rally ball crosses
-# in under a second; of the slower ones a lob flies high, and a slice floats low.
+# ball that short and fast hit the net, or is a wrong bounce. Of the other balls a
+# lob is slow and flies high, a slice is slow and floats low; the rest are drives.
 # A volley is told by what came before: the ball never touched the ground. A
-# dropshot stays one even when played in the air.
+# dropshot or a lob stays one even when played in the air.
+#
+# Heights come from one camera: the point below the ball is placed on the ground
+# line, and the ball slows down in the air, so that point does not move at a
+# constant speed: it covers more ground early on (drag_per_s). Moving it evenly
+# put the near player's balls ~0.7 m too high and the far player's too low.
+# The thresholds fit 49 hand-labelled shots with a bounce (4 clips; held out one
+# clip at a time, 43/49 right against 37/49 for the earlier flight-time rules).
 
 FLIGHT_PARAMS = {
-    "slow_flight_s": 1.05,   # a longer flight is no longer a rally ball
+    "slow_flight_s": 1.05,   # a ball taken in the air after a longer flight is no rally ball
+    "drag_per_s": 1.0,       # horizontal speed ~ exp(-drag * t): equal heights both sides
     "drop_depth_m": 4.5,     # a dropshot lands this close to the net (service line 6.4,
                              # sharp angles land at 4.2-4.3 m too: dropshots or near it)...
     "drop_max_speed_ms": 20.0,  # ...at this mean ground speed at most (impact to bounce):
                              # dropshots fly at 4-18 m/s, balls into the net and serves
                              # landing there at 23-67 m/s
-    "lob_apex_m": 2.0,       # a slow ball flying above this is a lob (the net is 0.91 m)
+    "lob_apex_m": 2.5,       # a lob flies above this (drives reach 3 m, but fast)...
+    "lob_max_speed_ms": 15.0,  # ...at this mean ground speed at most (lobs 8-13 m/s)
+    "slice_max_speed_ms": 21.0,  # a slice is this slow at most (16.8-20.9 m/s)...
+    "slice_apex_m": 1.5,     # ...and flies lower than this (the net is 0.91 m)
     "late_bounce_s": 0.1,    # a bounce may follow the next contact by this much
     "volley_net_m": 9.0,     # a volley is played at most this far from the net, about
                              # halfway between the service line and the baseline
@@ -1064,18 +1075,23 @@ FLIGHT_PARAMS = {
 }
 
 
-def _flight_heights(seen, contact, end_frame, start, end, conv):
+def _flight_heights(seen, contact, end_frame, start, end, conv, fps, drag=None):
     """Height (m) of each seen ball position above the ground line `start` -> `end`.
 
     The point below the ball moves along the straight line from `start` (at
-    `contact`) to `end` (at `end_frame`) at a constant speed; the height is the
-    image distance from that point up to the ball, at the image scale there.
+    `contact`) to `end` (at `end_frame`), slowing down as the ball does (speed ~
+    exp(-drag * t)); the height is the image distance from that point up to the
+    ball, at the image scale there.
     """
     start, end = np.asarray(start, float), np.asarray(end, float)
     m_to_px = np.linalg.inv(conv._H)
+    k = FLIGHT_PARAMS["drag_per_s"] if drag is None else drag
+    span = (end_frame - contact) / fps
     heights = []
     for frame, cy in zip(seen["frame"], seen["cy"]):
-        below = start + (frame - contact) / (end_frame - contact) * (end - start)
+        t = (frame - contact) / fps
+        frac = t / span if k == 0 else (1 - np.exp(-k * t)) / (1 - np.exp(-k * span))
+        below = start + frac * (end - start)
         _, v, w = m_to_px @ np.array([below[0], below[1], 1.0])
         heights.append((v / w - cy) / _px_per_metre(conv, *below))
     return heights
@@ -1101,7 +1117,7 @@ def shot_flight(contact, pid, feet_m, next_contact, events, real_ball, conv, fps
     if seen.empty:
         return None
     heights = _flight_heights(seen, contact, bounce["frame"], feet_m,
-                              (bounce["x_m"], bounce["y_m"]), conv)
+                              (bounce["x_m"], bounce["y_m"]), conv, fps, p["drag_per_s"])
     time_s = (bounce["frame"] - contact) / fps
     ground_m = float(np.hypot(bounce["x_m"] - feet_m[0], bounce["y_m"] - feet_m[1]))
     return {"time_s": time_s,
@@ -1124,7 +1140,8 @@ def air_flight(contact, feet_m, next_contact, next_feet_m, real_ball, fps, conv,
     seen = real_ball[real_ball["frame"].between(contact + 1, next_contact - 1)]
     if len(seen) < p["air_min_points"]:
         return None
-    heights = _flight_heights(seen, contact, next_contact, feet_m, next_feet_m, conv)
+    heights = _flight_heights(seen, contact, next_contact, feet_m, next_feet_m, conv, fps,
+                              p["drag_per_s"])
     return {"time_s": (next_contact - contact) / fps, "depth_m": np.nan,
             "apex_m": max(heights), "rise_m": max(heights) - heights[0], "in_air": True}
 
@@ -1144,9 +1161,11 @@ def classify_flight(flight, params=None, serve=False):
     if (not serve and flight["depth_m"] <= p["drop_depth_m"]
             and flight["speed_ms"] <= p["drop_max_speed_ms"]):
         return "dropshot"
-    if flight["time_s"] < p["slow_flight_s"]:
-        return "flat"
-    return "lob" if flight["apex_m"] >= p["lob_apex_m"] else "slice"
+    if flight["apex_m"] >= p["lob_apex_m"] and flight["speed_ms"] <= p["lob_max_speed_ms"]:
+        return "lob"
+    if flight["speed_ms"] <= p["slice_max_speed_ms"] and flight["apex_m"] < p["slice_apex_m"]:
+        return "slice"
+    return "flat"
 
 
 def _speed_to_opponent(real_ball, first, last, pid, conv, fps):
@@ -1321,7 +1340,7 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                 flight = air_flight(f, impact, next_f, next_feet, real_ball, fps, conv)
         if flight is not None:
             shot_type = classify_flight(flight, serve=is_serve) or shot_type
-        if (flight_known and not (is_serve or is_smash) and shot_type != "dropshot"
+        if (flight_known and not (is_serve or is_smash) and shot_type not in ("dropshot", "lob")
                 and is_volley(f, pid, player_y_m, hits[k - 1] if k else None,
                               events, real_ball, conv, fps)):
             shot_type = "volley"
