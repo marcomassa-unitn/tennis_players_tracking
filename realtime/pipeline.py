@@ -37,6 +37,7 @@ from realtime.source import FrameSource
 from realtime.timing import StageTimer
 from tracking.ball_model import CROP, load_backend
 from tracking.ball_online import OnlineBallTracker, court_roi, track_region
+from tracking.ball_reach import BallReach
 from tracking.ball_tracking import (
     CANDIDATE_COLUMNS,
     OnlinePathDP,
@@ -164,6 +165,9 @@ class RealtimePipeline:
         self.conv = CourtConverter(p["court_csv"])
         self.bg.set_roi(track_region(self.conv, self.src.width, self.src.height))
         self.ball.set_search_roi(court_roi(self.conv, self.src.width, self.src.height))
+        reach = BallReach(self.conv, self.src.fps, self.src.height)
+        self.ball.set_reach(reach)
+        self.path.set_reach(reach)
         if self.players_csv_in:
             df = pd.read_csv(self.players_csv_in)
             self.offline_players = {f: {int(r.player_id): (r.x, r.y, r.w, r.h)
@@ -302,7 +306,7 @@ class RealtimePipeline:
                         live, rows, ms = ball_job.result()
                     tm.rows.append((idx, "ball", ms))
                     with tm.stage(idx, "ball_path"):
-                        finals = self.path.push(idx, rows)
+                        finals = self.path.push(idx, rows, list(boxes.values()))
                         self._refill(finals)
                     candidates += rows
                     if live is not None:
@@ -433,6 +437,7 @@ class RealtimePipeline:
             "ball_fallback": self.fallback,
             "ball_refilled": self.ball.n_refilled,
             "ball_found_again_high": self.ball.n_high_found,
+            "ball_search_unreachable": self.ball.n_refused,
             "ball_fallback_crops_per_frame": round(
                 self.ball.n_fallback / max(len(self.timer.frame_ms), 1), 3),
             "ball_positions_final": len(self.path.final),

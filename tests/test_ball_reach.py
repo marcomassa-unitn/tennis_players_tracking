@@ -1,0 +1,87 @@
+import pytest
+
+from analysis.shot_analysis import _synthetic_court_csv
+from tracking.ball_online import OnlineBallTracker
+from tracking.ball_reach import BallReach
+from tracking.ball_tracking import OnlinePathDP
+from utils.court_converter import CourtConverter
+
+# The synthetic court: far baseline at y = 300 px (x 700-1200), near one at y = 860.
+
+
+@pytest.fixture
+def reach(tmp_path):
+    path = tmp_path / "court.csv"
+    _synthetic_court_csv(str(path))
+    return BallReach(CourtConverter(str(path)), 30.0)
+
+
+def test_a_ball_carries_on_its_motion(reach):
+    assert reach.allowed((950, 400), (962, 380), 4, velocity=(3, -5))
+
+
+def test_the_top_of_a_lob_cannot_be_on_the_near_player_four_frames_later(reach):
+    assert not reach.allowed((950, 290), (950, 700), 4, velocity=(0, -3))
+
+
+def test_the_longer_the_ball_is_unseen_the_farther_it_may_be(reach):
+    assert reach.allowed((950, 290), (950, 700), 20, velocity=(0, -3))
+
+
+def test_a_hit_sends_the_ball_wherever_it_can_reach(reach):
+    near = (900, 650, 80, 200)                       # the near player, feet at y = 850
+    on_racket, going_up = (930, 700), (950, 330)     # a lob, seen high 4 frames later
+    assert reach.allowed(on_racket, going_up, 4, velocity=(0, 30), players=[near])
+    assert not reach.allowed(on_racket, going_up, 4, velocity=(0, 30))   # nobody hit it
+
+
+def test_with_no_motion_known_only_the_impossible_is_refused(reach):
+    assert reach.allowed((950, 290), (950, 700), 4)                  # maybe high over the court
+    assert not reach.allowed((700, 300), (1500, 860), 1)             # corner to corner in a frame
+
+
+def _lob_with_a_false_object():
+    """A lob rising and coming back down, lost for a while; meanwhile something
+    confident by the near player (a head, a racket) for 7 frames."""
+    rows = []
+    for f in list(range(0, 21)) + list(range(34, 61)):
+        x, y = 950.0, 700 - 20 * f + 0.25 * f * f
+        rows.append((f, x - 7, y - 7, x + 7, y + 7, 0.7, 0.5, "crop"))
+    for f in range(24, 31):
+        rows.append((f, 1093.0, 743.0, 1107.0, 757.0, 0.6, 0.5, "search"))
+    return rows
+
+
+def _final(dp, rows, last=70):
+    by = {}
+    for r in rows:
+        by.setdefault(r[0], []).append(r)
+    for f in range(last):
+        dp.push(f, by.get(f, []))
+    dp.flush()
+    return dp.final
+
+
+def test_the_path_does_not_jump_onto_a_false_object(reach):
+    rows = _lob_with_a_false_object()
+    plain = _final(OnlinePathDP(30.0), rows)
+    assert any(f in plain for f in range(24, 31))             # 95 px/frame: linked before
+    checked = _final(OnlinePathDP(30.0, reach=reach), rows)
+    assert not any(f in checked for f in range(24, 31))
+    assert all(f in checked for f in range(34, 61))            # the ball, found again
+
+
+class _Nothing:
+    name = "none"
+
+    def detect(self, crops):
+        return [[] for _ in crops]
+
+
+def test_the_search_starts_again_only_where_the_lost_ball_can_be(reach):
+    tracker = OnlineBallTracker(_Nothing(), 0.5, 1080)
+    tracker.set_reach(reach)
+    tracker.last_seen, tracker.last_vel = (10, 950.0, 290.0), (0.0, -3.0)
+    assert not tracker._reachable(14, (943, 693, 957, 707, 0.9))     # the near player's head
+    assert tracker._reachable(14, (943, 270, 957, 284, 0.9))         # near the top of the lob
+    assert tracker.n_refused == 1
