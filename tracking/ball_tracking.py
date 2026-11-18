@@ -81,6 +81,10 @@ SPEED_COST = 0.004         # path cost per px/frame of speed between linked node
 SKIP_COST = 0.1            # ...plus this per frame skipped between them
 MAX_LINK_S = 0.33          # nodes farther apart in time can only be joined by a restart
 RESTART_COST = 1.0         # starting a new path segment
+RESTART_ENDS = 20          # with a physical check: earlier path ends a restart may follow
+RIDE_FRAMES = 3            # a candidate in the same place of a player's box this many
+RIDE_TOL = 0.08            # frames before (within this fraction of the box) is part of
+                           # the player (a head, a hand), not the ball (online only)
 SPIKE_SPEED_PX = 80        # a detection this fast in and out...
 SPIKE_DETOUR = 3.0         # ...on a path this much longer than its neighbours' gap
                            # is a one-frame false positive
@@ -330,7 +334,19 @@ class PathDP:
         self.vel, self.players = {}, {}
         # best score among nodes older than the link window: (score, node, pos, vel, players)
         self.run_best = (0.0, None, None, None, ())
+        # with reach: the best few of those, so that a restart the ball cannot make
+        # from the very best (a false object) still continues the path it can
+        self.run_ends = []
         self.pending = []               # frames whose nodes are still within the window
+
+    def _restart_from(self, f, b):
+        """(score, parent) of a restart at position b of frame f."""
+        if self.reach is None:
+            return self.run_best[0] - RESTART_COST, self.run_best[1]
+        for score, _, node, pos, vel, players in self.run_ends:
+            if self.reach.allowed(pos, b, f - node[0], vel, players):
+                return score - RESTART_COST, node
+        return -RESTART_COST, None
 
     def _possible(self, g, i, f, b):
         """Can the ball go from node (g, i) to position b at frame f? (reach only)"""
@@ -344,19 +360,19 @@ class PathDP:
             if self.best[g][k] > self.run_best[0]:
                 self.run_best = (self.best[g][k], (g, k), self.pos[g][k], self.vel[g][k],
                                  self.players.get(g, ()))
+            if self.reach is not None:
+                self.run_ends += [(self.best[g][k], g, (g, k), self.pos[g][k], self.vel[g][k],
+                                   self.players.get(g, ())) for k in range(len(self.best[g]))]
+                self.run_ends.sort(key=lambda e: (-e[0], e[1]))
+                del self.run_ends[RESTART_ENDS:]
         pos_f = np.c_[(r[:, 1] + r[:, 3]) / 2, (r[:, 2] + r[:, 4]) / 2]
         gain = r[:, 5] + MOTION_BONUS * np.minimum(r[:, 6], 0.5) - CONF_BIAS
         n = len(pos_f)
         # Start (or restart after the window) a path at this node: from the best
-        # earlier path if the ball can get here from its end, else afresh.
-        run_score, run_node, run_pos, run_vel, run_players = self.run_best
-        score = np.full(n, run_score - RESTART_COST)
-        parent = [run_node] * n
-        if self.reach is not None and run_node is not None:
-            for j in range(n):
-                if not self.reach.allowed(run_pos, pos_f[j], f - run_node[0], run_vel,
-                                          run_players):
-                    score[j], parent[j] = -RESTART_COST, None
+        # earlier path the ball can get here from, else afresh.
+        starts = [self._restart_from(f, pos_f[j]) for j in range(n)]
+        score = np.array([s0 for s0, _ in starts], float)
+        parent = [p for _, p in starts]
         for g in self.pending:          # link from candidates in the previous frames
             gap = f - g
             pg = self.pos[g]
@@ -470,6 +486,28 @@ class OnlinePathDP:
         self.committed = {}             # frame -> box, from the path (recent only)
         self.blobs = set()              # (frame, x1, y1) of the motion candidates
         self.final = {}                 # frame -> box, after the clean-up
+        self.on_player = {}             # frame -> [(pid, rx, ry)] of candidates in a box
+        self.n_riding = 0               # candidates dropped as part of a player
+
+    def _rides_a_player(self, frame, cx, cy, players):
+        """True if (cx, cy) has kept its place in a player's box for RIDE_FRAMES frames.
+
+        A head, a hand or a wristband moves with the player; the ball is on a player
+        only for the frames of a contact, moving across the box. Positions are
+        relative to the box (0-1), so the player may move and change size.
+        """
+        here = []
+        for pid, (x, y, w, h) in players:
+            if w > 0 and h > 0 and x <= cx <= x + w and y <= cy <= y + h:
+                here.append((pid, (cx - x) / w, (cy - y) / h))
+        self.on_player.setdefault(frame, []).extend(here)
+        for pid, rx, ry in here:
+            kept = sum(any(q == pid and abs(qx - rx) <= RIDE_TOL and abs(qy - ry) <= RIDE_TOL
+                           for q, qx, qy in self.on_player.get(frame - k, ()))
+                       for k in range(1, RIDE_FRAMES + 1))
+            if kept == RIDE_FRAMES:
+                return True
+        return False
 
     @property
     def latency(self):
@@ -482,19 +520,28 @@ class OnlinePathDP:
     def push(self, frame, rows, players=()):
         """Add the candidates [(frame, x1, y1, x2, y2, conf, motion, source)] of `frame`.
 
-        players: (x, y, w, h) boxes at `frame`, for the physical check of a hit.
+        players: {pid: (x, y, w, h)} at `frame` (or a list of boxes): candidates
+        that ride with a player are dropped, and a hit is checked physically.
         Returns the positions finalised by this call, {frame: box}.
         """
         if self.first is None:
             self.first = frame
         self.last = frame
+        players = list(players.items()) if isinstance(players, dict) else list(enumerate(players))
         for r in rows:
             if r[7] == "motion":
                 self.blobs.add((int(r[0]), float(r[1]), float(r[2])))
         good = [r[:7] for r in rows if r[5] >= MIN_TRACK_CONF
                 and (r[6] >= MIN_MOTION or frame == self.first)]
+        if players:
+            kept = [r for r in good if not self._rides_a_player(
+                frame, (r[1] + r[3]) / 2, (r[2] + r[4]) / 2, players)]
+            self.n_riding += len(good) - len(kept)
+            good = kept
+        for f in [f for f in self.on_player if f < frame - RIDE_FRAMES]:
+            del self.on_player[f]
         if good:
-            self.dp.push(frame, np.array(good, float), players)
+            self.dp.push(frame, np.array(good, float), [b for _, b in players])
         self._decide(frame - self.lag)
         return self._finalise(frame - self.lag - self.clean_lag)
 

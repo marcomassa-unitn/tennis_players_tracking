@@ -40,35 +40,59 @@ def test_with_no_motion_known_only_the_impossible_is_refused(reach):
     assert not reach.allowed((700, 300), (1500, 860), 1)             # corner to corner in a frame
 
 
-def _lob_with_a_false_object():
-    """A lob rising and coming back down, lost for a while; meanwhile something
-    confident by the near player (a head, a racket) for 7 frames."""
+NEAR = 1
+
+
+def _near_player(f):
+    """The near player walking towards the camera, 5 px a frame."""
+    return (1050.0, 760.0 + 5 * f, 100.0, 220.0)
+
+
+def _lob_and_a_head():
+    """A lob rising and coming back down, lost for a while; meanwhile the near
+    player's head, detected with confidence, rides with him for 7 frames."""
     rows = []
     for f in list(range(0, 21)) + list(range(34, 61)):
         x, y = 950.0, 700 - 20 * f + 0.25 * f * f
         rows.append((f, x - 7, y - 7, x + 7, y + 7, 0.7, 0.5, "crop"))
     for f in range(24, 31):
-        rows.append((f, 1093.0, 743.0, 1107.0, 757.0, 0.6, 0.5, "search"))
+        x, y, w, _ = _near_player(f)
+        hx, hy = x + 0.5 * w, y + 3
+        rows.append((f, hx - 7, hy - 7, hx + 7, hy + 7, 0.6, 0.5, "search"))
     return rows
 
 
-def _final(dp, rows, last=70):
+def _final(dp, rows, last=70, players=False):
     by = {}
     for r in rows:
         by.setdefault(r[0], []).append(r)
     for f in range(last):
-        dp.push(f, by.get(f, []))
+        dp.push(f, by.get(f, []), {NEAR: _near_player(f)} if players else {})
     dp.flush()
     return dp.final
 
 
-def test_the_path_does_not_jump_onto_a_false_object(reach):
-    rows = _lob_with_a_false_object()
+def test_the_path_does_not_take_a_player_s_head_for_the_lost_ball(reach):
+    rows = _lob_and_a_head()
     plain = _final(OnlinePathDP(30.0), rows)
-    assert any(f in plain for f in range(24, 31))             # 95 px/frame: linked before
-    checked = _final(OnlinePathDP(30.0, reach=reach), rows)
+    assert any(f in plain for f in range(24, 31))             # linked: 95 px/frame or less
+    checked = _final(OnlinePathDP(30.0, reach=reach), rows, players=True)
     assert not any(f in checked for f in range(24, 31))
     assert all(f in checked for f in range(34, 61))            # the ball, found again
+
+
+def test_a_candidate_that_rides_with_a_player_is_part_of_him():
+    dp = OnlinePathDP(30.0)
+    head = [(f, 1093.0, 763.0 + 5 * f, 1107.0, 777.0 + 5 * f, 0.6, 0.5, "search")
+            for f in range(6)]
+    for f in range(6):
+        dp.push(f, [head[f]], {NEAR: _near_player(f)})
+    assert dp.n_riding == 3                                    # frames 3-5: after 3 in place
+    crossing = OnlinePathDP(30.0)                              # a ball flying across him
+    for f in range(6):
+        x, y = 1055.0 + 18 * f, 800.0 + 5 * f
+        crossing.push(f, [(f, x - 7, y - 7, x + 7, y + 7, 0.6, 0.5, "crop")], {NEAR: _near_player(f)})
+    assert crossing.n_riding == 0
 
 
 class _Nothing:
