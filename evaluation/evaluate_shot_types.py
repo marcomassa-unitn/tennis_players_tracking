@@ -1,7 +1,8 @@
 """Shot types of a results folder against the hand labels.
 
 Labels come from ground_truth/shots_<clip>_gt.csv (annotate.py shots: frame,
-player_id,label, on the shots of that same results folder) and, for Input_video2,
+player_id,label, made on the shots of one run; a later run's shot of the same
+player within LABEL_TOLERANCE frames is the same shot) and, for Input_video2,
 from the 23 types in analysis.shot_analysis._TYPE_GROUND_TRUTH (offline contact
 frames, matched within 10 frames). A shot's predicted label is its overhead when
 it is a serve or a smash, else its shot_type. "unsure" labels are left out; a
@@ -26,6 +27,7 @@ from utils.paths import GROUND_TRUTH_DIR, OUTPUT_ROOT, clip_paths
 
 LEGACY_CLIP = "Input_video2"        # labelled before annotate.py had a shots mode
 LEGACY_TOLERANCE = 10               # frames between its labels and the shots found
+LABEL_TOLERANCE = 6                 # frames a contact moves between runs (same player)
 
 
 def predicted(row):
@@ -52,7 +54,7 @@ def labelled_shots(results):
             labels = list(zip(g["frame"], g["player_id"], g["label"]))
         for frame, pid, label in labels:
             near = shots[(shots["frame"] - frame).abs()
-                         <= (LEGACY_TOLERANCE if pid is None else 0)]
+                         <= (LEGACY_TOLERANCE if pid is None else LABEL_TOLERANCE)]
             if pid is not None:
                 near = near[near["player_id"] == pid]
             if near.empty:
