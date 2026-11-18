@@ -10,17 +10,26 @@ move from A (frame t) to B (frame t + gap) is allowed if:
   (a) it carries on the motion the ball had at A: B is near A + velocity * gap,
       within a margin growing with the gap (gravity, drag, detection noise);
   (b) it is at most MAX_BALL_SPEED_MS along the ground, the points taken where
-      they are seen (right for a ball near the ground), and keeps the way the
-      ball was going over the ground: a bounce turns it upwards, never aside;
+      they are seen: right for a ball near the ground, after a bounce;
   (c) A is on a player, and some point of the racket above the player's feet
       (RACKET_HEIGHTS_M) reaches some height of B at MAX_BALL_SPEED_MS: a hit,
       after which the ball may go anywhere it can reach, a lob as well;
   (d) with no motion known at A (a path starts there), some heights of A and B
       put them within MAX_BALL_SPEED_MS: only the impossible is refused.
 
-On the 22 real-time clips (about 8800 moves of the final tracks) (a)-(c) refused
-both jumps of Input_video2 and about 25 others, most of them tracker errors (a
-ball kid, a jump from one baseline to the other net in 4 frames).
+It checks the links of the real-time path search (tracking.ball_tracking.PathDP),
+next to the filter of candidates that ride with a player: neither alone removed
+the two phantom shots of Input_video2 (the ball at the top of the lob sits in the
+far player's box in the image, so "he hit it" explains the jump; the false object
+is the near player's head, so every turn of it is "a hit"), together they do. On
+the saved candidates of the 22 clips that keeps every hand-labelled ball position
+but one and loses one labelled shot (a volley taken from a ball last seen 14 m
+behind the far baseline in ground terms).
+
+A check on the turn of the ball over the ground was tried for (b) and dropped: the
+ground point below a falling ball moves towards the camera, which read as a turn.
+Used in the tracker's SEARCH after a loss, the check kept the search going longer
+(+30 % crops) and lost a lob, so the pipeline does not enable it there.
 
 Heights use the scale of the ground below the ball for the vertical too, as the
 flight heights of the shot analysis do.
@@ -33,11 +42,9 @@ from utils.court_geometry import L_m, W_m
 MAX_BALL_SPEED_MS = 240 / 3.6      # the fastest serves; nothing in play goes faster
 CONTINUITY_PX = 40.0               # (a) margin at 1080p, plus...
 CONTINUITY_GROWTH_PX = 2.0         # ...this times gap^2: the longer unseen, the wider
-                                   # (gravity is at most ~0.5 px/frame^2 of drift)
-BOUNCE_MAX_TURN_COS = 0.5          # (b) at most 60 degrees off its way over the ground
 RACKET_HEIGHTS_M = (0.3, 3.5)      # (c) the racket, from a low volley to a smash
 RACKET_SLACK_M = 1.5               # ...reaching out from the feet, and the box error
-PLAYER_SIDE_MARGIN = 0.6           # (c) the player's box grown by this on the sides (racket and arm)
+PLAYER_SIDE_MARGIN = 0.6           # (c) the box grown by this on the sides (arm, racket)
 PLAYER_TOP_MARGIN = 0.6            # ...and this above: the toss and the smash are over it
 BALL_HEIGHTS_M = np.linspace(0.0, 12.0, 25)   # where a seen ball can be, up to a high lob
 PLAY_MARGIN_M = 8.0                # ...over the court and this far around it
@@ -91,22 +98,14 @@ class BallReach:
         """
         a, b = np.asarray(a, float), np.asarray(b, float)
         gap = max(1, gap)
-        if velocity is not None and np.all(np.isfinite(velocity)):           # (a)
+        known = velocity is not None and np.all(np.isfinite(velocity))
+        if known:                                                             # (a)
             off = np.hypot(*(b - (a + np.asarray(velocity, float) * gap)))
             if off <= (CONTINUITY_PX + CONTINUITY_GROWTH_PX * gap * gap) * self.s:
                 return True
         reach = MAX_BALL_SPEED_MS * gap / self.fps
-        known = velocity is not None and np.all(np.isfinite(velocity))
-        ga, gb = self.ground(*a), self.ground(*b)
-        if np.hypot(*(gb - ga)) <= reach:                                    # (b)
-            if not known:
-                return True
-            # A bounce keeps the ball's way over the ground; only a racket turns it.
-            way = ga - self.ground(*(a - np.asarray(velocity, float)))
-            move = gb - ga
-            norms = np.hypot(*way) * np.hypot(*move)
-            if norms < 1e-9 or np.dot(way, move) >= BOUNCE_MAX_TURN_COS * norms:
-                return True
+        if np.hypot(*(self.ground(*b) - self.ground(*a))) <= reach:          # (b)
+            return True
         B = None
         for box in players:                                                   # (c)
             if not self.on_player(a, box):
@@ -117,7 +116,7 @@ class BallReach:
             d = np.sqrt(((R[:, None, :] - B[None, :, :]) ** 2).sum(-1)).min()
             if d - RACKET_SLACK_M <= reach:
                 return True
-        if velocity is None or not np.all(np.isfinite(velocity)):            # (d)
+        if not known:                                                         # (d)
             A, B = self.points3d(*a), (self.points3d(*b) if B is None else B)
             if np.sqrt(((A[:, None, :] - B[None, :, :]) ** 2).sum(-1)).min() <= reach:
                 return True
