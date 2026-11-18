@@ -1033,9 +1033,10 @@ def stroke_from_impact(impact_x, feet_x, side, hand, params=None):
 #
 # Once a shot's bounce is known its type comes from the flight itself, which is
 # physics rather than image shape. Only a dropshot lands this close to the net,
-# however it flies (a ball that short and fast is one that hit the net, or a
-# wrong bounce). A rally ball crosses in under a second; of the slower ones a lob
-# flies high, and a slice floats low.
+# and it is slow: its mean speed over the ground (impact to bounce) is low,
+# however short the flight (a dropshot played from near the net lands soon). A
+# ball that short and fast hit the net, or is a wrong bounce. A rally ball crosses
+# in under a second; of the slower ones a lob flies high, and a slice floats low.
 # A volley is told by what came before: the ball never touched the ground. A
 # dropshot stays one even when played in the air.
 
@@ -1043,8 +1044,9 @@ FLIGHT_PARAMS = {
     "slow_flight_s": 1.05,   # a longer flight is no longer a rally ball
     "drop_depth_m": 4.5,     # a dropshot lands this close to the net (service line 6.4,
                              # sharp angles land at 4.2-4.3 m too: dropshots or near it)...
-    "drop_min_flight_s": 0.7,  # ...after a flight this long at least: shorter ones that
-                             # land there hit the net (they last 0.5 s at most)
+    "drop_max_speed_ms": 20.0,  # ...at this mean ground speed at most (impact to bounce):
+                             # dropshots fly at 4-18 m/s, balls into the net and serves
+                             # landing there at 23-67 m/s
     "lob_apex_m": 2.0,       # a slow ball flying above this is a lob (the net is 0.91 m)
     "late_bounce_s": 0.1,    # a bounce may follow the next contact by this much
     "volley_net_m": 9.0,     # a volley is played at most this far from the net, about
@@ -1083,9 +1085,10 @@ def shot_flight(contact, pid, feet_m, next_contact, events, real_ball, conv, fps
                 params=None):
     """Flight of a shot to its bounce, or None if no bounce was found.
 
-    {"time_s", "depth_m" (landing point to net), "apex_m"}. The height of the ball
-    is its distance in the image from the point below it, taken on the straight
-    path from `feet_m` (the impact, when known) to the landing point.
+    {"time_s", "depth_m" (landing point to net), "apex_m", "speed_ms"}. The height
+    of the ball is its distance in the image from the point below it, taken on the
+    straight path from `feet_m` (the impact, when known) to the landing point;
+    speed_ms is the length of that path over the flight time.
     """
     p = params or FLIGHT_PARAMS
     bounces = events[(events["event"] == BOUNCE_OF_PLAYER[3 - pid])
@@ -1099,9 +1102,12 @@ def shot_flight(contact, pid, feet_m, next_contact, events, real_ball, conv, fps
         return None
     heights = _flight_heights(seen, contact, bounce["frame"], feet_m,
                               (bounce["x_m"], bounce["y_m"]), conv)
-    return {"time_s": (bounce["frame"] - contact) / fps,
+    time_s = (bounce["frame"] - contact) / fps
+    ground_m = float(np.hypot(bounce["x_m"] - feet_m[0], bounce["y_m"] - feet_m[1]))
+    return {"time_s": time_s,
             "depth_m": abs(bounce["y_m"] - NET),
-            "apex_m": max(heights)}
+            "apex_m": max(heights),
+            "speed_ms": ground_m / time_s}
 
 
 def air_flight(contact, feet_m, next_contact, next_feet_m, real_ball, fps, conv,
@@ -1136,7 +1142,7 @@ def classify_flight(flight, params=None, serve=False):
             return "lob"
         return None
     if (not serve and flight["depth_m"] <= p["drop_depth_m"]
-            and flight["time_s"] >= p["drop_min_flight_s"]):
+            and flight["speed_ms"] <= p["drop_max_speed_ms"]):
         return "dropshot"
     if flight["time_s"] < p["slow_flight_s"]:
         return "flat"
@@ -1347,6 +1353,8 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
             "landing_depth_m": (round(flight["depth_m"], 1)
                                 if flight and np.isfinite(flight["depth_m"]) else None),
             "apex_m": round(flight["apex_m"], 1) if flight else None,
+            "flight_speed_ms": (round(flight["speed_ms"], 1)
+                                if flight and "speed_ms" in flight else None),
             "ball_pace": (round(feats["pace"], 1)
                           if feats["pace"] is not None
                           and not np.isnan(feats["pace"]) else None),
