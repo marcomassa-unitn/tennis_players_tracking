@@ -86,14 +86,16 @@ def test_a_ball_taken_in_the_air_is_a_lob_only_if_slow_high_and_rising():
     assert classify_flight(air(1.6, 4.0, 0.2)) is None        # hit down from its highest
 
 
-def _arc(conv, frames, y_from, y_to, apex_m):
+def _arc(conv, frames, y_from, y_to, apex_m, drag=1.0, fps=30.0):
     """A ball flying straight down the middle from `y_from` to `y_to` (metres) on a
-    parabola `apex_m` high, as image detections."""
+    parabola `apex_m` high, slowing down over the ground as exp(-drag * t)."""
     m_to_px = np.linalg.inv(conv._H)
+    span = (len(frames) - 1) / fps
     rows = []
     for i, f in enumerate(frames):
         t = i / (len(frames) - 1)
-        y = y_from + (y_to - y_from) * t
+        ground = (1 - np.exp(-drag * t * span)) / (1 - np.exp(-drag * span))
+        y = y_from + (y_to - y_from) * ground
         u, v, w = m_to_px @ np.array([W_m / 2, y, 1.0])
         h = 4 * apex_m * t * (1 - t)
         rows.append((f, u / w, v / w - h * _px_per_metre(conv, W_m / 2, y)))
@@ -107,6 +109,16 @@ def test_the_flight_to_a_contact_in_the_air_measures_the_lob(conv):
     assert flight["apex_m"] == pytest.approx(6.0, abs=0.2)
     assert classify_flight(flight) == "lob"
     assert air_flight(100, (W_m / 2, L_m - 1.0), 160, None, ball, 30.0, conv) is None
+
+
+def test_the_ground_point_slows_down_with_the_ball(conv):
+    """A drive away from the camera: placing the point below it evenly puts it too high."""
+    ball = _arc(conv, range(100, 131), L_m - 1.0, 3.0, 2.0)
+    even = {**shot_analysis.FLIGHT_PARAMS, "drag_per_s": 0.0}
+    feet, other = (W_m / 2, L_m - 1.0), (W_m / 2, 3.0)
+    slowed = air_flight(100, feet, 130, other, ball, 30.0, conv)["apex_m"]
+    assert slowed == pytest.approx(2.0, abs=0.15)
+    assert air_flight(100, feet, 130, other, ball, 30.0, conv, even)["apex_m"] > slowed + 0.2
 
 
 def _bounce_at(frame, event):
