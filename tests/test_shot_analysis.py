@@ -60,15 +60,17 @@ def test_contact_stays_without_a_following_hit_or_on_the_other_side():
 
 
 def test_flight_gives_the_shot_type():
-    def flight(time_s, depth_m, apex_m):
-        return {"time_s": time_s, "depth_m": depth_m, "apex_m": apex_m}
+    def flight(time_s, depth_m, apex_m, ground_m=20.0):
+        return {"time_s": time_s, "depth_m": depth_m, "apex_m": apex_m,
+                "speed_ms": ground_m / time_s}
 
     assert classify_flight(flight(0.8, 9.0, 1.4)) == "flat"
-    assert classify_flight(flight(1.3, 3.0, 2.3)) == "dropshot"
-    assert classify_flight(flight(0.9, 3.0, 3.0)) == "dropshot"   # short: whatever the flight
-    assert classify_flight(flight(0.4, 1.0, 1.0)) == "flat"       # into the net
-    assert classify_flight(flight(1.3, 4.8, 1.3)) == "slice"      # not short enough
-    assert classify_flight(flight(0.9, 3.0, 2.0), serve=True) == "flat"
+    assert classify_flight(flight(1.3, 3.0, 2.3, 15.0)) == "dropshot"
+    assert classify_flight(flight(0.9, 3.0, 3.0, 15.0)) == "dropshot"  # short: whatever the flight
+    assert classify_flight(flight(0.6, 2.0, 1.0, 6.0)) == "dropshot"   # from near the net: brief, slow
+    assert classify_flight(flight(0.4, 1.0, 1.0, 12.0)) == "flat"      # into the net: fast
+    assert classify_flight(flight(1.3, 4.8, 1.3, 15.0)) == "slice"     # not short enough
+    assert classify_flight(flight(0.9, 3.0, 2.0, 15.0), serve=True) == "flat"
     assert classify_flight(flight(1.4, 10.0, 3.5)) == "lob"
     assert classify_flight(flight(1.3, 9.0, 1.3)) == "slice"
 
