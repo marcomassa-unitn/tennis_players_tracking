@@ -11,10 +11,10 @@ net.
 
     python analysis/player_analysis.py
     python analysis/player_analysis.py \\
-        --players outputs/Input_video2/player_coordinates/players_Input_video2.csv \\
-        --court   outputs/Input_video2/court_coordinates/Input_video2_court.csv \\
+        --players outputs/input2/player_coordinates/players_input2.csv \\
+        --court   outputs/input2/court_coordinates/input2_court.csv \\
         --fps     30 \\
-        --output  outputs/Input_video2/player_analysis \\
+        --output  outputs/input2/player_analysis \\
         --stride  3
 """
 
@@ -502,7 +502,7 @@ def main() -> None:
         description="Tennis player movement analysis: minimap, heatmap, speed"
     )
     parser.add_argument(
-        "--video", default="data/Input_video2.mp4",
+        "--video", default="data/input2.mp4",
         help="Source video; used to derive --players and --court defaults "
              "when those are not given explicitly",
     )

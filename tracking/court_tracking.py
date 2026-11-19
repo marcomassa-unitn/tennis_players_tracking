@@ -452,7 +452,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Court keypoint detection by fitting the ITF court model to "
                     "the white court lines")
-    parser.add_argument("--video", default="data/Input_video2.mp4")
+    parser.add_argument("--video", default="data/input2.mp4")
     parser.add_argument("--no-display", action="store_true",
                         help="skip the video playback with the fitted court")
     parser.add_argument("--output", default="outputs", dest="output_dir",

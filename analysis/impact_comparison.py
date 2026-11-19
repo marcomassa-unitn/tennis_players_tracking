@@ -82,7 +82,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Video comparing the ball's path before and after placing the impacts "
                     "on its flight line")
-    parser.add_argument("--video", default="data/Input_video2.mp4",
+    parser.add_argument("--video", default="data/input2.mp4",
                         help="clip to show; only its name is used, to find its results")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--last", type=int, default=None,

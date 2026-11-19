@@ -7,7 +7,7 @@ Two methods:
     against positional speed (displacement of the projected feet point).
   - Lucas-Kanade pyramidal sparse flow on Shi-Tomasi corners (trail demo).
 
-Outputs (default outputs/Input_video2/motion_estimation/):
+Outputs (default outputs/input2/motion_estimation/):
   - flow_speeds.csv        frame, player, flow vector, flow vs positional speed
   - flow_hsv_*.png         dense flow (hue = direction, value = magnitude)
   - flow_arrows_*.png      flow arrows on a sparse grid
@@ -15,10 +15,10 @@ Outputs (default outputs/Input_video2/motion_estimation/):
 
 Usage (from project root):
     python motion_estimation/optical_flow.py
-    python motion_estimation/optical_flow.py --video data/Input_video2.mp4 \\
-        --players outputs/Input_video2/player_coordinates/players_Input_video2.csv \\
-        --court outputs/Input_video2/court_coordinates/Input_video2_court.csv \\
-        --frames 200 --output outputs/Input_video2/motion_estimation
+    python motion_estimation/optical_flow.py --video data/input2.mp4 \\
+        --players outputs/input2/player_coordinates/players_input2.csv \\
+        --court outputs/input2/court_coordinates/input2_court.csv \\
+        --frames 200 --output outputs/input2/motion_estimation
 """
 
 import argparse
@@ -163,7 +163,7 @@ def lucas_kanade_demo(video, start, n_frames, out_path, display=False):
 def main():
     parser = argparse.ArgumentParser(
         description="Optical-flow motion estimation on tracked players")
-    parser.add_argument("--video",   default="data/Input_video2.mp4")
+    parser.add_argument("--video",   default="data/input2.mp4")
     parser.add_argument("--players", default=None,
                         help="default: outputs/<video name>/player_coordinates/players_<video name>.csv")
     parser.add_argument("--court", default=None,

@@ -734,7 +734,7 @@ class PlayerTracker:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Two-player tracking: whole-clip median background + court-half identities")
-    parser.add_argument("--video", default="data/Input_video2.mp4")
+    parser.add_argument("--video", default="data/input2.mp4")
     parser.add_argument("--court", default=None,
                         help="court CSV (default: outputs/<video name>/court_coordinates/<video name>_court.csv)")
     parser.add_argument("--csv", default=None,

@@ -18,20 +18,20 @@ of the matches, and the error of interpolated fills.
 
 Usage (from project root):
     python evaluation/evaluate_tracking.py \\
-        --gt   ground_truth/players_Input_video2_gt.csv \\
-        --pred outputs/Input_video2/player_coordinates/players_Input_video2.csv \\
-        --court outputs/Input_video2/court_coordinates/Input_video2_court.csv \\
-        --court-gt   ground_truth/court_Input_video2_gt.csv \\
-        --court-pred outputs/Input_video2/court_coordinates/Input_video2_court.csv
+        --gt   ground_truth/players_input2_gt.csv \\
+        --pred outputs/input2/player_coordinates/players_input2.csv \\
+        --court outputs/input2/court_coordinates/input2_court.csv \\
+        --court-gt   ground_truth/court_input2_gt.csv \\
+        --court-pred outputs/input2/court_coordinates/input2_court.csv
 
     python evaluation/evaluate_tracking.py \\
-        --ball-gt   ground_truth/ball_Input_video2_gt.csv \\
-        --ball-pred outputs/Input_video2/ball_coordinates/ball_Input_video2.csv
+        --ball-gt   ground_truth/ball_input2_gt.csv \\
+        --ball-pred outputs/input2/ball_coordinates/ball_input2.csv
 
     python evaluation/evaluate_tracking.py \\
-        --bounce-gt   ground_truth/bounce_Input_video2_gt.csv \\
-        --bounce-pred outputs/Input_video2/shot_analysis/bounces.csv \\
-        --court       outputs/Input_video2/court_coordinates/Input_video2_court.csv
+        --bounce-gt   ground_truth/bounce_input2_gt.csv \\
+        --bounce-pred outputs/input2/shot_analysis/bounces.csv \\
+        --court       outputs/input2/court_coordinates/input2_court.csv
 """
 
 import argparse
@@ -443,7 +443,7 @@ def main():
     """Parse args and run player and/or court evaluation."""
     parser = argparse.ArgumentParser(
         description="Evaluate player tracking and court detection vs GT")
-    parser.add_argument("--video", default="data/Input_video2.mp4",
+    parser.add_argument("--video", default="data/input2.mp4",
                         help="clip to evaluate: gives the default results to read")
     parser.add_argument("--gt",
                         help="GT player boxes CSV (evaluation/annotate.py boxes)")

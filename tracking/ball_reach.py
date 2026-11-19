@@ -2,7 +2,7 @@
 
 One camera does not see how high the ball is: a point of the image is anywhere on
 a ray, from the ground up. A speed limit alone therefore stops nothing (the jump
-of Input_video2 from the top of a lob, frame 407, onto the near player's head,
+of input2 from the top of a lob, frame 407, onto the near player's head,
 frame 411, needs only 10 m/s if the ball is taken 8 m up at the start). What does
 pin the ball down is where it was going, or the racket that just struck it. A
 move from A (frame t) to B (frame t + gap) is allowed if:
@@ -19,7 +19,7 @@ move from A (frame t) to B (frame t + gap) is allowed if:
 
 It checks the links of the real-time path search (tracking.ball_tracking.PathDP),
 next to the filter of candidates that ride with a player: neither alone removed
-the two phantom shots of Input_video2 (the ball at the top of the lob sits in the
+the two phantom shots of input2 (the ball at the top of the lob sits in the
 far player's box in the image, so "he hit it" explains the jump; the false object
 is the near player's head, so every turn of it is "a hit"), together they do. On
 the saved candidates of the 22 clips that keeps every hand-labelled ball position

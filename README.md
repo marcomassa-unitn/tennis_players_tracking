@@ -60,7 +60,7 @@ the one exception: it is small and fast, so it uses a YOLOv8 detector.
 
 ## Results on the demo rally
 
-The demo clip (`data/Input_video2.mp4`) is 1008 frames at 30 fps, 1080p. On it
+The demo clip (`data/input2.mp4`) is 1008 frames at 30 fps, 1080p. On it
 the pipeline produces:
 
 | Stage | Result |
@@ -177,10 +177,10 @@ flowchart LR
 
    | Ball vs hand-labelled positions | Precision | Recall | Centre error |
    |---|---|---|---|
-   | Original detector (whole frame only), Input_video2 | 1.00 | 0.64 | 2.0 px |
-   | **Current**, Input_video2 (101 labelled frames) | **1.00** | **0.93** | **1.2 px** |
-   | Original detector, input_video | 0.97 | 0.72 | 2.1 px |
-   | **Current**, input_video (43 frames) | **0.95** | **0.95** | **1.5 px** |
+   | Original detector (whole frame only), input2 | 1.00 | 0.64 | 2.0 px |
+   | **Current**, input2 (101 labelled frames) | **1.00** | **0.93** | **1.2 px** |
+   | Original detector, input1 | 0.97 | 0.72 | 2.1 px |
+   | **Current**, input1 (43 frames) | **0.95** | **0.95** | **1.5 px** |
 
    On the other test clips, the share of frames with a real detection rises from
    44–48 % to 88–91 %.
@@ -266,10 +266,10 @@ Then do one of the following:
   `pip install ultralytics`.
 
 Run the whole pipeline on the demo clip. It's headless and writes everything to
-the clip's own folder, `outputs/Input_video2/`:
+the clip's own folder, `outputs/input2/`:
 
 ```bash
-python pipeline.py --video data/Input_video2.mp4
+python pipeline.py --video data/input2.mp4
 ```
 
 It lists which steps already have results and asks which ones to redo; the rest
@@ -280,7 +280,7 @@ so the viewers open any processed clip without running anything again.
 Then watch the result:
 
 ```bash
-python live_view.py --video data/Input_video2.mp4      # space: pause, n: next frame, q: quit
+python live_view.py --video data/input2.mp4      # space: pause, n: next frame, q: quit
 ```
 
 If the weights are missing, ball tracking and shot analysis are skipped cleanly
@@ -293,37 +293,37 @@ paths need editing.
 
 ```bash
 # 1. Tracking: produces the CSVs everything else reads
-python tracking/court_tracking.py  --video data/Input_video2.mp4 --no-display
-python tracking/player_tracking.py --video data/Input_video2.mp4 --no-display
-python display_player_tracking.py  --video data/Input_video2.mp4   # watch the tracker's stages (saves nothing)
-python tracking/ball_tracking.py   --video data/Input_video2.mp4 --detect-only   # GPU: YOLO candidates
-python tracking/ball_tracking.py   --video data/Input_video2.mp4 \
-    --candidates outputs/Input_video2/ball_coordinates/ball_candidates_Input_video2.csv     # CPU: tracking
+python tracking/court_tracking.py  --video data/input2.mp4 --no-display
+python tracking/player_tracking.py --video data/input2.mp4 --no-display
+python display_player_tracking.py  --video data/input2.mp4   # watch the tracker's stages (saves nothing)
+python tracking/ball_tracking.py   --video data/input2.mp4 --detect-only   # GPU: YOLO candidates
+python tracking/ball_tracking.py   --video data/input2.mp4 \
+    --candidates outputs/input2/ball_coordinates/ball_candidates_input2.csv     # CPU: tracking
 
 # Check the court keypoints: draws them and the reprojected court model on a frame
 # (court_tracking.py also saves this image next to the court CSV)
-python utils/court_overlay.py --video data/Input_video2.mp4
+python utils/court_overlay.py --video data/input2.mp4
 
 # 2. Analysis
-python analysis/player_analysis.py --video data/Input_video2.mp4 [--no-animation]
-python analysis/shot_analysis.py   --video data/Input_video2.mp4 --p1-hand right --p2-hand right
+python analysis/player_analysis.py --video data/input2.mp4 [--no-animation]
+python analysis/shot_analysis.py   --video data/input2.mp4 --p1-hand right --p2-hand right
 
 # 3. Motion estimation
 python motion_estimation/optical_flow.py   --frames 200
 python motion_estimation/block_matching.py --method both
 
 # 4. Ground truth and evaluation
-python evaluation/annotate.py boxes --video data/Input_video2.mp4 --step 30
-python evaluation/annotate.py court --video data/Input_video2.mp4
-python evaluation/annotate.py ball  --video data/Input_video2.mp4 --step 10   # click the ball, n = not visible
-python evaluation/annotate.py bounce --video data/Input_video2.mp4   # a/d move, click + ENTER = bounce, h = hidden
+python evaluation/annotate.py boxes --video data/input2.mp4 --step 30
+python evaluation/annotate.py court --video data/input2.mp4
+python evaluation/annotate.py ball  --video data/input2.mp4 --step 10   # click the ball, n = not visible
+python evaluation/annotate.py bounce --video data/input2.mp4   # a/d move, click + ENTER = bounce, h = hidden
 python evaluation/evaluate_tracking.py --gt <gt_boxes.csv> \
-    --pred outputs/Input_video2/player_coordinates/players_Input_video2.csv \
-    --court outputs/Input_video2/court_coordinates/Input_video2_court.csv \
+    --pred outputs/input2/player_coordinates/players_input2.csv \
+    --court outputs/input2/court_coordinates/input2_court.csv \
     --court-gt <gt_court.csv>
-python evaluation/evaluate_tracking.py --ball-gt ground_truth/ball_Input_video2_gt.csv \
-    --ball-pred outputs/Input_video2/ball_coordinates/ball_Input_video2.csv
-python evaluation/evaluate_tracking.py --video data/Input_video2.mp4     --bounce-gt ground_truth/bounce_Input_video2_gt.csv     --court outputs/Input_video2/court_coordinates/Input_video2_court.csv
+python evaluation/evaluate_tracking.py --ball-gt ground_truth/ball_input2_gt.csv \
+    --ball-pred outputs/input2/ball_coordinates/ball_input2.csv
+python evaluation/evaluate_tracking.py --video data/input2.mp4     --bounce-gt ground_truth/bounce_input2_gt.csv     --court outputs/input2/court_coordinates/input2_court.csv
 ```
 
 Useful `pipeline.py` flags:
@@ -359,12 +359,12 @@ evaluation reads them unchanged.
 
 ```bash
 pip install -r requirements-realtime.txt
-python realtime_pipeline.py --video data/Input_video2.mp4 --model models/ball_motion.onnx
-python realtime_pipeline.py --video data/Input_video2.mp4 --calibrate     # tracks from frame 0
-python realtime_pipeline.py --video data/Input_video2.mp4 --calibrate --fallback models/ball_tracker.pt   # GPU
-python realtime_pipeline.py --video data/Input_video2.mp4 --clock live --display   # like a camera
-python realtime_pipeline.py --video data/Input_video2.mp4 --model diff            # no model
-python live_view.py --video data/Input_video2.mp4 --realtime                       # watch it
+python realtime_pipeline.py --video data/input2.mp4 --model models/ball_motion.onnx
+python realtime_pipeline.py --video data/input2.mp4 --calibrate     # tracks from frame 0
+python realtime_pipeline.py --video data/input2.mp4 --calibrate --fallback models/ball_tracker.pt   # GPU
+python realtime_pipeline.py --video data/input2.mp4 --clock live --display   # like a camera
+python realtime_pipeline.py --video data/input2.mp4 --model diff            # no model
+python live_view.py --video data/input2.mp4 --realtime                       # watch it
 ```
 
 **Calibration.** With a fixed camera, the court and the empty court can be
@@ -397,9 +397,9 @@ learnt in the first 2 s, which go untracked.
   - The colour fallback runs only when the ball is expected inside a player's
     box, part of the silhouette that the background difference cannot separate.
     It never runs while searching: yellow things by the players fooled it.
-    On Input_video2 and input8 the ball is now followed above the court on about
+    On input2 and input8 the ball is now followed above the court on about
     60 frames each, up to the top of the picture. Against the hand labels of
-    Input_video2, recall goes from 0.86 to 0.91 with no false detection, and on
+    input2, recall goes from 0.86 to 0.91 with no false detection, and on
     input8 there are three times fewer crops per frame. The dataset builder now
     also cuts crops above the court, so that the next training sees the ball
     against the boards and the crowd.
@@ -418,13 +418,13 @@ pipeline too:
 
 | Step | Before | After |
 |---|---|---|
-| Player tracking, Input_video2 | 147 s | 86 s |
+| Player tracking, input2 | 147 s | 86 s |
 | Bounce segmentation, 11 clips | 34 s | 5 s |
 
 **First results.** YOLO11n trained on Kaggle with pseudo-labels only, the
 second dataset (more contacts), best epoch 19.
 
-| Ball vs hand labels, recall / precision | Input_video2 | input_video |
+| Ball vs hand labels, recall / precision | input2 | input1 |
 |---|---|---|
 | Offline (YOLOv8x tiles, whole clip) | 0.93 / 1.00 | 0.95 / 0.95 |
 | Real time, calibrated, with the colour fallback | 0.92 / 0.96 | 0.91 / 0.95 |
@@ -435,14 +435,14 @@ second dataset (more contacts), best epoch 19.
 These real-time rows use the tile search of the GPU mode. The CPU blob search
 loses a few points of recall: 0.80 and 0.77 after the warm-up.
 
-| Laptop CPU only, onnxruntime, mains power | Input_video2 | input_video |
+| Laptop CPU only, onnxruntime, mains power | input2 | input1 |
 |---|---|---|
 | Whole pipeline after the startup (video: 30 fps) | 28.9 fps | 32.3 fps |
 | Players / ball, per frame (side by side) | 28 / 25 ms | 24 / 24 ms |
 
 On battery the same laptop is about 3 times slower.
 
-| Kaggle T4 (4 vCPU), steady fps | Input_video2 | input11 | input_video |
+| Kaggle T4 (4 vCPU), steady fps | input2 | input11 | input1 |
 |---|---|---|---|
 | Ball model on TensorRT FP16 | 27.9 | 24.8 | 34.0 |
 | Ball model on PyTorch FP16 | 25.5 | 20.9 | 31.6 |
@@ -468,7 +468,7 @@ is found on 76 of 78 labelled frames. Two answers:
   - They move the crop only when they move and lie where the Kalman filter
     expects the ball. A first version that let them steer freely followed
     yellow things by the players and lost the ball in flight: recall 0.78.
-  - On Input_video2 recall goes from 0.87 to 0.92, against 0.93 offline. By
+  - On input2 recall goes from 0.87 to 0.92, against 0.93 offline. By
     the players it finds 43 of 51 balls instead of 39, and still 49 of 49 in
     flight.
   - YOLOv8x takes 0.4 s per crop on the laptop CPU, so the fallback is meant
@@ -481,7 +481,7 @@ the online background.
   hand labels where it misses the ball:
   `python evaluation/annotate.py ball --frames-from <ball CSV>`.
 - Negatives come from frames where the ball is known to be elsewhere.
-- Input_video2, input_video and input11 are held out for testing.
+- input2, input1 and input11 are held out for testing.
 - `training/pack_kaggle_inputs.py` zips the CSVs to upload next to the videos.
 
 `evaluation/benchmark_ball.py` scores every track against the ground truth, and

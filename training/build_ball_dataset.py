@@ -50,7 +50,7 @@ from utils.video import safe_fps
 
 PROC_HEIGHT = 540          # same processing scale as the player tracker
 
-TEST_CLIPS = ("Input_video2", "input_video", "input11")
+TEST_CLIPS = ("input2", "input1", "input11")
 VAL_CLIPS = ("input4", "input7")
 TAIL_VAL = {"input10": 0.75}   # this clip's frames from this fraction on go to val
 SPLIT_GAP_S = 1.0              # frames dropped between the two parts of such a clip

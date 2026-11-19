@@ -37,10 +37,10 @@ the track of the original single-pass detector (whole frame, conf >= 0.65,
 motion gate, highest confidence, straight-line fills), kept to compare with it.
 
 Usage (from project root):
-    python tracking/ball_tracking.py --video data/Input_video2.mp4             # both stages
-    python tracking/ball_tracking.py --video data/Input_video2.mp4 --detect-only   # stage 1 (Colab)
-    python tracking/ball_tracking.py --video data/Input_video2.mp4 \\
-        --candidates outputs/Input_video2/ball_coordinates/ball_candidates_Input_video2.csv    # stage 2 only
+    python tracking/ball_tracking.py --video data/input2.mp4             # both stages
+    python tracking/ball_tracking.py --video data/input2.mp4 --detect-only   # stage 1 (Colab)
+    python tracking/ball_tracking.py --video data/input2.mp4 \\
+        --candidates outputs/input2/ball_coordinates/ball_candidates_input2.csv    # stage 2 only
 """
 
 import argparse
@@ -852,7 +852,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Ball tracking: YOLO candidates on full-resolution tiles, then the "
                     "best path through them, outlier removal and gap filling")
-    parser.add_argument("--video", default="data/Input_video2.mp4", help="input video")
+    parser.add_argument("--video", default="data/input2.mp4", help="input video")
     parser.add_argument("--model", default=DEFAULT_MODEL,
                         help="YOLO ball-detector weights (.pt), needed by stage 1")
     parser.add_argument("--detect-only", action="store_true", dest="detect_only",

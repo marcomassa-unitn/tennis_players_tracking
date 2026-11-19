@@ -20,7 +20,7 @@ do not depend on resolution or framing. The fit tolerances are in pixels, for
 1080p footage.
 
 Use (from project root, after the ball and player CSVs exist):
-    python analysis/bounce_detection.py --video data/Input_video2.mp4
+    python analysis/bounce_detection.py --video data/input2.mp4
 """
 
 import argparse
@@ -324,7 +324,7 @@ def save_bounce_map(bounces: pd.DataFrame, out_dir) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Find when and where the ball touches the ground")
-    parser.add_argument("--video", default="data/Input_video2.mp4",
+    parser.add_argument("--video", default="data/input2.mp4",
                         help="source video; only its name is used, for the default CSVs")
     parser.add_argument("--ball", default=None,
                         help="ball CSV (defaults to outputs/<video name>/ball_coordinates/ball_<video name>.csv)")

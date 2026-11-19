@@ -17,7 +17,7 @@ per clip, a few points of difference are noise.
 
 Usage (from project root):
     python evaluation/benchmark_ball.py
-    python evaluation/benchmark_ball.py --model models/ball_motion.onnx --clips Input_video2
+    python evaluation/benchmark_ball.py --model models/ball_motion.onnx --clips input2
 """
 
 import argparse
