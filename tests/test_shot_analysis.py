@@ -23,6 +23,7 @@ from analysis.shot_analysis import (
     fill_missing_hits,
     impact_point,
     is_volley,
+    keep_last_contact_on_one_side,
     move_contacts_off_bounces,
     shot_category,
     shot_side,
@@ -178,6 +179,21 @@ def _ball_from(conv, frames, y_from, y_to):
         u, v, w = m_to_px @ np.array([W_m / 2, y, 1.0])
         rows.append((f, u / w, v / w))
     return pd.DataFrame(rows, columns=["frame", "cx", "cy"])
+
+
+def test_the_opponent_cannot_play_a_ball_that_never_came_to_him(conv):
+    """A lob runs on to the far player, out of sight for a moment: one shot, the last."""
+    boxes = _server_boxes(conv, 2, 0, 200, 1000)
+    hits = [(100, 2, 1.0), (160, 2, 1.0)]
+    stays = pd.concat([_ball_from(conv, range(101, 120), 5.0, -2.0),
+                       _ball_from(conv, range(131, 160), -3.0, -4.0)])
+    assert keep_last_contact_on_one_side(hits, stays, boxes, conv, 30.0) == [(160, 2, 1.0)]
+    assert keep_last_contact_on_one_side(hits, stays, boxes, conv, 30.0, keep={100}) == hits
+    went = pd.concat([_ball_from(conv, range(101, 130), 0.0, 20.0),
+                      _ball_from(conv, range(131, 160), 20.0, 0.0)])
+    assert keep_last_contact_on_one_side(hits, went, boxes, conv, 30.0) == hits
+    unseen = _ball_from(conv, range(101, 110), 0.0, -2.0)     # then 50 frames out of sight
+    assert keep_last_contact_on_one_side(hits, unseen, boxes, conv, 30.0) == hits
 
 
 def _smash_boxes(conv, contact, y_m=None):
