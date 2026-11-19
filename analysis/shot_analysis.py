@@ -1115,6 +1115,15 @@ FLIGHT_PARAMS = {
                              # position seen to the apex (a ball hit down from high, as a
                              # serve or a smash, starts at its highest)
     "air_min_points": 5,     # ball positions needed in the flight to trust its apex
+    # A lob often flies out of the picture, or against the crowd: its flight is not
+    # seen. It is told by how it left: going up, already high (over the head of a
+    # far striker, or above the far baseline for a near one: no rally ball gets
+    # there), then lost for a while, with the next shot long after.
+    "lost_from_s": -0.1,     # ball positions from this long before the contact (its
+                             # frame may be a few late)...
+    "lost_to_s": 0.33,       # ...to this long after it
+    "lost_rise_px": 2.0,     # going up the picture by this many px per frame (1080p)
+    "lost_min_s": 0.4,       # then unseen for this long at least
 }
 
 
@@ -1187,6 +1196,38 @@ def air_flight(contact, feet_m, next_contact, next_feet_m, real_ball, fps, conv,
                               p["drag_per_s"])
     return {"time_s": (next_contact - contact) / fps, "depth_m": np.nan,
             "apex_m": max(heights), "rise_m": max(heights) - heights[0], "in_air": True}
+
+
+def lost_going_up(contact, side, box, next_contact, real_ball, conv, fps, params=None):
+    """True if the ball left this shot going up, high, and was then lost: a lob.
+
+    The last positions seen around the contact rise in the picture, the last one
+    above the striker's head (far striker) or above the far baseline (near
+    striker), and nothing is seen for lost_min_s after it; the next shot comes
+    after slow_flight_s, if at all.
+    """
+    p = params or FLIGHT_PARAMS
+    if np.isfinite(next_contact) and next_contact - contact < p["slow_flight_s"] * fps:
+        return False
+    seen = real_ball[real_ball["frame"].between(contact + p["lost_from_s"] * fps,
+                                                contact + p["lost_to_s"] * fps)]
+    if len(seen) < 2:
+        return False
+    last = seen.iloc[-1]
+    tail = seen.tail(3)
+    rise = -(tail["cy"].iloc[-1] - tail["cy"].iloc[0]) / (tail["frame"].iloc[-1] - tail["frame"].iloc[0])
+    if rise < p["lost_rise_px"]:
+        return False
+    if side == "far":
+        high = box is not None and last["cy"] < box[1]
+    else:
+        _, v, w = np.linalg.inv(conv._H) @ np.array([W_m / 2, 0.0, 1.0])
+        high = last["cy"] < v / w
+    if not high:
+        return False
+    later = real_ball[real_ball["frame"] > last["frame"]]["frame"]
+    back = later.iloc[0] if len(later) else next_contact
+    return not np.isfinite(back) or back - last["frame"] >= p["lost_min_s"] * fps
 
 
 def classify_flight(flight, params=None, serve=False):
@@ -1385,6 +1426,10 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
                 flight = air_flight(f, impact, next_f, next_feet, real_ball, fps, conv)
         if flight is not None:
             shot_type = classify_flight(flight, serve=is_serve) or shot_type
+        if (flight_known and not (is_serve or is_smash) and shot_type != "lob"
+                and lost_going_up(f, side, box, hits[k + 1][0] if k + 1 < len(hits) else np.inf,
+                                  real_ball, conv, fps)):
+            shot_type = "lob"
         if (flight_known and not (is_serve or is_smash) and shot_type not in ("dropshot", "lob")
                 and is_volley(f, pid, player_y_m, hits[k - 1] if k else None,
                               events, real_ball, conv, fps)):
