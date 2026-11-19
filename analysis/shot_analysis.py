@@ -56,7 +56,7 @@ from utils.court_converter import CourtConverter
 
 # Court dimensions shared via utils/court_geometry.
 from utils.court_geometry import _FT, NET, L_m, W_m
-from utils.paths import clip_paths
+from utils.paths import clip_hands, clip_paths
 
 # ── loading ────────────────────────────────────────────────────────────────────
 
@@ -2013,11 +2013,12 @@ def main() -> None:
                         help="source video for the verification PNGs")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--p1-hand", choices=["right", "left"],
-                        default="right", dest="p1_hand",
-                        help="dominant hand of player 1 (default right)")
+                        default=None, dest="p1_hand",
+                        help="dominant hand of player 1 (default from "
+                             "ground_truth/hands.csv, else right)")
     parser.add_argument("--p2-hand", choices=["right", "left"],
-                        default="right", dest="p2_hand",
-                        help="dominant hand of player 2 (default right)")
+                        default=None, dest="p2_hand",
+                        help="dominant hand of player 2 (default as for player 1)")
     parser.add_argument("--events", default=None,
                         help="events CSV from analysis/bounce_detection.py, to correct "
                              "the contacts that are really bounces")
@@ -2148,7 +2149,7 @@ def main() -> None:
             "Generate it first with the ball tracker (needs the YOLO model):\n"
             "    python tracking/ball_tracking.py")
 
-    hands = {1: args.p1_hand, 2: args.p2_hand}
+    hands = dict(zip((1, 2), clip_hands(args.video, args.p1_hand, args.p2_hand)))
     track = load_ball_track(args.ball)
     boxes = load_player_boxes(args.players)
     conv = CourtConverter(args.court)

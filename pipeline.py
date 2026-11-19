@@ -38,7 +38,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from utils.paths import OUTPUT_ROOT, clip_paths
+from utils.paths import OUTPUT_ROOT, clip_hands, clip_paths
 
 DEFAULT_MODEL = os.path.join(PROJECT_ROOT, "models", "ball_tracker.pt")
 
@@ -359,6 +359,7 @@ def step_shots(p, args, produced):
 
     from analysis import bounce_detection, shot_analysis
     os.makedirs(p["shots_dir"], exist_ok=True)
+    hands = clip_hands(p["video"], args.p1_hand, args.p2_hand)
     argv = [
         "bounce_detection",
         "--ball", p["ball_csv"],
@@ -377,8 +378,8 @@ def step_shots(p, args, produced):
         "--court", p["court_csv"],
         "--video", p["video"],
         "--fps", str(args.fps),
-        "--p1-hand", args.p1_hand,
-        "--p2-hand", args.p2_hand,
+        "--p1-hand", hands[0],
+        "--p2-hand", hands[1],
         "--events", p["events_csv"],
         "--output", p["shots_dir"],
     ]
@@ -468,9 +469,10 @@ def build_parser():
     # Analysis / shots tuning.
     parser.add_argument("--anchor", choices=["feet", "centroid"], default="feet",
                         help="player anchor point for analysis (passed to player_analysis)")
-    parser.add_argument("--p1-hand", default="right", dest="p1_hand",
-                        help="player 1 dominant hand (passed to shot_analysis)")
-    parser.add_argument("--p2-hand", default="right", dest="p2_hand",
+    parser.add_argument("--p1-hand", default=None, dest="p1_hand",
+                        help="player 1 dominant hand (passed to shot_analysis; default "
+                             "from ground_truth/hands.csv, else right)")
+    parser.add_argument("--p2-hand", default=None, dest="p2_hand",
                         help="player 2 dominant hand (passed to shot_analysis)")
 
     # Ball tracking weights.

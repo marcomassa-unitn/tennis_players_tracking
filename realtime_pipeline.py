@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from realtime.pipeline import RealtimePipeline
+from utils.paths import clip_hands
 
 DEFAULT_MODEL = os.path.join("models", "ball_motion.onnx")
 
@@ -71,8 +72,9 @@ def build_parser():
                    help="at the end, also draw the player analysis figures")
     p.add_argument("--log-every", type=int, default=150, dest="log_every",
                    help="print progress every this many frames (0 = never)")
-    p.add_argument("--p1-hand", default="right", dest="p1_hand", choices=["right", "left"])
-    p.add_argument("--p2-hand", default="right", dest="p2_hand", choices=["right", "left"])
+    p.add_argument("--p1-hand", default=None, dest="p1_hand", choices=["right", "left"],
+                   help="default from ground_truth/hands.csv, else right")
+    p.add_argument("--p2-hand", default=None, dest="p2_hand", choices=["right", "left"])
     return p
 
 
@@ -94,7 +96,7 @@ def main(argv=None):
         args.video, args.output, model, court_csv=args.court, players_csv=args.players,
         clock=args.clock, search=args.search, search_every=args.search_every,
         display=args.display, video_out=args.video_out, max_frames=args.max_frames,
-        hands=(args.p1_hand, args.p2_hand), shots=not args.no_shots, figures=args.figures,
+        hands=clip_hands(args.video, args.p1_hand, args.p2_hand), shots=not args.no_shots, figures=args.figures,
         device=args.device, log_every=args.log_every, background=args.background,
         fallback=args.fallback, refill=not args.no_refill).run()
 
