@@ -65,6 +65,11 @@ ROI_MARGIN = 64            # px around the court region kept at full resolution
 HIGH_WAIT_S = 3.0          # a ball lost above the court is looked for where it left
                            # for this long: it went out of the picture and falls back
 HIGH_SPREAD = 1            # ...on that many crops each side of where it was lost
+OUT_TOP_PX = 20            # lost where the ball was heading this close to (or past) the
+                           # top edge, going up: it is out of the picture, and...
+OUT_CORRIDOR_PX = 320      # ...comes back down within this many px (1080p) sideways of
+OUT_CORRIDOR_GROWTH_PX = 3  # where it left, moved on at its sideways speed, plus this
+                           # per frame: a ball in flight never turns back sideways
 PLAYER_MARGIN = 0.15       # the colour fallback runs only inside a player's box grown
                            # by this: the ball is part of the player's silhouette
 
@@ -225,6 +230,8 @@ class OnlineBallTracker:
         self.high_wait = max(1, int(round(HIGH_WAIT_S * fps)))
         self.lost_high = None          # (frame lost, cx, cy): a ball that left at the top
         self.n_high_found = 0
+        self.out_top = None            # (frame, cx, vx): ...out of the picture there
+        self.n_off_corridor = 0        # SEARCH detections dropped as off its way back
         self.last_seen = None          # (frame, cx, cy) of the last detection followed
         self.last_vel = None           # its velocity (px/frame), from the Kalman filter
         self.last_players = ()         # the player boxes then
@@ -247,6 +254,20 @@ class OnlineBallTracker:
                                 frame_idx - f, self.last_vel, self.last_players)
         self.n_refused += not ok
         return ok
+
+    def _on_way_back(self, frame_idx, det):
+        """Can a ball that went out at the top be at detection `det` now?
+
+        Above the picture nothing hits it: it comes back down about where it left,
+        moved on at the sideways speed it had (perspective and drag aside). Anything
+        far to the side is something else (a spectator in the stands).
+        """
+        if self.out_top is None:
+            return True
+        f, x, vx = self.out_top
+        dt = frame_idx - f
+        off = abs((det[0] + det[2]) / 2 - (x + vx * dt))
+        return off <= (OUT_CORRIDOR_PX + OUT_CORRIDOR_GROWTH_PX * dt) * self.s
 
     def _search_region(self, snap):
         """The blind SEARCH region inside the background region (background coords)."""
@@ -396,7 +417,7 @@ class OnlineBallTracker:
         self.kf = Kalman(((det[0] + det[2]) / 2, (det[1] + det[3]) / 2),
                          (0.0, 0.0) if v is None else v, self.s)
         self.state, self.misses, self.tentative = self.TRACKING, 0, []
-        self.lost_high = None
+        self.lost_high = self.out_top = None
         self.last_seen = (frame_idx, (det[0] + det[2]) / 2, (det[1] + det[3]) / 2)
         self.last_vel, self.last_players = v, ()
 
@@ -409,7 +430,7 @@ class OnlineBallTracker:
         """
         f_lost, cx, cy = self.lost_high
         if frame_idx - f_lost > self.high_wait:
-            self.lost_high = None
+            self.lost_high = self.out_top = None
             return None, []
         dx, dy = shift[0] / self.crops.scale, shift[1] / self.crops.scale
         step = self.size - SEARCH_OVERLAP
@@ -481,6 +502,13 @@ class OnlineBallTracker:
                 self.last_crops = self.last_crops + origins if self.lost_high else origins
                 dets = self._detect(snap, frame, origins, shift, frame_idx)
                 search_rows = self._rows(frame_idx, dets, gray, "search")
+                if self.out_top is not None:
+                    # Dropped from the candidates too: the path search must not
+                    # take them for the ball while it is out of the picture.
+                    way = [self._on_way_back(frame_idx, d) for d in dets]
+                    self.n_off_corridor += way.count(False)
+                    dets = [d for d, w in zip(dets, way) if w]
+                    search_rows = [r for r, w in zip(search_rows, way) if w]
                 rows += search_rows
                 got = self._acquire(frame_idx, dets, search_rows)
                 if got is not None:
@@ -551,6 +579,13 @@ class OnlineBallTracker:
                 if (self.last_seen is not None
                         and not self._in_search_region(snap, self.last_seen[2], shift)):
                     self.lost_high = self.last_seen
+                    # Out of the picture only if it was going up and is now predicted
+                    # at the top edge: a ball lost by the far player's head (coming
+                    # to him, also going up) may come back anywhere after his shot.
+                    if (self.last_vel is not None and self.last_vel[1] < 0
+                            and self.kf.x[1] <= OUT_TOP_PX * self.s):
+                        self.out_top = (self.last_seen[0], self.last_seen[1],
+                                        float(self.last_vel[0]))
                 self.state, self.kf = self.SEARCH, None
                 return None, rows
         cx, cy = self.kf.x[:2]
