@@ -13,7 +13,7 @@ error only measures how consistent the 8 points are with each other, so the
 visual check is the one that matters.
 
 Usage (from project root, after court_tracking.py has written the CSV):
-    python utils/court_overlay.py --video data/Input_video2.mp4
+    python utils/court_overlay.py --video data/input2.mp4
     python utils/court_overlay.py --video data/input4.mp4 --frame 100
 
 Without --frame, the first frame that is not black is used.
@@ -143,7 +143,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Draw detected court keypoints and the reprojected court model "
                     "on a video frame, to check the keypoints and the homography.")
-    parser.add_argument("--video", default="data/Input_video2.mp4")
+    parser.add_argument("--video", default="data/input2.mp4")
     parser.add_argument("--court", default=None,
                         help="court CSV (default: outputs/<video name>/court_coordinates/<video name>_court.csv)")
     parser.add_argument("--frame", type=int, default=None,

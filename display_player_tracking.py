@@ -121,7 +121,7 @@ class StageViewer:
 def main():
     parser = argparse.ArgumentParser(
         description="Show the player tracker's processing stages on a clip (nothing is saved)")
-    parser.add_argument("--video", default="data/Input_video2.mp4")
+    parser.add_argument("--video", default="data/input2.mp4")
     parser.add_argument("--court", default=None,
                         help="court CSV (default: outputs/<video name>/court_coordinates/<video name>_court.csv)")
     args = parser.parse_args()

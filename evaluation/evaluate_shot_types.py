@@ -2,7 +2,7 @@
 
 Labels come from ground_truth/shots_<clip>_gt.csv (annotate.py shots: frame,
 player_id,label, made on the shots of one run; a later run's shot of the same
-player within LABEL_TOLERANCE frames is the same shot) and, for Input_video2,
+player within LABEL_TOLERANCE frames is the same shot) and, for input2,
 from the 23 types in analysis.shot_analysis._TYPE_GROUND_TRUTH (offline contact
 frames, matched within 10 frames). A shot's predicted label is its overhead when
 it is a serve or a smash, else its shot_type. "unsure" labels are left out; a
@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from analysis.shot_analysis import _TYPE_GROUND_TRUTH
 from utils.paths import GROUND_TRUTH_DIR, OUTPUT_ROOT, clip_paths
 
-LEGACY_CLIP = "Input_video2"        # labelled before annotate.py had a shots mode
+LEGACY_CLIP = "input2"              # labelled before annotate.py had a shots mode
 LEGACY_TOLERANCE = 10               # frames between its labels and the shots found
 LABEL_TOLERANCE = 6                 # frames a contact moves between runs (same player)
 

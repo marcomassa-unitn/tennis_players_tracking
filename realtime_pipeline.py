@@ -6,14 +6,14 @@ them, and keeps up with the video when the hardware allows it. See
 realtime/pipeline.py for the stages and README.md for the measured speeds.
 
 Usage (from project root):
-    python realtime_pipeline.py --video data/Input_video2.mp4 --model models/ball_motion.onnx
-    python realtime_pipeline.py --video data/Input_video2.mp4 --calibrate     # from frame 0
-    python realtime_pipeline.py --video data/Input_video2.mp4 --clock live --display
+    python realtime_pipeline.py --video data/input2.mp4 --model models/ball_motion.onnx
+    python realtime_pipeline.py --video data/input2.mp4 --calibrate     # from frame 0
+    python realtime_pipeline.py --video data/input2.mp4 --clock live --display
     python realtime_pipeline.py --video data/input3.mp4 --model diff        # no model
     # ball only, with the offline players and court:
-    python realtime_pipeline.py --video data/Input_video2.mp4 --model models/ball_motion.onnx \\
-        --court outputs/Input_video2/court_coordinates/Input_video2_court.csv \\
-        --players outputs/Input_video2/player_coordinates/players_Input_video2.csv
+    python realtime_pipeline.py --video data/input2.mp4 --model models/ball_motion.onnx \\
+        --court outputs/input2/court_coordinates/input2_court.csv \\
+        --players outputs/input2/player_coordinates/players_input2.csv
 """
 
 import argparse
@@ -29,7 +29,7 @@ DEFAULT_MODEL = os.path.join("models", "ball_motion.onnx")
 
 def build_parser():
     p = argparse.ArgumentParser(description="Causal, single-pass tennis analysis")
-    p.add_argument("--video", default="data/Input_video2.mp4")
+    p.add_argument("--video", default="data/input2.mp4")
     p.add_argument("--output", default=os.path.join("outputs", "realtime"),
                    help="base output folder (default: outputs/realtime, one folder per clip)")
     p.add_argument("--model", default=None,

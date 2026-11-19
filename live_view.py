@@ -18,7 +18,7 @@ The ball box is redrawn on the source frame from the ball CSV, so the pre-burned
 annotated video is never needed.
 
 Usage (from the project root):
-    python live_view.py --video data/Input_video2.mp4
+    python live_view.py --video data/input2.mp4
 
 CSV paths default to <stem>-based names under ``--output``; each is overridable.
 Keys: ``space`` / ``p`` pause and resume, ``n`` steps one frame while paused,
@@ -115,8 +115,9 @@ _BOX_COLORS = {1: (0, 255, 0), 2: (0, 0, 255)}
 def _resolve(path: str) -> str:
     """Return ``path`` if it exists, else a case-insensitive sibling match.
 
-    Bridges the on-disk ``input_video2_court.csv`` vs the stem-derived
-    ``Input_video2_court.csv`` mismatch on case-sensitive filesystems. Falls back
+    Bridges a file name on disk that differs only in case from the stem-derived
+    one (``input2_court.csv`` vs ``Input2_court.csv``) on case-sensitive
+    filesystems. Falls back
     to the original ``path`` so the caller's "not found" message still makes sense.
     """
     if os.path.exists(path):
@@ -1153,8 +1154,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Live viewer: video + player/ball boxes + synced minimap "
                     "(+ reserved stats panel).")
-    parser.add_argument("--video", default="data/Input_video2.mp4",
-                        help="input video (default: data/Input_video2.mp4)")
+    parser.add_argument("--video", default="data/input2.mp4",
+                        help="input video (default: data/input2.mp4)")
     parser.add_argument("--output", default=OUTPUT_ROOT,
                         help="base output dir, holding one folder per video")
     parser.add_argument("--players", default=None,

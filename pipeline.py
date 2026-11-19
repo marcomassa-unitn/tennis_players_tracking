@@ -7,7 +7,7 @@ Stages, in order:
     motion estimation -> ball tracking -> shot analysis -> evaluation
 
 Every result goes to the clip's own folder, outputs/<video name>/ (utils/paths.py),
-so a typical run is just `python pipeline.py --video data/Input_video2.mp4`. It
+so a typical run is just `python pipeline.py --video data/input2.mp4`. It
 shows which steps already have results and asks which ones to redo; everything
 else is reused from that folder.
 
@@ -427,7 +427,7 @@ def step_evaluation(p, args, produced):
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Unified tennis players tracking pipeline.")
-    parser.add_argument("--video", default="data/Input_video2.mp4",
+    parser.add_argument("--video", default="data/input2.mp4",
                         help="input video")
     parser.add_argument("--output", default=OUTPUT_ROOT,
                         help="base output directory, holding one folder per video")

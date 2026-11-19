@@ -1,6 +1,6 @@
 # Data
 
-`Input_video2.mp4` is the demo clip used throughout the project: a single rally
+`input2.mp4` is the demo clip used throughout the project: a single rally
 from a singles match, filmed by a fixed broadcast camera (1008 frames, 30 fps).
 
 It is excerpted from broadcast footage and included only for academic,

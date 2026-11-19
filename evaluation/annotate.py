@@ -27,19 +27,19 @@ Three modes:
            unsure). Output CSV: frame,player_id,label. Resumes an existing file.
 
 Usage (from project root):
-    python evaluation/annotate.py boxes --video data/Input_video2.mp4 \\
-        --step 30 --output ground_truth/players_Input_video2_gt.csv
+    python evaluation/annotate.py boxes --video data/input2.mp4 \\
+        --step 30 --output ground_truth/players_input2_gt.csv
 
-    python evaluation/annotate.py court --video data/Input_video2.mp4 \\
-        --output ground_truth/court_Input_video2_gt.csv
+    python evaluation/annotate.py court --video data/input2.mp4 \\
+        --output ground_truth/court_input2_gt.csv
 
-    python evaluation/annotate.py ball --video data/Input_video2.mp4 --step 10
+    python evaluation/annotate.py ball --video data/input2.mp4 --step 10
 
     # training labels where the current tracker misses the ball:
     python evaluation/annotate.py ball --video data/input10.mp4 --step 2 \\
         --frames-from outputs/input10/ball_coordinates/ball_input10.csv
 
-    python evaluation/annotate.py bounce --video data/Input_video2.mp4
+    python evaluation/annotate.py bounce --video data/input2.mp4
 
     # the shots of the real-time results (--results outputs for the offline ones):
     python evaluation/annotate.py shots --video data/input22.mp4
@@ -569,7 +569,7 @@ def main():
     sub = parser.add_subparsers(dest="mode", required=True)
 
     pb = sub.add_parser("boxes", help="annotate player bounding boxes")
-    pb.add_argument("--video", default="data/Input_video2.mp4")
+    pb.add_argument("--video", default="data/input2.mp4")
     pb.add_argument("--step",  type=int, default=30,
                     help="annotate every N-th frame (default: 30)")
     pb.add_argument("--start", type=int, default=30,
@@ -579,14 +579,14 @@ def main():
                     help="output CSV (default: ground_truth/players_<video name>_gt.csv)")
 
     pc = sub.add_parser("court", help="annotate court keypoints")
-    pc.add_argument("--video", default="data/Input_video2.mp4")
+    pc.add_argument("--video", default="data/input2.mp4")
     pc.add_argument("--frame", type=int, default=0,
                     help="frame to annotate (default: 0)")
     pc.add_argument("--output", default=None,
                     help="output CSV (default: ground_truth/court_<video name>_gt.csv)")
 
     pl = sub.add_parser("ball", help="annotate the ball centre on sampled frames")
-    pl.add_argument("--video", default="data/Input_video2.mp4")
+    pl.add_argument("--video", default="data/input2.mp4")
     pl.add_argument("--step", type=int, default=10,
                     help="annotate every N-th frame (default: 10)")
     pl.add_argument("--start", type=int, default=0, help="first frame (default: 0)")
@@ -597,13 +597,13 @@ def main():
                          "on (--step then counts among those), to label for training")
 
     pn = sub.add_parser("bounce", help="mark the frames where the ball touches the ground")
-    pn.add_argument("--video", default="data/Input_video2.mp4")
+    pn.add_argument("--video", default="data/input2.mp4")
     pn.add_argument("--start", type=int, default=0, help="first frame (default: 0)")
     pn.add_argument("--output", default=None,
                     help="output CSV (default: ground_truth/bounce_<video name>_gt.csv)")
 
     ps = sub.add_parser("shots", help="label the type of every shot the pipeline found")
-    ps.add_argument("--video", default="data/Input_video2.mp4")
+    ps.add_argument("--video", default="data/input2.mp4")
     ps.add_argument("--results", default=os.path.join(OUTPUT_ROOT, "realtime"),
                     help="results folder whose shots are labelled (default: outputs/realtime)")
     ps.add_argument("--output", default=None,

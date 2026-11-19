@@ -31,10 +31,10 @@ These rules are the fallback: a shot whose bounce is known gets its type from th
 flight to that bounce (classify_flight).
 
 Use (from project root, after the ball CSV exists):
-    python analysis/shot_analysis.py --ball outputs/Input_video2/ball_coordinates/ball_Input_video2.csv
-    python analysis/shot_analysis.py --ball outputs/Input_video2/ball_coordinates/ball_Input_video2.csv \\
+    python analysis/shot_analysis.py --ball outputs/input2/ball_coordinates/ball_input2.csv
+    python analysis/shot_analysis.py --ball outputs/input2/ball_coordinates/ball_input2.csv \\
         --p1-hand right --p2-hand left
-    python analysis/shot_analysis.py --events outputs/Input_video2/shot_analysis/events.csv
+    python analysis/shot_analysis.py --events outputs/input2/shot_analysis/events.csv
     python analysis/shot_analysis.py --self-test        # synthetic, no YOLO
     python analysis/shot_analysis.py --type-self-test   # vs labelled ground truth
 """
@@ -1768,9 +1768,9 @@ def self_test() -> None:
           "(including the left-handed case); mid-court bounces ignored.")
 
 
-# ── labelled shot-type validation (real Input_video2 ground truth) ──────────────
+# ── labelled shot-type validation (real input2 ground truth) ──────────────
 
-# User-provided ground truth for the 23 detected shots of Input_video2. A
+# User-provided ground truth for the 23 detected shots of input2. A
 # "dropshot/slice" label is ambiguous and counts correct for EITHER.
 _TYPE_GROUND_TRUTH = {
     84: "flat", 115: "flat", 152: "flat", 188: "flat", 225: "flat",
@@ -1785,13 +1785,13 @@ _TYPE_TARGET_ACC = 0.90
 def type_self_test(ball_csv: str = None, players_csv: str = None,
                    court_csv: str = None, fps: float = 30.0) -> None:
     """
-    Validate the shot-TYPE classifier against the Input_video2 ground truth,
+    Validate the shot-TYPE classifier against the input2 ground truth,
     end-to-end through the real analyze_shots pipeline.
 
     Each GT frame is matched to the nearest detection within ±3 frames; extra
     detections are ignored. Exits non-zero if accuracy < 90 %.
     """
-    paths = clip_paths("Input_video2",
+    paths = clip_paths("input2",
                        str(Path(__file__).resolve().parent.parent / "outputs"))
     ball_csv = ball_csv or paths["ball_csv"]
     players_csv = players_csv or paths["players_csv"]
@@ -1802,7 +1802,7 @@ def type_self_test(ball_csv: str = None, players_csv: str = None,
         if not os.path.exists(path):
             raise SystemExit(
                 f"TYPE-SELF-TEST: missing {label} CSV: {path}\n"
-                "  This test needs the real Input_video2 outputs "
+                "  This test needs the real input2 outputs "
                 "(run the tracking pipeline first).")
 
     track = load_ball_track(ball_csv)
@@ -2009,7 +2009,7 @@ def main() -> None:
     parser.add_argument("--court", default=None,
                         help="court keypoints CSV (defaults to "
                              "outputs/<video name>/court_coordinates/<video name>_court.csv)")
-    parser.add_argument("--video", default="data/Input_video2.mp4",
+    parser.add_argument("--video", default="data/input2.mp4",
                         help="source video for the verification PNGs")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--p1-hand", choices=["right", "left"],
@@ -2105,7 +2105,7 @@ def main() -> None:
     parser.add_argument("--type-self-test", action="store_true",
                         dest="type_self_test",
                         help="validate shot-type classification against the "
-                        "embedded 23-shot ground truth for Input_video2")
+                        "embedded 23-shot ground truth for input2")
     parser.add_argument("--overhead-self-test", action="store_true",
                         dest="overhead_self_test",
                         help="validate serve/smash (overhead) detection on "

@@ -14,9 +14,9 @@ MV convention: (u, v) maps prev -> cur, i.e. cur(x, y) ~ prev(x - u, y - v).
 Usage (from project root):
     python motion_estimation/block_matching.py
     python motion_estimation/block_matching.py --method full --frames 3
-    python motion_estimation/block_matching.py --video data/Input_video2.mp4 \\
+    python motion_estimation/block_matching.py --video data/input2.mp4 \\
         --method tss --block 16 --range 12 --scale 0.5 --start 40 \\
-        --frames 5 --step 2 --output outputs/Input_video2/motion_estimation
+        --frames 5 --step 2 --output outputs/input2/motion_estimation
 """
 
 import argparse
@@ -180,7 +180,7 @@ def draw_motion_field(frame, u, v, block, min_mag=1.0):
 def main():
     parser = argparse.ArgumentParser(
         description="Block-matching motion estimation (full search / TSS)")
-    parser.add_argument("--video",  default="data/Input_video2.mp4")
+    parser.add_argument("--video",  default="data/input2.mp4")
     parser.add_argument("--method", choices=["tss", "full", "both"],
                         default="tss",
                         help="Search strategy (both = compare on each pair)")
