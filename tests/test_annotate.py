@@ -15,3 +15,13 @@ def test_every_shot_type_of_the_pipeline_has_a_key():
     assert {"flat", "slice", "dropshot", "lob", "volley"} <= labels   # shot_type values
     assert {"smash", "serve"} <= labels                              # overhead values
     assert len(labels) == len(SHOT_KEYS)                             # one key per label
+
+
+def test_hands_come_from_the_list_unless_given(tmp_path, monkeypatch):
+    from utils import paths
+    hands = tmp_path / "hands.csv"
+    hands.write_text("clip,p1_hand,p2_hand\ninput16,left,right\n")
+    monkeypatch.setattr(paths, "HANDS_CSV", str(hands))
+    assert paths.clip_hands("data/input16.mp4") == ("left", "right")
+    assert paths.clip_hands("data/input3.mp4") == ("right", "right")
+    assert paths.clip_hands("data/input16.mp4", "right", "left") == ("right", "left")

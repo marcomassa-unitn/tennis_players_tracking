@@ -51,6 +51,23 @@ def clip_paths(video: str, output: str = OUTPUT_ROOT) -> dict:
     }
 
 
+HANDS_CSV = os.path.join(GROUND_TRUTH_DIR, "hands.csv")
+
+
+def clip_hands(video: str, p1=None, p2=None) -> tuple:
+    """Dominant hands (p1, p2) of a clip: given ones first, then HANDS_CSV, else right.
+
+    HANDS_CSV (clip,p1_hand,p2_hand) lists only the clips with a left-hander.
+    """
+    listed = {}
+    if os.path.exists(HANDS_CSV):
+        import csv
+        with open(HANDS_CSV, newline="") as f:
+            listed = {r["clip"]: (r["p1_hand"], r["p2_hand"]) for r in csv.DictReader(f)}
+    q1, q2 = listed.get(clip_stem(video), ("right", "right"))
+    return p1 or q1, p2 or q2
+
+
 def ground_truth_path(kind: str, video: str) -> str:
     """Annotation file of a clip; `kind` is players, court, ball, bounce or shots."""
     return os.path.join(GROUND_TRUTH_DIR, f"{kind}_{clip_stem(video)}_gt.csv")
