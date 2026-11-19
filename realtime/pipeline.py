@@ -437,6 +437,7 @@ class RealtimePipeline:
             "ball_fallback": self.fallback,
             "ball_refilled": self.ball.n_refilled,
             "ball_found_again_high": self.ball.n_high_found,
+            "ball_off_its_way_back": self.ball.n_off_corridor,
             "ball_riding_a_player": self.path.n_riding,
             "ball_fallback_crops_per_frame": round(
                 self.ball.n_fallback / max(len(self.timer.frame_ms), 1), 3),

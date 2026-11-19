@@ -167,6 +167,25 @@ def test_a_ball_lost_at_the_top_is_found_again_where_it_left():
     assert np.hypot(live["cx"] - centres[i][0], live["cy"] - centres[i][1]) < 8
 
 
+def test_nothing_far_to_the_side_is_taken_for_a_ball_out_at_the_top():
+    frames, centres = _lob_clip()
+    for t in range(45, len(frames)):          # a spectator waving in the stands, far left
+        cv2.circle(frames[t], (150 + 4 * (t % 2), 400 + t), 6, (60, 230, 230), -1)
+    bg = OnlineBackground(30, (W, H), PROC, roi=(0, 0, W, H), threaded=False, warmup_s=0.5)
+    tracker = OnlineBallTracker(DiffBlobBackend(), bg.scale, H, search="tiles",
+                                search_roi=(0, 200, W, H))
+    taken = []
+    for i, f in enumerate(frames):
+        live, rows = tracker.step(i, f, bg.snapshot)
+        bg.feed(i, f)
+        taken += [(r[1] + r[3]) / 2 for r in rows]
+        if tracker.n_high_found:
+            break
+    assert tracker.n_off_corridor > 0                          # the spectator was seen...
+    assert min(taken) > 400                                    # ...and never kept
+    assert tracker.n_high_found == 1                           # the ball, where it left
+
+
 def test_gpu_batches_are_padded_to_a_few_sizes():
     from tracking.ball_model import batch_bucket
     assert [batch_bucket(n) for n in (1, 2, 3, 5, 15, 16, 17, 40)] == [1, 2, 4, 8, 16, 16, 32, 32]
