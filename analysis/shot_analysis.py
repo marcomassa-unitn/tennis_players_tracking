@@ -924,6 +924,49 @@ def drop_unanswered_bounces(hits, real_ball, conv, fps, keep=(), params=None):
     return kept
 
 
+def keep_last_contact_on_one_side(hits, real_ball, boxes, conv, fps, keep=(), params=None):
+    """Of two shots of one player, keep only the later if the ball never left them.
+
+    The opponent can only have played a ball that went to them: seen on their side
+    of the net or within their reach (a volley at the net: the ball in the air there
+    is seen over the far court), or unseen long enough to go there and back
+    (duplicate_s). If none of these,
+    the ball stayed with this player all along, and the earlier "shot" was the ball
+    arriving (a bounce out of sight, a lob the player runs after, a hand taken for
+    the ball): the later one sends it over. Without this, fill_missing_hits gives
+    the opponent a shot at a ball that never reached them. A serve or smash in
+    `keep` is never dropped.
+    """
+    p = params or CONTACT_PARAMS
+    if real_ball is None or real_ball.empty:
+        return list(hits)
+    frames = real_ball["frame"].to_numpy(float)
+    xy = real_ball[["cx", "cy"]].to_numpy(float)
+    y_m = conv.to_meters_batch(xy)[:, 1]
+
+    def stayed(f0, f1, pid):
+        inside = (frames > f0) & (frames < f1)
+        on_own_side = y_m[inside] < NET if pid == 2 else y_m[inside] > NET
+        if not on_own_side.all():
+            return False
+        for f, ball in zip(frames[inside], xy[inside]):
+            box = _nearest_box(boxes, int(f), 3 - pid)
+            if box is not None and _ball_near_player(ball, box):
+                return False
+        seen = np.r_[f0, frames[inside], f1]
+        return np.diff(seen).max() < p["duplicate_s"] * fps
+
+    out = []
+    for hit in sorted(hits):
+        if (out and out[-1][1] == hit[1] and out[-1][0] not in keep
+                and hit[0] - out[-1][0] <= p["max_fill_s"] * fps
+                and stayed(out[-1][0], hit[0], hit[1])):
+            out[-1] = hit
+            continue
+        out.append(hit)
+    return out
+
+
 def fill_missing_hits(hits, events, real_ball, fps, params=None):
     """Add the shot that must exist between two shots of one player.
 
@@ -1259,6 +1302,8 @@ def analyze_shots(track, boxes, conv, fps, hands, min_gap_s=0.5,
     if flight_known:
         hits = drop_unanswered_bounces(hits, real_ball, conv, fps,
                                        {*serve_starts, *smash_frames})
+        hits = keep_last_contact_on_one_side(hits, real_ball, boxes, conv, fps,
+                                             {*serve_starts, *smash_frames})
         hits, added = fill_missing_hits(hits, events, real_ball, fps)
         ball_at.update(added)
     # Within a point the players alternate: drop doubles, infer what is still missing.
