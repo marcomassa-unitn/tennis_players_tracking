@@ -24,6 +24,7 @@ from analysis.shot_analysis import (
     impact_point,
     is_volley,
     keep_last_contact_on_one_side,
+    lost_going_up,
     move_contacts_off_bounces,
     shot_category,
     shot_side,
@@ -194,6 +195,21 @@ def test_the_opponent_cannot_play_a_ball_that_never_came_to_him(conv):
     assert keep_last_contact_on_one_side(hits, went, boxes, conv, 30.0) == hits
     unseen = _ball_from(conv, range(101, 110), 0.0, -2.0)     # then 50 frames out of sight
     assert keep_last_contact_on_one_side(hits, unseen, boxes, conv, 30.0) == hits
+
+
+def test_a_ball_that_goes_up_high_and_is_lost_is_a_lob(conv):
+    """The far player's lob, out of the picture at the top: only its start is seen."""
+    box = (900.0, 250.0, 50.0, 100.0)                         # head at y = 250
+    lob = pd.DataFrame({"frame": [100, 101, 102, 103], "cx": 930.0,
+                        "cy": [260.0, 235.0, 210.0, 185.0]})  # rising over the head
+    assert lost_going_up(100, "far", box, 160, lob, conv, 30.0)
+    assert not lost_going_up(100, "far", box, 125, lob, conv, 30.0)      # replied at once
+    seen_on = pd.concat([lob, pd.DataFrame({"frame": [106], "cx": 930.0, "cy": [170.0]})])
+    assert lost_going_up(100, "far", box, 160, seen_on, conv, 30.0)      # last seen 106
+    back = pd.concat([lob, pd.DataFrame({"frame": [111], "cx": 930.0, "cy": [190.0]})])
+    assert not lost_going_up(100, "far", box, 160, back, conv, 30.0)     # found again
+    low = lob.assign(cy=lob["cy"] + 100.0)                    # a ball rising to the head
+    assert not lost_going_up(100, "far", box, 160, low, conv, 30.0)
 
 
 def _smash_boxes(conv, contact, y_m=None):
