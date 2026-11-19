@@ -222,6 +222,7 @@ class RealtimePipeline:
         self.ball = OnlineBallTracker(backend, self.bg.scale, H, search, search_every,
                                       fallback=fallback, fps=fps)
         self.path = OnlinePathDP(fps, H)
+        self.ball.set_still(self.path.still)    # never follow what stands still
         self._last_final = None
         candidates = []
         self.live_rows = []                 # zero-lag Kalman estimate, per frame
@@ -439,6 +440,7 @@ class RealtimePipeline:
             "ball_found_again_high": self.ball.n_high_found,
             "ball_off_its_way_back": self.ball.n_off_corridor,
             "ball_riding_a_player": self.path.n_riding,
+            "ball_standing_still": self.path.still.n_dropped,
             "ball_fallback_crops_per_frame": round(
                 self.ball.n_fallback / max(len(self.timer.frame_ms), 1), 3),
             "ball_positions_final": len(self.path.final),

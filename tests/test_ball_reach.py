@@ -109,3 +109,45 @@ def test_the_search_starts_again_only_where_the_lost_ball_can_be(reach):
     assert not tracker._reachable(14, (943, 693, 957, 707, 0.9))     # the near player's head
     assert tracker._reachable(14, (943, 270, 957, 284, 0.9))         # near the top of the lob
     assert tracker.n_refused == 1
+
+
+def _at(f, x, y, conf=0.6):
+    return (f, x - 7, y - 7, x + 7, y + 7, conf, 0.3, "search")
+
+
+def test_something_standing_still_is_not_the_ball():
+    """A camera lens by the boards: never in the track, and dropped at once next time."""
+    dp = OnlinePathDP(30.0)
+    for f in range(30):
+        dp.push(f, [_at(f, 1680.0 + 0.1 * f, 418.0)])
+    for f in range(30, 60):
+        dp.push(f, [])
+    live = dp.still.n_dropped
+    for f in range(60, 66):                                    # it comes back
+        dp.push(f, [_at(f, 1683.0, 418.0)])
+    assert dp.still.n_dropped - live == 4                      # from its 3rd frame
+    dp.flush()
+    assert not dp.final
+
+
+def test_a_slow_ball_and_a_ball_held_by_a_player_are_not_still():
+    slow = OnlinePathDP(30.0)
+    for f in range(30):
+        slow.push(f, [_at(f, 900.0, 300.0 + 2 * f)])          # the top of a lob, far away
+    assert slow.still.n_dropped == 0
+    held = OnlinePathDP(30.0)
+    server = {NEAR: (1000.0, 700.0, 100.0, 220.0)}
+    for f in range(30):
+        held.push(f, [_at(f, 1060.0, 640.0)], server)          # over the head before a toss
+    assert held.still.n_dropped == 0
+
+
+def test_the_first_frames_of_a_still_thing_do_not_stay_in_the_track():
+    dp = OnlinePathDP(30.0)
+    for f in range(20):
+        dp.push(f, [_at(f, 950.0, 400.0 + 15 * f)])           # the ball, then lost
+    for f in range(20, 60):
+        dp.push(f, [_at(f, 1680.0, 418.0)])                   # a lens, taken for it
+    dp.flush()
+    assert all(f in dp.final for f in range(16))
+    assert not any(f in dp.final for f in range(20, 60))

@@ -236,10 +236,23 @@ class OnlineBallTracker:
         self.last_vel = None           # its velocity (px/frame), from the Kalman filter
         self.last_players = ()         # the player boxes then
         self.reach = None              # ball_reach.BallReach, once the court is known
+        self.still = None              # ball_tracking.StillSpots of the path search
+        self.players = ()              # player boxes of the current frame
         self.n_refused = 0             # SEARCH detections the ball could not reach
 
     def set_search_roi(self, roi):
         self.search_roi = roi
+
+    def set_still(self, still):
+        """Never follow what the path search found standing still (StillSpots)."""
+        self.still = still
+
+    def _moves(self, frame_idx, det):
+        """False on a known still spot: a camera lens, a head in the crowd."""
+        if self.still is None:
+            return True
+        return not self.still.is_still(frame_idx, (det[0] + det[2]) / 2, (det[1] + det[3]) / 2,
+                                       self.players)
 
     def set_reach(self, reach):
         """After a loss, start again only where the ball can be (ball_reach)."""
@@ -442,7 +455,8 @@ class OnlineBallTracker:
         self.last_crops = origins
         dets = self._detect(snap, frame, origins, shift, frame_idx)
         rows = self._rows(frame_idx, dets, gray, "high")
-        good = [d for d, r in zip(dets, rows) if d[4] >= ACQUIRE_CONF and r[6] >= MIN_MOTION]
+        good = [d for d, r in zip(dets, rows) if d[4] >= ACQUIRE_CONF and r[6] >= MIN_MOTION
+                and self._moves(frame_idx, d)]
         if not good:
             return None, rows
         best = max(good, key=lambda d: d[4])
@@ -456,7 +470,8 @@ class OnlineBallTracker:
         Only on moving ones: a still ball-like thing (a ball kid's cap, a ball in a
         pocket) would hold the track there and keep the search from the real ball.
         """
-        good = [d for d, r in zip(dets, rows) if d[4] >= ACQUIRE_CONF and r[6] >= MIN_MOTION]
+        good = [d for d, r in zip(dets, rows) if d[4] >= ACQUIRE_CONF and r[6] >= MIN_MOTION
+                and self._moves(frame_idx, d)]
         # ...and only where the ball lost a moment ago can be by now (ball_reach): a
         # confident detection on the other player's head is no reason to jump there.
         good = [d for d in good if self._reachable(frame_idx, d)]
@@ -484,6 +499,7 @@ class OnlineBallTracker:
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         live, rows = None, []
+        self.players = tuple(players)
         if snap is not None and snap.full is not None:
             if self.state == self.TRACKING:
                 gap = 1 if self.prev_idx is None else max(1, frame_idx - self.prev_idx)
@@ -539,7 +555,9 @@ class OnlineBallTracker:
         chosen = None
         # A still detection is not the ball in play (the path search drops it too):
         # following it would hold the crop on a ball kid's cap for the whole clip.
-        gated = [d for d, r in zip(dets, rows) if in_gate(d) and r[6] >= MIN_MOTION]
+        # Nor anything standing still: let the track go, and the SEARCH find the ball.
+        gated = [d for d, r in zip(dets, rows) if in_gate(d) and r[6] >= MIN_MOTION
+                 and self._moves(frame_idx, d)]
         # The colour detector only where the ball is surely on a player, part of the
         # silhouette the motion model cannot tell it from.
         if not gated and self.fallback is not None and inside_player(px, py, players):
@@ -560,7 +578,7 @@ class OnlineBallTracker:
             # A jump to a confident detection away from the prediction (a racket
             # hit) only to something moving: never a still ball in a pocket.
             strong = [d for d, r in zip(dets, rows) if d[4] >= STRONG_CONF
-                      and r[6] >= STRONG_MIN_MOTION]
+                      and r[6] >= STRONG_MIN_MOTION and self._moves(frame_idx, d)]
             if strong:
                 chosen = max(strong, key=lambda d: d[4])
                 cx, cy = (chosen[0] + chosen[2]) / 2, (chosen[1] + chosen[3]) / 2

@@ -85,7 +85,16 @@ RESTART_ENDS = 20          # with a physical check: earlier path ends a restart 
 RIDE_FRAMES = 3            # a candidate in the same place of a player's box this many
 RIDE_TOL = 0.08            # frames before (within this fraction of the box) is part of
                            # the player (a head, a hand), not the ball (online only)
-SPIKE_SPEED_PX = 80        # a detection this fast in and out...
+STILL_FRAMES = 15          # a candidate with one within STILL_PX of it in STILL_MIN_SEEN
+STILL_MIN_SEEN = 13        # of the STILL_FRAMES frames before stands still: a ball in
+STILL_PX = 6               # flight never does (online only, away from the players); at
+                           # the top of a pure vertical rise, far away, gravity keeps it
+                           # within 6 px for 12 frames at most
+STILL_MEMORY_S = 10.0      # a still spot is dropped at once for this long after
+STILL_PLAYER_SIDE = 0.6    # by a player (box grown by this x width on the sides and...
+STILL_PLAYER_TOP = 1.0     # ...this x height above: the ball held, the top of a toss)
+                           # nothing counts as still
+SPIKE_SPEED_PX = 80       # a detection this fast in and out...
 SPIKE_DETOUR = 3.0         # ...on a path this much longer than its neighbours' gap
                            # is a one-frame false positive
 MAX_GAP_S = 0.33           # gaps up to this long are filled; longer ones stay empty
@@ -461,6 +470,77 @@ def track_candidates(cands, n_frames, fps, frame_height=1080):
     return {} if end is None else dp.backtrack(end)
 
 
+class StillSpots:
+    """Things that stand still in the picture away from the players: never the ball.
+
+    A ball in play is never still: gravity alone moves it tens of pixels in a third
+    of a second, and it flies on besides. A TV camera's lens by the boards, a head in
+    the crowd, a ball lying by the fence stay put, and the model may take them for
+    the ball the moment it is lost (input22: a camera lens, three times). Once a spot
+    is found still it is remembered for STILL_MEMORY_S, so it is dropped at once when
+    it comes back. By a player nothing counts as still: the ball held before a serve
+    and the top of a toss are in play.
+    """
+
+    def __init__(self, fps, frame_height=1080):
+        self.r = STILL_PX * frame_height / 1080
+        self.memory = max(1, int(round(STILL_MEMORY_S * fps)))
+        self.recent = {}                # frame -> (n, 2) candidate centres
+        self.spots = []                 # [x, y, last frame seen still]
+        self.n_dropped = 0
+
+    @staticmethod
+    def by_player(x, y, players):
+        for px, py, w, h in players:
+            if (px - STILL_PLAYER_SIDE * w <= x <= px + w + STILL_PLAYER_SIDE * w
+                    and py - STILL_PLAYER_TOP * h <= y <= py + h):
+                return True
+        return False
+
+    def _spot(self, frame, x, y):
+        for s in self.spots:
+            if abs(x - s[0]) <= self.r and abs(y - s[1]) <= self.r and frame - s[2] <= self.memory:
+                return s
+        return None
+
+    def covers(self, x, y):
+        """True if (x, y) is on a still spot known now (for frames already committed)."""
+        return any(abs(x - s[0]) <= self.r and abs(y - s[1]) <= self.r for s in self.spots)
+
+    def is_still(self, frame, x, y, players=()):
+        """True if (x, y) is a known still spot (and not by a player)."""
+        return not self.by_player(x, y, players) and self._spot(frame, x, y) is not None
+
+    def update(self, frame, centres, players=()):
+        """Record the candidates of `frame`; True for each one standing still."""
+        pts = np.asarray(centres, float).reshape(-1, 2)
+        still = np.zeros(len(pts), bool)
+        for j, (x, y) in enumerate(pts):
+            if self.by_player(x, y, players):
+                continue
+            seen = [bool(len(q)) and bool((np.hypot(q[:, 0] - x, q[:, 1] - y) <= self.r).any())
+                    for q in (self.recent.get(frame - k, ()) for k in range(1, STILL_FRAMES + 1))]
+            spot = self._spot(frame, x, y)
+            # A known spot is dropped as soon as it is there for the third frame in a
+            # row: a ball merely flying over it is not, even a slow one (3 frames
+            # within STILL_PX). Then the spot follows it, as a camera pans slowly.
+            if spot is not None and seen[0] and seen[1]:
+                spot[:] = [x, y, frame]
+                still[j] = True
+            elif sum(seen) >= STILL_MIN_SEEN:
+                if spot is None:
+                    self.spots.append([x, y, frame])
+                else:
+                    spot[2] = frame
+                still[j] = True
+        self.recent[frame] = pts
+        for f in [f for f in self.recent if f < frame - STILL_FRAMES]:
+            del self.recent[f]
+        self.spots = [s for s in self.spots if frame - s[2] <= self.memory]
+        self.n_dropped += int(still.sum())
+        return still
+
+
 class OnlinePathDP:
     """Fixed-lag version of the offline tracking, for the live pipeline.
 
@@ -488,6 +568,7 @@ class OnlinePathDP:
         self.final = {}                 # frame -> box, after the clean-up
         self.on_player = {}             # frame -> [(pid, rx, ry)] of candidates in a box
         self.n_riding = 0               # candidates dropped as part of a player
+        self.still = StillSpots(fps, frame_height)   # ...and as standing still
 
     def _rides_a_player(self, frame, cx, cy, players):
         """True if (cx, cy) has kept its place in a player's box for RIDE_FRAMES frames.
@@ -522,6 +603,7 @@ class OnlinePathDP:
 
         players: {pid: (x, y, w, h)} at `frame` (or a list of boxes): candidates
         that ride with a player are dropped, and a hit is checked physically.
+        Candidates standing still away from the players are dropped (StillSpots).
         Returns the positions finalised by this call, {frame: box}.
         """
         if self.first is None:
@@ -531,6 +613,10 @@ class OnlinePathDP:
         for r in rows:
             if r[7] == "motion":
                 self.blobs.add((int(r[0]), float(r[1]), float(r[2])))
+        # Every candidate counts towards stillness, the weak and the unmoving too.
+        still = self.still.update(frame, [((r[1] + r[3]) / 2, (r[2] + r[4]) / 2) for r in rows],
+                                  [b for _, b in players])
+        rows = [r for r, s in zip(rows, still) if not s]
         good = [r[:7] for r in rows if r[5] >= MIN_TRACK_CONF
                 and (r[6] >= MIN_MOTION or frame == self.first)]
         if players:
@@ -562,6 +648,14 @@ class OnlinePathDP:
             return {}
         lo = self.finalised - self.WINDOW
         window = {f: b for f, b in self.committed.items() if f >= lo}
+        # A spot is found still only after STILL_MIN_SEEN frames: its first frames
+        # may be committed by then, and are dropped here, before they are final.
+        on_spot = [f for f, b in window.items() if f > self.finalised
+                   and self.still.covers((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)]
+        for f in on_spot:
+            del window[f]
+            del self.committed[f]
+        self.still.n_dropped += len(on_spot)
         clean = drop_outliers(drop_short_blob_runs(window, self.blobs), self.height)
         out = {f: b for f, b in clean.items() if self.finalised < f <= upto}
         self.final.update(out)
