@@ -1,7 +1,12 @@
 # The real-time pipeline and the motion ball detector (on top of requirements.txt).
-# Inference only: onnxruntime runs the exported model on the CPU.
+#
+# CPU: the exported model (models/ball_motion.onnx) runs on onnxruntime.
 onnxruntime>=1.17
-# For a NVIDIA GPU, replace it with:
-#   onnxruntime-gpu>=1.17
+#
+# NVIDIA GPU: the .pt models (models/ball_motion.pt and the colour fallback
+# models/ball_tracker.pt) run on PyTorch through Ultralytics. Install a CUDA build of
+# torch first (https://pytorch.org/get-started/locally/), then:
+#   ultralytics>=8.3
+#
 # Training and export (Kaggle notebook, or locally):
 #   ultralytics>=8.3   onnx   onnxslim

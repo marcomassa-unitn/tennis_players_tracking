@@ -8,78 +8,130 @@
 **Turn a single, uncalibrated broadcast tennis clip into structured match data:**
 court geometry, metric player trajectories, movement statistics, the ball track,
 its bounces and a shot-by-shot breakdown (forehand/backhand, flat/slice/dropshot/lob/volley,
-serve/smash).
+serve/smash), either **offline**, over the whole clip, or **in real time**, in one
+pass over the frames as a camera gives them.
 
 The core is **classical computer vision**. Court detection, player tracking, motion
-estimation and shot reasoning are training-free and interpretable. The ball is
-the one exception: it is small and fast, so it uses a YOLOv8 detector.
+estimation, bounces and shot reasoning are training-free and interpretable. The
+ball is the one exception: it is small and fast, so it uses a YOLO detector, and
+in real time a small one that reads the motion.
 
 <p align="center">
   <img src="assets/demo.gif" alt="Live viewer: tracked players and ball, synced top-down minimap and live shot tally" width="900">
 </p>
+
+## What's new in v2
+
+- **A real-time pipeline** ([`realtime_pipeline.py`](realtime_pipeline.py)): court,
+  players, ball, bounces and shots in one causal pass, at about 21 fps on a Kaggle
+  T4 and 18–26 fps on a laptop CPU, with the same output files as the offline one.
+- **A motion ball detector**: YOLO11n on 320 × 320 crops of grey + background
+  differences, trained on Kaggle from the clips themselves. It finds the ball on
+  81 % of the frames of 22 clips, against 75 % for the offline YOLOv8x.
+- **Physical checks on the ball track**: a jump the ball cannot make at 240 km/h,
+  a candidate that moves with a player (a head, a hand), something standing still
+  (a TV camera's lens), a ball that went out at the top and is "found" in the
+  stands are all refused.
+- **Shot types from the physics of the flight**, with heights corrected for drag,
+  and lobs recognised even when they fly out of the picture. Checked against **79
+  hand-labelled shots on 4 clips: 67 right (85 %)**.
+- **22 test clips** from hard, clay and grass courts, hand labels for the ball,
+  the bounces and the shots, and a per-clip list of left-handed players.
 
 ## Highlights
 
 - **Court reconstruction without training.** The full ITF court model,
   including the doubles alleys, is fitted to the white line markings. Each
   candidate homography is scored by how much of the *whole* court it puts on
-  line pixels, so banners, net and writing next to the court are rejected. The
-  same settings work on five clips from three tournaments, and the fitted
-  lines land within about 1 px of the painted ones.
+  line pixels, so banners, net and writing next to the court are rejected. On 21
+  of the 22 clips 96–99 % of the court model lands on line pixels, with the same
+  settings, and the fitted lines land within about 1 px of the painted ones.
 - **One homography, metric everything.** A single RANSAC homography maps pixels
   to court metres, so positions, distances, speeds (km/h) and zone occupancy are
   all physical quantities.
 - **Two-player tracking that does not depend on how the clip starts.** The
-  background is the median of frames spread over the whole clip, so a player
-  standing still to serve is still detected, and fade-ins from black do not
-  matter. Identities come from the court half (through the homography), so a
-  player who is lost comes back as soon as they are visible again. The camera
-  tilting or panning a few pixels is compensated by phase correlation. Camera
-  shake, cast shadows and on-screen TV graphics are filtered out. Both players
-  are found on 95–100 % of the frames of all six test clips.
-- **Ball tracking measured against hand-labelled positions.** A fine-tuned
-  YOLOv8x runs on full-resolution tiles, and the ball is chosen as the best
-  physically plausible path through the candidates. Against hand-labelled ball
-  positions, recall rises from 0.64 to 0.93 with no false positives, and the
-  centre error falls from 2.0 px to 1.2 px. On a second clip, recall goes
-  from 0.72 to 0.95.
-- **Shot types from the ball's physics.** Bounces are found to within a fraction
-  of a frame, and the flight to the bounce gives each shot's type: its duration,
-  landing point and height work the same at both ends of the court. It agrees with
-  all 23 shots of a hand-labelled rally (flat, slice, dropshot, lob), and volleys
-  are told by the missing bounce.
-  Every contact is also classified as forehand or backhand; in the hitmap the
-  colour gives the type of shot and the letter (F, B) its side.
+  background is the median of frames spread over the clip, so a player standing
+  still to serve is still detected, and fade-ins from black do not matter.
+  Identities come from the court half (through the homography), so a player who
+  is lost comes back as soon as they are visible again. The camera tilting or
+  panning a few pixels is compensated by phase correlation. Camera shake, cast
+  shadows and on-screen TV graphics are filtered out. Over the 22 clips the near
+  player is found on 98 % of the frames and the far one on 99 %.
+- **A ball track that obeys physics.** The ball is the best physically plausible
+  path through the detector's candidates. Against hand-labelled positions on two
+  clips, precision / recall are 0.98 / 0.92 and 0.98 / 0.98 in real time, with a
+  centre error under 1 px, and 1.00 / 0.93 and 0.95 / 0.95 offline.
+- **Bounces and shot types from the ball's physics.** Between two events the ball
+  follows a parabola: where two meet gives a bounce, to within a fraction of a
+  frame and 0.1–0.3 m. The flight from the contact to the bounce (landing depth,
+  mean speed, apex) gives the type of each shot; serves, smashes and volleys come
+  from the players' motion and the missing bounce.
 - **Classical motion estimation, implemented from scratch.** Full-search and
   three-step block matching (SAD), next to Farnebäck and Lucas–Kanade optical
   flow.
-- **Engineered as a pipeline.** It runs with one command, headless, and each
-  stage is isolated so one failure doesn't stop the rest. Stages pass data
-  through a stable CSV contract. It also ships an annotation tool, IoU-based
-  evaluation against manual ground truth, unit tests and CI.
+- **Engineered as a pipeline.** Each pipeline runs with one command, headless,
+  and stages pass data through a stable CSV contract. It ships an annotation
+  tool, an evaluation against hand labels, Kaggle notebooks for the GPU work,
+  181 unit tests and CI.
 
-## Results on the demo rally
+## Results
 
-The demo clip (`data/input2.mp4`) is 1008 frames at 30 fps, 1080p. On it
-the pipeline produces:
+### Demo rally
 
-| Stage | Result |
+The demo clip (`data/input2.mp4`) is 1008 frames at 30 fps, 1080p.
+
+| Stage | Offline | Real time |
+|---|---|---|
+| Court | 98 % of the court model on detected line pixels; fitted lines within ≈1 px of the painted ones | same (98 %) |
+| Players | both players on 100 % of the frames, identities fixed by court half | same |
+| Ball, share of frames | 92 % (original single-pass detector: 60 %) | 92 % |
+| Ball vs 100 hand-labelled positions | precision 1.00, recall 0.93, centre error 1.2 px | precision 0.98, recall 0.92, centre error 0.9 px |
+| Bounces vs 25 hand-labelled bounces | precision 1.00, recall 0.96, median time error 0.2 frames, landing error 0.23 m | precision 0.95, recall 0.76, 0.3 frames, 0.31 m |
+| Shots | 25 contacts (13 near player, 12 far player), opening serve identified | 25 contacts, opening serve identified |
+| Shot type vs 23 labels | 19/23 | 21/23 |
+| Movement | near player 94.8 m covered (mean 10.6 km/h, p95 29.6 km/h); far player 104.2 m (mean 11.8 km/h, p95 27.4 km/h) | |
+
+On a second labelled clip (`input3`, 14 bounces) bounces are found with precision
+and recall 1.00 in both pipelines, 0.2 frames and 0.12 m (offline) or 0.21 m (real
+time) off. The synthetic self-tests pass: strokes 4/4, serve and smash 5/5 with no
+false positive.
+
+### 22 clips, real time
+
+Kaggle T4 GPU, one run per clip with `--recalibrate` and the colour fallback,
+writing the overlay video ([`notebooks/realtime_run_kaggle.ipynb`](notebooks/realtime_run_kaggle.ipynb)):
+
+| | Mean over 22 clips (range) |
 |---|---|
-| Court | 98 % of the court model on detected line pixels; fitted lines within ≈1 px of the painted ones |
-| Players | both players detected on 100 % of the frames, identities fixed by court half |
-| Ball | found on 92 % of the frames (original detector: 60 %); vs hand-labelled positions: precision 1.00, recall 0.93, centre error 1.2 px |
-| Movement | near player 94.8 m covered (mean 10.6 km/h, p95 29.6 km/h); far player 104.2 m (mean 11.8 km/h, p95 27.4 km/h) |
-| Shots | 25 contacts detected (13 near player, 12 far player), opening serve identified as a serve |
-| Bounces | vs 25 hand-labelled bounces: precision 1.00, recall 0.96, median time error 0.2 frames, median landing error 0.23 m; on a second clip (14 bounces) 1.00, 1.00, 0.2 frames, 0.12 m |
-| Shot mix | 18 flat, 4 slice, 2 dropshot, 1 lob; 17 backhands, 7 forehands, 1 serve |
-| Shot type | **23/23** against a hand-labelled ground truth (`--type-self-test`)¹ |
-| Self-tests | synthetic stroke test 4/4, synthetic serve/smash test 5/5 with zero false positives |
+| Length | 16.4 s (6.8–39.9 s), 360 s in all |
+| Court model on line pixels | 97 % (one clip 66 %, the others 96–99 %) |
+| Near / far player found | 98 % (88–100 %) / 99 % (95–100 %) of the frames |
+| Ball found | 81 % of the frames (58–98 %); offline 75 % (57–95 %) |
+| Bounces, shots | 195 bounces, 256 shots |
+| Speed | 20.7 fps (16.7–25.2), frame time 37 ms at the median |
+| Delay | ball 0.5 s, bounces 1 s, shots 4 s |
 
-¹ The three flight thresholds were chosen looking at this same rally, so 23/23
-shows the rules fit the labelled data. It is not an accuracy figure on unseen
-footage. On the other clips there are no labels: the 1.05 s split falls in a gap
-(1.04–1.10 s) that held on the five clips measured, and the lobs found there were
-checked by eye.
+The ball is found on 88–98 % of the frames of the first nine clips (most of them
+used for training) and on 58–85 % of the thirteen newer ones, on other courts
+(clay, grass, green) and with other cameras.
+
+### Shot types against hand labels
+
+The shots of four clips were labelled by hand
+([`evaluation/annotate.py shots`](evaluation/annotate.py)): `input2` (23), `input15`,
+`input19` and `input22`, 83 labels in all. A labelled shot counts when the run
+finds a shot of the same player within 6 frames.
+
+| | Shots found | Type right |
+|---|---|---|
+| Real time | 79 | **67 (85 %)** |
+| Offline | 70 | 54 (77 %) |
+
+The flight thresholds were chosen on the real-time tracks of the same four
+clips, so the real-time figure shows how well the rules fit these labels, not an
+accuracy on unseen footage. Of the 12 errors, 5 are slices called flat and the
+reverse, 4 are volleys and smashes not recognised, 2 are reversals of the ball
+near a player taken for shots.
 
 | Combined position heatmap | Court-zone occupancy | Shot hitmap |
 |:---:|:---:|:---:|
@@ -102,20 +154,26 @@ checked by eye.
 flowchart LR
     V[Video] --> C[Court detection<br/><sub>court-model fitting</sub>]
     V --> P[Player tracking<br/><sub>background subtraction</sub>]
-    V --> B[Ball tracking<br/><sub>YOLOv8</sub>]
+    V --> B[Ball tracking<br/><sub>YOLO + path search</sub>]
     C --> H((Homography<br/>px → m))
     H --> P
     H --> PA[Player analysis<br/><sub>distance, speed, zones, heatmaps</sub>]
     P --> PA
     P --> M[Motion estimation<br/><sub>optical flow, block matching</sub>]
     H --> M
-    B --> S[Shot analysis<br/><sub>hits, stroke, shot type</sub>]
+    B --> BD[Bounces<br/><sub>parabolas</sub>]
+    BD --> S[Shot analysis<br/><sub>hits, stroke, shot type</sub>]
+    B --> S
     P --> S
     H --> S
-    P --> E[Evaluation<br/><sub>IoU vs ground truth</sub>]
+    P --> E[Evaluation<br/><sub>vs hand labels</sub>]
     PA --> L[Live viewer]
     S --> L
 ```
+
+The offline pipeline ([`pipeline.py`](pipeline.py)) runs these stages one after
+the other over the whole clip; the real-time one runs them frame by frame (see
+[Real time](#real-time)). Both share the court, player, bounce and shot code.
 
 1. **Court detection** ([`tracking/court_tracking.py`](tracking/court_tracking.py)).
    Line pixels are pixels brighter than their neighbours a few pixels away,
@@ -137,14 +195,13 @@ flowchart LR
    min/max over a few pixels, so the slight shake of broadcast cameras does not
    light up the court lines. While the camera is shifted, the court lines
    themselves are masked, and thin horizontal strips are removed from blobs.
-   Cast
-   shadows are removed, and so are on-screen graphics, which stay pixel-identical
-   from frame to frame. Fragments of the same person are merged, and blobs are
-   kept only if their feet stand in the walkable area of the court. P1 is the
-   player in the near half, P2 the one in the far half. A player seen recently
-   is followed by proximity; otherwise the largest plausible blob in that half
-   is taken. Gaps up to 0.5 s are interpolated and flagged in an `interpolated`
-   column.
+   Cast shadows are removed, and so are on-screen graphics, which stay
+   pixel-identical from frame to frame. Fragments of the same person are merged,
+   and blobs are kept only if their feet stand in the walkable area of the court.
+   P1 is the player in the near half, P2 the one in the far half. A player seen
+   recently is followed by proximity; otherwise the largest plausible blob in
+   that half is taken. Gaps up to 0.5 s are interpolated and flagged in an
+   `interpolated` column.
 3. **Player analysis** ([`analysis/player_analysis.py`](analysis/player_analysis.py)).
    The feet point of each box is projected to metres. From it the stage computes
    distance covered, mean, median, p95 and max speed (with a physiological 45 km/h
@@ -172,77 +229,169 @@ flowchart LR
    path picks the right candidate where a frame-by-frame filter would not.
    One-frame spikes are removed, and gaps up to 0.33 s are filled with a
    shape-preserving cubic and flagged. Detection needs a GPU and runs in the
-   [Colab notebook](notebooks/ball_tracking_colab.ipynb). Its candidates CSV is
+   [Kaggle notebook](notebooks/ball_tracking_kaggle.ipynb). Its candidates CSV is
    reused, so tracking runs on any laptop.
-
-   | Ball vs hand-labelled positions | Precision | Recall | Centre error |
-   |---|---|---|---|
-   | Original detector (whole frame only), input2 | 1.00 | 0.64 | 2.0 px |
-   | **Current**, input2 (101 labelled frames) | **1.00** | **0.93** | **1.2 px** |
-   | Original detector, input1 | 0.97 | 0.72 | 2.1 px |
-   | **Current**, input1 (43 frames) | **0.95** | **0.95** | **1.5 px** |
-
-   On the other test clips, the share of frames with a real detection rises from
-   44–48 % to 88–91 %.
-6. **Shot analysis** ([`analysis/shot_analysis.py`](analysis/shot_analysis.py)).
-   Contacts are detected from persistent reversals of the vertical velocity and
-   from acceleration peaks on the Savitzky–Golay-smoothed ball track, and are
-   kept only when the ball is near a player. That rejects most bounces, and the
-   ones left, right in front of the receiver, are moved to the hit that follows
-   them using the events of the next step. A contact must then send the ball towards
-   the opponent. Within a point the players always alternate. When one player seems
-   to strike twice in a row:
-   - less than 0.6 s apart, it is one contact counted twice, and one is kept, since
-     the ball cannot reach the opponent and come back in less;
-   - further apart, the opponent's shot in between was missed and is added, from
-     the events or from where the ball turned back. With the ball unseen it is
-     added halfway and flagged `inferred`, with its stroke and type unknown.
-
-   The stroke
-   (forehand/backhand) comes from the ball's side relative to the body axis,
-   taking handedness and court side into account. The shot type comes from the
-   flight to the bounce of the next step: a flight under 1.05 s is flat; a slower
-   ball is a dropshot if it lands within 4.5 m of the net, a lob if it flies above
-   2 m, and a slice if it floats lower. The height is the ball's distance in the
-   image from the point below it on the court. A shot played from inside the
-   court with no bounce since the opponent's shot, with the ball coming and going
-   back, is a volley. Shots with no bounce found fall back
-   on perspective-invariant features of the outgoing trajectory. A serve is what opens a
-   point: the first shot after a quiet spell, by a player standing still on their
-   baseline. That holds for any player and needs no ball, often not seen at the far
-   end. The peak of the box raised by arm and racket gives the contact, so the toss
-   release is not mistaken for it. The serve is placed where the server stood
-   before jumping, since feet in the air project to the wrong spot on the court.
-   Smashes are often hit out of sight, the ball of a high lob having left the
-   picture, so they are also found from the motion: the arm-up of a serve from inside
-   the court, followed by the ball leaving the striker's side and crossing the net.
-   Both go in a separate, conservative overhead column.
-7. **Bounce detection** ([`analysis/bounce_detection.py`](analysis/bounce_detection.py)).
+6. **Bounce detection** ([`analysis/bounce_detection.py`](analysis/bounce_detection.py)).
    Between two events the ball flies freely, so in the image it follows almost a
    parabola. The real detections are split into the best sequence of parabolas by
    dynamic programming, and the point where two of them meet gives the time, between
    frames if needed, and the landing point. Physics then filters the junctions: the
-   ground only pushes the ball up the image (typically a jump of 9–13 m/s here, at
-   both ends of the court once scaled to metres), and a bounce lies on the court,
-   where the homography is exact. The order of a rally (hit, bounce on the other side,
+   ground only pushes the ball up the image, and a bounce lies on the court, where
+   the homography is exact. The order of a rally (hit, bounce on the other side,
    hit, …) picks the final labels, which is what separates a near bounce from the
-   near hit that follows it. Pipeline step 6 runs this first, then the shots.
-   Seen from above, a bounce does not turn the ball, so the previous impact, the bounce
-   and the next impact lie on one line. The player's feet are about 0.85 m off it, an
-   arm and a racket away, so the impact is taken on the line, unless the player is out
-   of reach of it. The side of the impact then gives forehand or backhand on the court,
-   and the two methods agree on 92 of the 97 shots where both apply; the five that
-   differ were checked by eye, and the image-based rule was the wrong one in four.
-8. **Evaluation** ([`evaluation/`](evaluation)). A small OpenCV tool annotates
-   ground-truth boxes and court keypoints. The evaluator reports mean and median
-   IoU, precision and recall at IoU 0.5, centre error (px), feet error (m), ID
-   switches and per-keypoint court error.
+   near hit that follows it.
+7. **Shot analysis** ([`analysis/shot_analysis.py`](analysis/shot_analysis.py)).
+   - **Contacts.** Persistent reversals of the vertical velocity and acceleration
+     peaks of the ball, kept only when the ball is near a player. A contact on a
+     bounce of the striker's own side moves to the hit after it, and a contact must
+     send the ball towards the opponent.
+   - **The players alternate.** Two shots of one player less than 0.6 s apart are
+     one contact counted twice. Further apart, the opponent's shot in between was
+     missed and is added, from the events or from where the ball turned back,
+     but only if the ball went to the opponent: seen on their side or within their
+     reach, or out of sight long enough to go there and back. Otherwise the ball
+     never left the player (a lob they run after, a bounce out of sight), and only
+     their later shot is kept.
+   - **Serve.** The opening shot of a point: the first after a quiet spell, by a
+     player standing still on their baseline, with the arm and racket raised. It
+     needs no ball, often not seen at the far end.
+   - **Smash.** The same raised arm inside the court, with the ball seen coming
+     down from above the player in the second before. A hit the ball shows close
+     by wins over it.
+   - **Forehand or backhand.** Seen from above a bounce does not turn the ball, so
+     the previous impact, the bounce and the next impact lie on one line: the impact
+     is taken on that line, an arm and a racket from the feet, and its side gives
+     the stroke. The dominant hands come from
+     [`ground_truth/hands.csv`](ground_truth/hands.csv) (right if not listed) or
+     `--p1-hand` / `--p2-hand`.
+   - **Type, from the flight to the bounce.** The height of the ball is its
+     distance in the image from the point below it on the court; that point moves
+     from the impact to the landing point slowing down as the ball does
+     (exp(−t)), which keeps the heights the same at both ends of the court.
+     A shot is a **dropshot** if it lands within 4.5 m of the net at a mean ground
+     speed of 20 m/s at most, a **lob** if it flies above 2.5 m at 15 m/s at most,
+     a **slice** if it flies at 21 m/s at most and below 1.5 m, otherwise
+     **flat**.
+   - **Taken in the air** (no bounce before the reply): a lob if the flight lasts
+     over 1.05 s, rises by 1 m and goes above 3 m. A **volley** is a shot played
+     from inside the court with no bounce since the opponent's shot, the ball
+     coming and going back.
+   - **A lob out of sight.** A lob often leaves the picture or flies against the
+     crowd. Around the contact the ball goes up the picture, already above the
+     far striker's head (or above the far baseline for the near striker), then
+     nothing is seen for 0.4 s, and the reply comes after 1.05 s.
 
 The [**live viewer**](live_view.py) replays the clip with player and ball boxes,
 a synced minimap, a running shot tally and a court following the ball, with its
 bounces numbered as they happen. The ball moves there on its path over the ground,
-from each contact to each bounce, since an airborne ball cannot be projected. At the end it shows the whole-clip
-heatmap, zones, shot hitmap and bounces.
+from each contact to each bounce, since an airborne ball cannot be projected. At
+the end it shows the whole-clip heatmap, zones, shot hitmap and bounces.
+
+## Real time
+
+<p align="center">
+  <img src="assets/realtime_demo.gif" alt="Real-time overlay: stage timings, the crop read by the ball detector, the ball trail and the events as they are committed" width="720">
+  <br><em>The real-time overlay of the demo rally: timings per stage (top), the crop read by the ball detector, the ball trail, and bounces and shots as they are committed.</em>
+</p>
+
+[`realtime_pipeline.py`](realtime_pipeline.py) runs the whole analysis in **one
+causal pass**: each frame is seen once, in order, as a camera would give it. A
+thread decodes the video, one loop processes the frames, and the slow jobs run in
+worker threads. It writes the same files as the offline pipeline, under
+`outputs/realtime/<clip>/`, so `live_view.py --realtime` shows them and the
+evaluation reads them unchanged.
+
+**Startup.** With a fixed camera, the court and the empty court can be learnt
+before the match, during the warm-up for instance. `--calibrate` does it once per
+clip and saves `court.csv`, `court.png` and `background.png` in
+`outputs/realtime/<clip>/calibration/` (`--recalibrate` computes them again). The
+background is the median of 41 frames spread over the clip, at full resolution,
+and the analysis tracks from the first frame. Without calibration, the court is
+fitted on the first frames and the background learnt in the first 2 s, which go
+untracked. `--court` and `--background` take known ones.
+
+**Per frame.**
+
+1. **Players**: the offline tracker, frame by frame, against the background of
+   the moment ([`utils/background.py`](utils/background.py)): a ring of samples,
+   one per second, refreshed every 5 s in a worker thread, with the players
+   masked out so a server standing still does not become background.
+2. **Ball**: a detector reads crops of the frame, and a path search with a fixed
+   lag picks the ball among its candidates (below).
+3. **Bounces and shots**: the offline functions run every second on the last 10 s
+   in a worker thread. A bounce is committed once it is 1 s old, a shot once it is
+   4 s old.
+4. **Overlay** (`--display`, `--video-out`): boxes, ball trail, events, and the
+   time each stage takes.
+
+At the end `realtime/summary.json` and `timings.csv` give the frame rate, the time
+of every stage and the counters of the ball tracker.
+
+**The ball detector** ([`tracking/ball_online.py`](tracking/ball_online.py),
+[`tracking/ball_model.py`](tracking/ball_model.py)). YOLO11n reads 320 × 320 crops
+at full resolution, with three channels: grey, difference from the background at
+*t*, the same at *t − 1*. The difference shows the ball whatever the colour of the
+court; the grey image tells it from a racket.
+
+- While the ball is followed, a Kalman filter predicts it and **one crop** is read
+  there, up to the top of the picture. Above the court only a detection where the
+  ball is expected is accepted: the crowd and the boards are behind it there.
+- When it is lost, the crops cover the court (`--search tiles`, the GPU default)
+  or the moving blobs (`--search blobs`, every other frame, the CPU default).
+- A ball lost at the top is looked for where it left for 3 s, and the search keeps
+  to a corridor around there, moved on at its sideways speed: above the picture
+  nothing hits it, and a ball in flight never turns back sideways (a spectator in
+  the stands was taken for it otherwise).
+- **Colour fallback** (`--fallback models/ball_tracker.pt`, for a GPU). The
+  offline YOLOv8x reads one crop of the plain frame when the ball is expected
+  inside a player's box, where the difference shows the player too: about one
+  frame in twenty.
+- Short gaps by a player get a second look with a lower threshold (`--no-refill`
+  turns it off).
+
+**The path search** ([`tracking/ball_tracking.py`](tracking/ball_tracking.py),
+[`tracking/ball_reach.py`](tracking/ball_reach.py)) is the offline one with a
+fixed lag of 16 frames (0.5 s), and checks that the ball can do what the path says:
+
+- **Every jump is physically possible.** One camera does not see how high the
+  ball is, so each pixel is a set of points along the camera ray. A move is
+  allowed if it carries on the ball's motion, if it is at most 240 km/h (the
+  fastest serves) along the ground, or if a racket of a player the ball was on can
+  reach it at that speed: after a hit the ball may go anywhere it can reach.
+- **What moves with a player is part of them.** A candidate that keeps its place
+  in a player's box for 3 frames is a head, a hand or a wristband.
+- **Nothing standing still is the ball.** Away from the players, a candidate
+  with another within 6 px of it in 13 of the 15 frames before is dropped (at the
+  top of a vertical rise gravity keeps a ball within 6 px for 12 frames at most).
+  The spot is remembered for 10 s. This removed a TV camera's lens, a spectator
+  and a ball kid's head, each taken for the ball several times.
+- Still detections never start or keep a track (a ball kid holding a ball).
+
+**The detector's training** ([`notebooks/ball_motion_training_kaggle.ipynb`](notebooks/ball_motion_training_kaggle.ipynb)).
+[`training/build_ball_dataset.py`](training/build_ball_dataset.py) replays the
+clips with the online background and cuts the crops: positives from the reliable
+detections of the offline tracker and from hand labels where it misses
+(`python evaluation/annotate.py ball --frames-from <ball CSV>`), extra crops next
+to the players and above the court, and negatives where the ball is known to be
+elsewhere. `input1`, `input2` and `input11` are held out for testing.
+[`training/pack_kaggle_inputs.py`](training/pack_kaggle_inputs.py) zips the CSVs
+to upload next to the videos; [`training/export_ball_model.py`](training/export_ball_model.py)
+exports the weights to ONNX (and TensorRT on the GPU).
+[`evaluation/benchmark_ball.py`](evaluation/benchmark_ball.py) scores every track
+against the hand labels, and the detector alone on crops around the true ball.
+
+**Speed.**
+
+| | input2 (34 s) | input1 (7 s) |
+|---|---|---|
+| Kaggle T4, PyTorch FP16, tiles + colour fallback, overlay video | 20.9 fps | 25.2 fps |
+| Laptop CPU (i5-1135G7, on battery), onnxruntime, blobs | 18.2 fps | 26.4 fps |
+
+On the T4, players take 27 ms per frame and the ball 37 ms, side by side; on
+the CPU 44 and 39 ms. What costs most is the search over the court tiles while
+the ball is lost, and the colour fallback. The video runs at 30 fps, so the
+pipeline keeps up with about two thirds of it; with `--clock live` it drops the
+frames it has no time for, like a camera.
 
 ## Quick start
 
@@ -253,40 +402,53 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 pip install -r requirements.txt
 ```
 
-**Optional: ball tracking.** Ball detection runs a large YOLO model, best on a
-GPU. Download the trained weights from the
-[latest release](https://github.com/marcomassa-unitn/tennis_players_tracking/releases/latest).
-Then do one of the following:
+**Models.** They are not in the repository: download them from the
+[latest release](https://github.com/marcomassa-unitn/tennis_players_tracking/releases/latest)
+into `models/`.
 
-- run [`notebooks/ball_tracking_colab.ipynb`](notebooks/ball_tracking_colab.ipynb)
-  on a free Colab GPU, or [`notebooks/ball_tracking_kaggle.ipynb`](notebooks/ball_tracking_kaggle.ipynb)
-  on Kaggle, where a saved version keeps running with the computer off. Then put the
-  resulting `ball_candidates_<clip>.csv` in `outputs/<clip>/ball_coordinates/`;
-- or, with a GPU, put the weights in `models/ball_tracker.pt` and run
-  `pip install ultralytics`.
+| File | Used by |
+|---|---|
+| `ball_tracker.pt` | offline ball detection (YOLOv8x) and the real-time colour fallback |
+| `ball_motion.onnx` | real-time ball detector on a CPU (onnxruntime) |
+| `ball_motion.pt` | real-time ball detector on a NVIDIA GPU (PyTorch) |
 
-Run the whole pipeline on the demo clip. It's headless and writes everything to
-the clip's own folder, `outputs/input2/`:
+**Offline.** Run the whole pipeline on the demo clip. It's headless and writes
+everything to the clip's own folder, `outputs/input2/`:
 
 ```bash
+pip install ultralytics          # only to detect the ball here, best on a GPU
 python pipeline.py --video data/input2.mp4
+python live_view.py --video data/input2.mp4      # space: pause, n: next frame, q: quit
 ```
 
 It lists which steps already have results and asks which ones to redo; the rest
 is reused. Redoing a step also offers to redo the steps that read its results.
-Without a terminal, only the missing steps run. Every clip keeps its own results,
-so the viewers open any processed clip without running anything again.
+Without a terminal, only the missing steps run. Ball detection is heavy: without a
+GPU, run [`notebooks/ball_tracking_kaggle.ipynb`](notebooks/ball_tracking_kaggle.ipynb)
+on Kaggle and put the resulting `ball_candidates_<clip>.csv` in
+`outputs/<clip>/ball_coordinates/`. Without the model or the CSV, ball tracking
+and shot analysis are skipped cleanly and the other stages still run.
 
-Then watch the result:
+**Real time.**
 
 ```bash
-python live_view.py --video data/input2.mp4      # space: pause, n: next frame, q: quit
+pip install -r requirements-realtime.txt
+python realtime_pipeline.py --video data/input2.mp4 --calibrate                 # CPU, ONNX model
+python realtime_pipeline.py --video data/input2.mp4 --calibrate \
+    --model models/ball_motion.pt --fallback models/ball_tracker.pt              # NVIDIA GPU
+python realtime_pipeline.py --video data/input2.mp4 --calibrate --clock live --display   # like a camera
+python live_view.py --video data/input2.mp4 --realtime                          # watch the result
 ```
 
-If the weights are missing, ball tracking and shot analysis are skipped cleanly
-and the other stages still run. To use your own clip, put it in `data/` and
-change `--video`. Every intermediate file is named after the video, so no other
-paths need editing.
+On a GPU, install a CUDA build of PyTorch and `ultralytics` first (see
+[`requirements-realtime.txt`](requirements-realtime.txt)); the console line
+`ball model: ... [torch, GPU]` confirms it is used. `--model diff` runs with no
+model at all, on the background difference only. The runs of the tables above
+used [`notebooks/realtime_run_kaggle.ipynb`](notebooks/realtime_run_kaggle.ipynb).
+
+To use your own clip, put it in `data/` and change `--video`: every output is
+named after the video. If a player is left-handed, add a line to
+[`ground_truth/hands.csv`](ground_truth/hands.csv).
 
 <details>
 <summary><b>Running individual stages</b></summary>
@@ -305,25 +467,26 @@ python tracking/ball_tracking.py   --video data/input2.mp4 \
 python utils/court_overlay.py --video data/input2.mp4
 
 # 2. Analysis
-python analysis/player_analysis.py --video data/input2.mp4 [--no-animation]
-python analysis/shot_analysis.py   --video data/input2.mp4 --p1-hand right --p2-hand right
+python analysis/player_analysis.py  --video data/input2.mp4 [--no-animation]
+python analysis/bounce_detection.py --video data/input2.mp4
+python analysis/shot_analysis.py    --video data/input2.mp4    # hands from ground_truth/hands.csv
 
 # 3. Motion estimation
 python motion_estimation/optical_flow.py   --frames 200
 python motion_estimation/block_matching.py --method both
 
-# 4. Ground truth and evaluation
-python evaluation/annotate.py boxes --video data/input2.mp4 --step 30
-python evaluation/annotate.py court --video data/input2.mp4
-python evaluation/annotate.py ball  --video data/input2.mp4 --step 10   # click the ball, n = not visible
+# 4. Hand labels and evaluation
+python evaluation/annotate.py boxes  --video data/input2.mp4 --step 30
+python evaluation/annotate.py court  --video data/input2.mp4
+python evaluation/annotate.py ball   --video data/input2.mp4 --step 10   # click the ball, n = not visible
 python evaluation/annotate.py bounce --video data/input2.mp4   # a/d move, click + ENTER = bounce, h = hidden
-python evaluation/evaluate_tracking.py --gt <gt_boxes.csv> \
-    --pred outputs/input2/player_coordinates/players_input2.csv \
-    --court outputs/input2/court_coordinates/input2_court.csv \
-    --court-gt <gt_court.csv>
+python evaluation/annotate.py shots  --video data/input2.mp4   # label the shots of a run, one key per type
 python evaluation/evaluate_tracking.py --ball-gt ground_truth/ball_input2_gt.csv \
     --ball-pred outputs/input2/ball_coordinates/ball_input2.csv
-python evaluation/evaluate_tracking.py --video data/input2.mp4     --bounce-gt ground_truth/bounce_input2_gt.csv     --court outputs/input2/court_coordinates/input2_court.csv
+python evaluation/evaluate_tracking.py --video data/input2.mp4 --bounce-gt ground_truth/bounce_input2_gt.csv \
+    --bounce-pred outputs/input2/shot_analysis/bounces.csv --court outputs/input2/court_coordinates/input2_court.csv
+python evaluation/evaluate_shot_types.py                       # real-time shots vs the labels
+python evaluation/evaluate_shot_types.py --results outputs     # offline shots
 ```
 
 Useful `pipeline.py` flags:
@@ -335,245 +498,95 @@ Useful `pipeline.py` flags:
 - `--flow-frames N` caps the dense optical flow at N frames.
 - `--gt-csv` / `--court-gt-csv` enable the evaluation stage.
 
-Every script supports `--help`.
-
-The shot-type thresholds are exposed as CLI flags (`--far-peak-m`,
-`--drop-diefrac`, `--lob-pace`, …) and can be checked with the built-in
-self-tests:
+Every script supports `--help`. The shot analysis has built-in self-tests:
 
 ```bash
 python analysis/shot_analysis.py --self-test           # synthetic strokes
 python analysis/shot_analysis.py --overhead-self-test  # synthetic serve/smash
-python analysis/shot_analysis.py --type-self-test      # labelled demo rally (needs the ball CSV)
+python analysis/shot_analysis.py --type-self-test      # labelled demo rally (needs the offline outputs)
 ```
 
 </details>
 
-## Real time
-
-`realtime_pipeline.py` runs the whole analysis (court, players, ball, bounces,
-shots) in **one causal pass**: each frame is seen once, in order, as a camera
-would give it. It writes the same CSVs as the offline pipeline, under
-`outputs/realtime/<clip>/`, so `live_view.py --realtime` shows them and the
-evaluation reads them unchanged.
-
-```bash
-pip install -r requirements-realtime.txt
-python realtime_pipeline.py --video data/input2.mp4 --model models/ball_motion.onnx
-python realtime_pipeline.py --video data/input2.mp4 --calibrate     # tracks from frame 0
-python realtime_pipeline.py --video data/input2.mp4 --calibrate --fallback models/ball_tracker.pt   # GPU
-python realtime_pipeline.py --video data/input2.mp4 --clock live --display   # like a camera
-python realtime_pipeline.py --video data/input2.mp4 --model diff            # no model
-python live_view.py --video data/input2.mp4 --realtime                       # watch it
-```
-
-**Calibration.** With a fixed camera, the court and the empty court can be
-learnt before the match, during the warm-up for instance. `--calibrate` does it
-once per clip and saves the result in `outputs/realtime/<clip>/calibration/`
-(`court.csv`, `court.png`, `background.png`). The background is the median of
-41 frames spread over the clip, at full resolution. The analysis then tracks
-from the first frame, and the background keeps refreshing itself as below.
-Without calibration, the court is fitted on the first frames and the background
-learnt in the first 2 s, which go untracked.
-
-**What changes from offline.**
-
-- **Background from the past only.** It is the median of the first 2 s, then of
-  a ring of samples, one per second, refreshed every 5 s in a worker thread
-  (`utils/background.py`). The players are masked out of each sample, so a
-  server standing still does not become part of the background.
-- **A small ball detector that reads motion.** YOLO11n reads 320 × 320 crops at
-  full resolution, with three channels: grey, difference from the background at
-  *t*, the same at *t − 1* (`tracking/ball_online.py`). The difference shows the
-  ball whatever the colour of the court; the grey image tells it from a racket.
-  - While tracking, a Kalman filter predicts the ball and **one crop** is read.
-    The crop follows the ball up to the top of the picture. Above the court it
-    accepts only a detection where the ball is expected, since the crowd and the
-    boards are behind it there.
-  - When the ball is lost, the court tiles (GPU) or the moving blobs (CPU) are
-    read instead. A ball lost above the court went out at the top: for 3 s it is
-    also looked for where it left, and one detection there is enough to follow it
-    again.
-  - The colour fallback runs only when the ball is expected inside a player's
-    box, part of the silhouette that the background difference cannot separate.
-    It never runs while searching: yellow things by the players fooled it.
-    On input2 and input8 the ball is now followed above the court on about
-    60 frames each, up to the top of the picture. Against the hand labels of
-    input2, recall goes from 0.86 to 0.91 with no false detection, and on
-    input8 there are three times fewer crops per frame. The dataset builder now
-    also cuts crops above the court, so that the next training sees the ball
-    against the boards and the crowd.
-  - The path search of the offline tracker runs with a **fixed lag of 16 frames
-    (0.5 s)**: on the clips, 99.6 % of the positions match the offline path.
-- **Bounces and shots on a sliding window.** The unchanged offline functions run
-  every second on the last 10 s in a worker thread. An event is committed once
-  it is 1 s old, a shot once it is 4 s old. Fed the offline tracks, this finds
-  50 of the 51 events and all 25 shots of the demo rally, with the same strokes
-  and types.
-- **One loop.** Decoding has its own thread; ball and players of a frame run
-  side by side.
-
-**Speed-ups that keep the offline results identical.** These help the offline
-pipeline too:
-
-| Step | Before | After |
-|---|---|---|
-| Player tracking, input2 | 147 s | 86 s |
-| Bounce segmentation, 11 clips | 34 s | 5 s |
-
-**First results.** YOLO11n trained on Kaggle with pseudo-labels only, the
-second dataset (more contacts), best epoch 19.
-
-| Ball vs hand labels, recall / precision | input2 | input1 |
-|---|---|---|
-| Offline (YOLOv8x tiles, whole clip) | 0.93 / 1.00 | 0.95 / 0.95 |
-| Real time, calibrated, with the colour fallback | 0.92 / 0.96 | 0.91 / 0.95 |
-| Real time, calibrated | 0.87 / 0.96 | 0.91 / 0.97 |
-| Real time, 2 s warm-up | 0.83 / 0.97 | 0.65 / 0.97 |
-| Detector alone, crop around the true ball (recall) | 0.87 | 0.90 |
-
-These real-time rows use the tile search of the GPU mode. The CPU blob search
-loses a few points of recall: 0.80 and 0.77 after the warm-up.
-
-| Laptop CPU only, onnxruntime, mains power | input2 | input1 |
-|---|---|---|
-| Whole pipeline after the startup (video: 30 fps) | 28.9 fps | 32.3 fps |
-| Players / ball, per frame (side by side) | 28 / 25 ms | 24 / 24 ms |
-
-On battery the same laptop is about 3 times slower.
-
-| Kaggle T4 (4 vCPU), steady fps | input2 | input11 | input1 |
-|---|---|---|---|
-| Ball model on TensorRT FP16 | 27.9 | 24.8 | 34.0 |
-| Ball model on PyTorch FP16 | 25.5 | 20.9 | 31.6 |
-| PyTorch, with the colour fallback | 24.4 | 17.9 | 28.7 |
-
-The frames take 23–27 ms at the median, players and ball side by side. What
-still costs is the search over 21 court tiles while the ball is lost.
-onnxruntime-gpu did not match the CUDA of the Kaggle image and ran on the CPU
-(7–18 fps).
-
-Most missed balls are next to a player: around a contact, or by the far player.
-Next to a player the difference shows the player too, while the ball in flight
-is found on 76 of 78 labelled frames. Two answers:
-
-- **More contacts in the dataset.** The first dataset had few positives there
-  and many negatives around the rackets. The builder now cuts three crops for
-  each frame with the ball close to a player.
-- **A colour fallback** (`--fallback models/ball_tracker.pt`). The offline
-  YOLOv8x runs on one 320 px crop of the plain frame, only when the ball is
-  expected by a player and the motion model found nothing there: about one frame
-  in four or five.
-  - Its detections always go to the path search.
-  - They move the crop only when they move and lie where the Kalman filter
-    expects the ball. A first version that let them steer freely followed
-    yellow things by the players and lost the ball in flight: recall 0.78.
-  - On input2 recall goes from 0.87 to 0.92, against 0.93 offline. By
-    the players it finds 43 of 51 balls instead of 39, and still 49 of 49 in
-    flight.
-  - YOLOv8x takes 0.4 s per crop on the laptop CPU, so the fallback is meant
-    for a GPU.
-
-**Training the detector** (`notebooks/ball_motion_training_kaggle.ipynb`). The
-dataset comes from the clips: `training/build_ball_dataset.py` replays them with
-the online background.
-- Positives come from the reliable detections of the current tracker, and from
-  hand labels where it misses the ball:
-  `python evaluation/annotate.py ball --frames-from <ball CSV>`.
-- Negatives come from frames where the ball is known to be elsewhere.
-- input2, input1 and input11 are held out for testing.
-- `training/pack_kaggle_inputs.py` zips the CSVs to upload next to the videos.
-
-`evaluation/benchmark_ball.py` scores every track against the ground truth, and
-the detector alone on crops around the true ball.
-
-**Limits.**
-
-- **Startup.** Without `--calibrate`, fitting the court takes 5–9 s on a CPU and
-  the background needs another 2 s.
-- **Events arrive late.** Bounces are known 1 s after they happen, shots 4 s
-  after.
-- **The labels come from the current tracker.** The model first learns what that
-  tracker already finds, so the hand labels on the green courts are what can
-  make it better.
-
 ## Project structure
 
 ```
-├── pipeline.py              # one-command runner for all stages
-├── realtime_pipeline.py     # the same analysis in one causal pass, at video speed
+├── pipeline.py              # offline: one-command runner for all stages
+├── realtime_pipeline.py     # real time: the same analysis in one causal pass
 ├── live_view.py             # replay with overlays, minimap and live stats
 ├── display_player_tracking.py  # player tracker's stages side by side, for inspection
-├── tracking/                # court keypoints, player tracker, YOLO ball tracker, motion ball detector
-├── realtime/                # frame source, per-frame stages, overlay and timings of the live pipeline
+├── tracking/                # court, players, offline YOLO ball tracker, motion ball detector,
+│                            # online ball tracker, physical checks of the ball's jumps
+├── realtime/                # frame source, calibration, the per-frame loop, overlay, timings
+├── analysis/                # player statistics, bounces, shots (offline and on a sliding window)
 ├── training/                # dataset, training and export of the motion ball detector
-├── analysis/                # player statistics and shot detection/classification
 ├── motion_estimation/       # Farnebäck / Lucas–Kanade, block matching from scratch
-├── evaluation/              # annotation tool and tracking metrics
-├── ground_truth/            # hand-made annotations used by the evaluation
-├── utils/                   # court geometry (ITF), pixel→metre homography, paths, video helpers
+├── evaluation/              # annotation tool, tracking metrics, shot types vs labels, ball benchmark
+├── ground_truth/            # hand labels: ball, bounces, shots; hands.csv (left-handed players)
+├── utils/                   # court geometry (ITF), homography, online background, paths, video
 ├── tests/                   # pytest suite (run in CI)
-├── notebooks/               # Colab / Kaggle notebooks: ball detection, motion detector training
+├── notebooks/               # Kaggle GPU notebooks: ball detection, offline and real-time runs, training
 ├── data/                    # demo clip
-├── models/                  # put ball_tracker.pt (and ball_motion.onnx) here
-└── outputs/<clip>/          # all the results of a clip, one folder per kind (not in git)
+├── models/                  # the weights from the release (not in git)
+└── outputs/<clip>/          # offline results of a clip; outputs/realtime/<clip>/ real-time ones (not in git)
 ```
 
 ## Development
 
 ```bash
 pip install -r requirements-dev.txt
-pytest          # unit tests: homography, block matching, IoU, shot self-tests, …
+pytest          # unit tests: homography, block matching, IoU, ball tracking, shots, …
 ruff check .    # lint
 ```
 
 ## Limitations
 
-- **Static camera assumed.** Replays and camera cuts must be trimmed beforehand.
+- **Fixed camera assumed.** Small tilts and pans are compensated, but replays and
+  camera cuts must be trimmed beforehand, and the court is fitted once.
+- **Real time is not yet at video rate.** About 21 fps on a T4 for 30 fps video:
+  the court-tile search while the ball is lost and the colour fallback cost the
+  most. Bounces are known 1 s after they happen, shots 4 s after.
 - **Players stay in their half.** Identities come from the court half, which
   holds in singles play; a player crossing the net (rare) would swap IDs.
 - **Player positions are noisy.** They come from the bottom edge of the box, which
   moves with shadows, raised feet and jumps. At the far end one pixel spans about 8 cm of
   court, so the far player's dot jumps on the minimap, and distances, summed frame by
   frame, come out too long.
-- **Ball speeds are approximate.** The homography models the ground plane, while
-  the ball is airborne at contact. The metre-based shot thresholds may need
-  retuning for a different camera; the scale-free ones do not.
-- **The ball detector depends on the court.** On hard courts in blue or purple it
-  offers the moving ball on 80–90 % of the frames; on a green indoor court only 50–60 %.
-  The motion candidates bring the ball to about two thirds of the frames there, against
-  80–95 % elsewhere, with a few false detections: fewer bounces and flights are measured,
-  and more shots rely on the older rules. The motion candidates assume a fixed camera.
+- **Heights and speeds come from one camera.** The homography models the ground;
+  the ball's height is estimated from the path below it, and the metre-based
+  thresholds may need retuning for a different camera.
+- **The ball is harder to see on some courts.** It is found on 88–98 % of the
+  frames of the first nine clips, mostly used for training, and on 58–85 % of the
+  newer ones (clay, grass, green courts, other cameras): there fewer flights and
+  bounces are measured, and more shots rely on the trajectory shape alone.
 - **Shots need the ball.** When the ball is lost around a contact, the shot is placed
   where it comes back, sometimes 20 frames late, and its type suffers. A shot with no
   trace of the ball is missed, and a reversal near a player can pass for a shot.
-- **Thresholds are tuned on one camera setup.** The shot-type defaults were fit
-  on the demo rally.
-- **Serves need the server in view.** A serve hit during a fade-in, or before
-  the server's box is tracked, is not detected. A clip starting during a rally with a
-  player standing on the baseline can open with a false serve. Smashes have only been
-  checked on one real example.
+- **Serves and smashes need the striker in view.** A serve hit during a fade-in, or
+  before the server's box is tracked, is not detected. A clip starting during a rally
+  with a player standing on the baseline can open with a false serve.
 - **Some bounces cannot be seen.** When the ball passes behind a player around
-  the landing, or the track has a gap there, no bounce is reported: that is the
-  bounce missed on the demo rally. The median landing error is 0.12–0.23 m but
-  reaches about 1 m at the far end, so this is no line-calling tool.
-- **Shot types are labelled on one rally only.** On the other clips they are
-  not checked against labels. Shots with no bounce found use the older rules on
-  the trajectory shape, which were tuned on the demo rally and are less reliable.
-  A slow topspin ball can also fly above 2 m and be called a lob. Volleys were
-  only checked by eye, and a false shot can pass as one.
+  the landing, or the track has a gap there, no bounce is reported. The landing
+  error reaches about 1 m at the far end, so this is no line-calling tool.
+- **Shot labels cover four clips.** The flight thresholds were chosen on them; slices
+  and flat shots are the most confused types, and volleys and smashes the least
+  checked.
+- **Handedness is not detected.** Left-handed players must be listed in
+  `ground_truth/hands.csv`.
 
 ## Future work
 
-- **More hand labels for the motion detector.** Its first labels are the
-  current tracker's own detections, so it starts from what that tracker already
-  finds; the frames it misses (green courts, fast flights) need labels by hand,
-  which `annotate.py ball --frames-from` offers one after the other. A temporal
-  model on several consecutive frames, as TrackNet does, is the next step.
+- **More hand labels for the motion detector.** Its labels are mostly the offline
+  tracker's own detections, so it starts from what that tracker already finds; the
+  frames it misses (green courts, fast flights) need labels by hand, which
+  `annotate.py ball --frames-from` offers one after the other. A temporal model on
+  several consecutive frames, as TrackNet does, is the next step.
+- **Faster search for a lost ball.** Fewer tiles, chosen from where the ball can
+  be, would bring the real-time pipeline to video rate on a mid-range GPU.
 - **Smooth the player positions.** A median and a low-order filter over the clip remove
   almost all the impossible jumps with no delay, and would correct distances and speeds.
-- **Detect the shots from the events alone.** Contacts still start from the reversals
-  of the ball; with a more complete track the junctions of the flight could replace them.
+- **Tell a hit from a bounce at the player.** A contact can still be taken for a
+  bounce when the order of the rally expects one.
 
 ## Authors
 

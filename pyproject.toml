@@ -1,7 +1,7 @@
 [project]
 name = "tennis-players-tracking"
-version = "1.0.0"
-description = "Single-camera tennis match analysis: court geometry, player and ball tracking, movement statistics and shot classification."
+version = "2.0.0"
+description = "Single-camera tennis match analysis, offline or in real time: court geometry, player and ball tracking, movement statistics, bounces and shot classification."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

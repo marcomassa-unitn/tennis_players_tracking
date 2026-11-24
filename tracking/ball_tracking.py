@@ -38,7 +38,7 @@ motion gate, highest confidence, straight-line fills), kept to compare with it.
 
 Usage (from project root):
     python tracking/ball_tracking.py --video data/input2.mp4             # both stages
-    python tracking/ball_tracking.py --video data/input2.mp4 --detect-only   # stage 1 (Colab)
+    python tracking/ball_tracking.py --video data/input2.mp4 --detect-only   # stage 1 (GPU, or the Kaggle notebook)
     python tracking/ball_tracking.py --video data/input2.mp4 \\
         --candidates outputs/input2/ball_coordinates/ball_candidates_input2.csv    # stage 2 only
 """

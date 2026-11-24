@@ -317,7 +317,7 @@ def step_ball(p, args, produced):
     from tracking import ball_tracking
 
     # Stage 1 (YOLO detection) is the expensive part and usually runs on a GPU
-    # (notebooks/ball_tracking_colab.ipynb). Its candidates CSV is reused; stage 2
+    # (notebooks/ball_tracking_kaggle.ipynb). Its candidates CSV is reused; stage 2
     # (tracking) is cheap and always re-run, so tracker changes take effect.
     cands = p["ball_candidates_csv"]
     if not os.path.exists(cands):
@@ -327,7 +327,7 @@ def step_ball(p, args, produced):
             return
         if not os.path.exists(args.model):
             print(f"Skipped: no candidates CSV ({cands}) and no model weights at "
-                  f"{args.model}. Run notebooks/ball_tracking_colab.ipynb and put the "
+                  f"{args.model}. Run notebooks/ball_tracking_kaggle.ipynb and put the "
                   "candidates CSV there, or place the weights (--model).")
             return
         try:

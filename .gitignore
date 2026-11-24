@@ -40,7 +40,8 @@ runs/
 results/
 *.log
 
-# Model weights (download ball_tracker.pt from the GitHub Release into models/)
+# Model weights: download ball_tracker.pt, ball_motion.pt and ball_motion.onnx from the
+# latest GitHub Release into models/
 models/*
 !models/.gitkeep
 *.pt
