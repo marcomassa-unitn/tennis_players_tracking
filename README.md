@@ -17,7 +17,7 @@ ball is the one exception: it is small and fast, so it uses a YOLO detector, and
 in real time a small one that reads the motion.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Live viewer: tracked players and ball, synced top-down minimap and live shot tally" width="900">
+  <img src="assets/demo.gif" alt="Live viewer: tracked players and ball, the ball's path over the court with numbered bounces, top-down minimap with the shots, live shot tally" width="100%">
 </p>
 
 ## What's new in v2
