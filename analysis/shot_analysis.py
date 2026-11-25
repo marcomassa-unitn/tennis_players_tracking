@@ -1079,7 +1079,8 @@ def stroke_from_impact(impact_x, feet_x, side, hand, params=None):
 # and it is slow: its mean speed over the ground (impact to bounce) is low,
 # however short the flight (a dropshot played from near the net lands soon). A
 # ball that short and fast hit the net, or is a wrong bounce. Of the other balls a
-# lob is slow and flies high, a slice is slow and floats low; the rest are drives.
+# slow one is never a drive: a lob if it flies high, else a slice; the fast ones
+# are drives.
 # A volley is told by what came before: the ball never touched the ground. A
 # dropshot or a lob stays one even when played in the air.
 #
@@ -1098,10 +1099,9 @@ FLIGHT_PARAMS = {
     "drop_max_speed_ms": 20.0,  # ...at this mean ground speed at most (impact to bounce):
                              # dropshots fly at 4-18 m/s, balls into the net and serves
                              # landing there at 23-67 m/s
-    "lob_apex_m": 2.5,       # a lob flies above this (drives reach 3 m, but fast)...
-    "lob_max_speed_ms": 15.0,  # ...at this mean ground speed at most (lobs 8-13 m/s)
-    "slice_max_speed_ms": 21.0,  # a slice is this slow at most (16.8-20.9 m/s)...
-    "slice_apex_m": 1.5,     # ...and flies lower than this (the net is 0.91 m)
+    "slow_max_speed_ms": 21.0,  # a ball this slow at most is never a flat drive:
+                             # a slice, or a lob if it flies high...
+    "lob_apex_m": 2.5,       # ...a lob flies at/above this, a slice lower
     "late_bounce_s": 0.1,    # a bounce may follow the next contact by this much
     "volley_net_m": 9.0,     # a volley is played at most this far from the net, about
                              # halfway between the service line and the baseline
@@ -1245,10 +1245,8 @@ def classify_flight(flight, params=None, serve=False):
     if (not serve and flight["depth_m"] <= p["drop_depth_m"]
             and flight["speed_ms"] <= p["drop_max_speed_ms"]):
         return "dropshot"
-    if flight["apex_m"] >= p["lob_apex_m"] and flight["speed_ms"] <= p["lob_max_speed_ms"]:
-        return "lob"
-    if flight["speed_ms"] <= p["slice_max_speed_ms"] and flight["apex_m"] < p["slice_apex_m"]:
-        return "slice"
+    if flight["speed_ms"] <= p["slow_max_speed_ms"]:
+        return "lob" if flight["apex_m"] >= p["lob_apex_m"] else "slice"
     return "flat"
 
 

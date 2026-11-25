@@ -72,9 +72,13 @@ def test_flight_gives_the_shot_type():
     assert classify_flight(flight(0.6, 2.0, 1.0, 6.0)) == "dropshot"   # from near the net: brief, slow
     assert classify_flight(flight(0.4, 1.0, 1.0, 12.0)) == "flat"      # into the net: fast
     assert classify_flight(flight(1.3, 4.8, 1.3, 15.0)) == "slice"     # not short enough
-    assert classify_flight(flight(0.9, 3.0, 2.0, 15.0), serve=True) == "flat"
+    assert classify_flight(flight(0.9, 3.0, 2.0, 15.0), serve=True) == "slice"  # never a dropshot
     assert classify_flight(flight(1.4, 10.0, 3.5)) == "lob"
     assert classify_flight(flight(1.3, 9.0, 1.3)) == "slice"
+    # A slow ball (<= 21 m/s) is never flat: a lob from 2.5 m up, a slice below.
+    assert classify_flight(flight(1.0, 9.0, 2.0)) == "slice"       # 20 m/s, 2.0 m high
+    assert classify_flight(flight(1.0, 9.0, 2.6)) == "lob"         # 20 m/s, 2.6 m high
+    assert classify_flight(flight(0.6, 9.0, 2.6)) == "flat"        # 33 m/s: a drive, however high
 
 
 def test_a_ball_taken_in_the_air_is_a_lob_only_if_slow_high_and_rising():

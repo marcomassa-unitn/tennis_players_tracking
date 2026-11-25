@@ -682,6 +682,24 @@ PAUSE_KEYS = (ord(" "), ord("p"))
 STEP_KEY = ord("n")
 
 
+def _draw_frame_number(img: np.ndarray, idx: int) -> None:
+    """Frame number in the bottom-left corner of the video, on a dark box (in place).
+
+    Bottom, not top: the PAUSED banner covers the top of the window.
+    """
+    h = img.shape[0]
+    scale = max(0.5, h / 1100)
+    thick = max(1, int(round(scale * 2)))
+    text = f"frame {idx}"
+    (tw, th), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+    pad = int(round(6 * scale))
+    x0, y1 = pad, h - pad
+    cv2.rectangle(img, (x0, y1 - th - base - 2 * pad), (x0 + tw + 2 * pad, y1),
+                  (0, 0, 0), -1)
+    cv2.putText(img, text, (x0 + pad, y1 - base - pad), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, (255, 255, 255), thick, cv2.LINE_AA)
+
+
 def _wait_while_paused(win_name: str, shown: np.ndarray) -> str:
     """Hold the current frame until a key: "resume", "step" (one frame) or "quit"."""
     img = shown.copy()
@@ -1093,6 +1111,9 @@ def run(video, players_csv, court_csv, ball_csv, min_area, anchor,
                                   player_overlays, ball_overlay, ball_panel(idx), ball_w)
             # Downscale the high-res canvas to the window size ONCE here.
             shown_img = _fit_to_screen(last_canvas, window_width)
+            if shown_img is last_canvas:            # keep the end-of-clip canvas clean
+                shown_img = shown_img.copy()
+            _draw_frame_number(shown_img, idx)
             cv2.imshow(win, shown_img)
             if not window_placed:
                 _place_window(win, window_width, win_h)

@@ -269,9 +269,9 @@ the other over the whole clip; the real-time one runs them frame by frame (see
      from the impact to the landing point slowing down as the ball does
      (exp(−t)), which keeps the heights the same at both ends of the court.
      A shot is a **dropshot** if it lands within 4.5 m of the net at a mean ground
-     speed of 20 m/s at most, a **lob** if it flies above 2.5 m at 15 m/s at most,
-     a **slice** if it flies at 21 m/s at most and below 1.5 m, otherwise
-     **flat**.
+     speed of 20 m/s at most. Otherwise a ball at 21 m/s at most is never flat:
+     a **lob** if it flies at 2.5 m or higher, else a **slice**. The faster ones
+     are **flat**.
    - **Taken in the air** (no bounce before the reply): a lob if the flight lasts
      over 1.05 s, rises by 1 m and goes above 3 m. A **volley** is a shot played
      from inside the court with no bounce since the opponent's shot, the ball
@@ -576,17 +576,27 @@ ruff check .    # lint
 
 ## Future work
 
-- **More hand labels for the motion detector.** Its labels are mostly the offline
-  tracker's own detections, so it starts from what that tracker already finds; the
-  frames it misses (green courts, fast flights) need labels by hand, which
-  `annotate.py ball --frames-from` offers one after the other. A temporal model on
-  several consecutive frames, as TrackNet does, is the next step.
+- **Better bounce detection: the weakest part today.** A bounce is the corner
+  between two parabolas of the ball's path in the image, so it is missed when the
+  ball passes behind a player or the track has a gap around the landing, a bounce
+  and a hit near a player are confused, and the end of a point (ball into the net, picked
+  up, bounced before the next serve) produces bounces that never happened. Since
+  the shot types read the flight up to the bounce, every missed or wrong bounce
+  also costs a shot type. Next steps: more bounce labels (only `input2` and
+  `input3` have them), a learned classifier on a short window of the ball's
+  positions and speeds instead of the hand-set corner rules, and a check against
+  the order of the rally (one bounce on the receiver's side between two shots).
+- **Better ball tracking.** The ball is found on 88–98 % of the frames of the first
+  clips but only on 58–85 % of the newer ones (clay, grass, green courts, other
+  cameras), and every gap weakens bounces and shots. The motion detector's labels
+  are mostly the offline tracker's own detections, so it starts from what that
+  tracker already finds; the frames it misses (green courts, fast flights) need
+  labels by hand, which `annotate.py ball --frames-from` offers one after the other.
+  A temporal model on several consecutive frames, as TrackNet does, is the next step.
 - **Faster search for a lost ball.** Fewer tiles, chosen from where the ball can
   be, would bring the real-time pipeline to video rate on a mid-range GPU.
 - **Smooth the player positions.** A median and a low-order filter over the clip remove
   almost all the impossible jumps with no delay, and would correct distances and speeds.
-- **Tell a hit from a bounce at the player.** A contact can still be taken for a
-  bounce when the order of the rally expects one.
 
 ## Authors
 
