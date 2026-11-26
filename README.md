@@ -34,7 +34,7 @@ in real time a small one that reads the motion.
   stands are all refused.
 - **Shot types from the physics of the flight**, with heights corrected for drag,
   and lobs recognised even when they fly out of the picture. Checked against **79
-  hand-labelled shots on 4 clips: 67 right (85 %)**.
+  hand-labelled shots on 4 clips: 65 right (82 %)**.
 - **22 test clips** from hard, clay and grass courts, hand labels for the ball,
   the bounces and the shots, and a per-clip list of left-handed players.
 
@@ -124,13 +124,14 @@ finds a shot of the same player within 6 frames.
 
 | | Shots found | Type right |
 |---|---|---|
-| Real time | 79 | **67 (85 %)** |
-| Offline | 70 | 54 (77 %) |
+| Real time | 79 | **65 (82 %)** |
+| Offline | 70 | 53 (76 %) |
 
 The flight thresholds were chosen on the real-time tracks of the same four
 clips, so the real-time figure shows how well the rules fit these labels, not an
-accuracy on unseen footage. Of the 12 errors, 5 are slices called flat and the
-reverse, 4 are volleys and smashes not recognised, 2 are reversals of the ball
+accuracy on unseen footage. Of the 14 errors, 6 are flat shots and slices
+confused (5 slow flat shots called slices), 2 are flat shots called a lob and a
+dropshot, 4 are volleys and smashes not recognised, 2 are reversals of the ball
 near a player taken for shots.
 
 | Combined position heatmap | Court-zone occupancy | Shot hitmap |
